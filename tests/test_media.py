@@ -294,9 +294,13 @@ def test_other_picture_slots_are_preserved(make_audio, roots, backup_dir, extens
         picture.type, picture.mime, picture.data = 4, "image/png", back
         audio.add_picture(picture)
     audio.save()
+    assert not media.inspect_audio(path, roots)["has_art"]
+    assert media.read_art(path, roots) is None
     media.apply_changes(path, {}, None, media.sha256_file(path), backup_dir, roots, cover=cover_bytes())
     pictures = MP3(path).tags.getall("APIC") if extension == "mp3" else FLAC(path).pictures
     assert [image.data for image in pictures if image.type == 4] == [back]
+    assert media.inspect_audio(path, roots)["has_art"]
+    assert media.read_art(path, roots) == (cover_bytes(), "image/png")
 
 
 @LINUX
@@ -463,3 +467,40 @@ def test_insufficient_space_never_creates_staging(make_audio, roots, backup_dir,
     assert path.read_bytes() == before
     assert not (path.parent / ".phonoteka-staging").exists()
     assert not backup_dir.exists()
+
+
+@TOOLS
+@pytest.mark.parametrize("raw", [
+    "[ar:Owner supplied]\n[00:00.100]First\n[00:02.000]Second",
+    "\ufeff[offset:500]\n[ar:Owner supplied]\n[00:00.600]First\n[00:02.500]Second",
+])
+def test_flac_lyrics_headers_are_detected_without_rewriting(make_audio, roots, raw):
+    path = make_audio("flac")
+    audio = FLAC(path)
+    audio["lyrics"] = [raw]
+    audio.save()
+    before = path.read_bytes()
+    metadata = media.inspect_audio(path, roots)
+    assert metadata["lrc"] == raw
+    assert metadata["lyrics"] is None
+    assert metadata["lyrics_warning"] is None
+    assert path.read_bytes() == before
+
+
+@TOOLS
+@pytest.mark.parametrize("raw,warning", [
+    ("[offset:500]\n[00:00.100]Negative after offset", "invalid_lyrics"),
+    ("[ar:Artist]\n[00:20.000]Past end", "lyrics_out_of_range"),
+    ("[00:00.100]Timed\nUntimed", "partial_lyrics"),
+])
+def test_invalid_flac_lyrics_are_not_reported_as_synced(make_audio, roots, raw, warning):
+    path = make_audio("flac")
+    audio = FLAC(path)
+    audio["lyrics"] = [raw]
+    audio.save()
+    before = path.read_bytes()
+    metadata = media.inspect_audio(path, roots)
+    assert metadata["lrc"] is None
+    assert metadata["lyrics"] == raw
+    assert metadata["lyrics_warning"] == warning
+    assert path.read_bytes() == before

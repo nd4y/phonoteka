@@ -333,6 +333,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
             raise MediaError("unsupported_format", "No supported audio parser found")
         tags: dict[str, Any] = {}
         lyrics = lrc = None
+        lyrics_warning = None
         has_art = False
         write_supported = False
         reason = "format_not_validated"
@@ -348,7 +349,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                         tags[field] = [str(value) for value in frames[0].text]
                 if "UFID:http://musicbrainz.org" in existing:
                     tags["musicbrainz_trackid"] = [existing["UFID:http://musicbrainz.org"].data.decode("ascii", errors="replace")]
-                has_art = bool(existing.getall("APIC"))
+                has_art = any(frame.type == 3 for frame in existing.getall("APIC"))
                 normal, timed = existing.getall("USLT"), existing.getall("SYLT")
                 lyrics = normal[0].text if normal else None
                 millis = [frame for frame in timed if frame.format == 2 and frame.type == 1]
@@ -359,12 +360,22 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
             reason = None if write_supported else "id3v23_requires_preservation_profile"
         elif isinstance(audio, FLAC):
             tags = {key: list(audio.get(key, [])) for key in (*_TEXT_FRAMES, *_MB_FIELDS) if audio.get(key)}
-            has_art = bool(audio.pictures)
+            has_art = any(picture.type == 3 for picture in audio.pictures)
             raw = audio.get("lyrics", [None])[0]
-            if raw and _LRC_TIME.match(raw.lstrip("\ufeff")):
-                lrc = raw
-            else:
-                lyrics = raw
+            lyrics = raw
+            if raw and _LRC_TIME.search(raw):
+                try:
+                    document = parse_lrc(raw)
+                    if not document["complete"]:
+                        lyrics_warning = "partial_lyrics"
+                    elif any(line["start_ms"] > int(audio.info.length * 1000) + 1000 for line in document["lines"]):
+                        lyrics_warning = "lyrics_out_of_range"
+                    else:
+                        # Classification only: preserve the original metadata and
+                        # offset declaration without rewriting bytes on inspection.
+                        lrc, lyrics = raw, None
+                except MediaError as exc:
+                    lyrics_warning = exc.code
             write_supported, reason = True, None
         else:
             stream.seek(0)
@@ -373,7 +384,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                 tags = {key: list(value) for key, value in easy.tags.items() if key in _TEXT_FRAMES}
         return {"sha256": digest, "size": info.st_size, "mtime_ns": info.st_mtime_ns,
                 "format": path.suffix.lower().lstrip("."), "duration": float(audio.info.length),
-                "tags": tags, "has_art": has_art, "lyrics": lyrics, "lrc": lrc,
+                "tags": tags, "has_art": has_art, "lyrics": lyrics, "lrc": lrc, "lyrics_warning": lyrics_warning,
                 "write_supported": write_supported, "write_block_reason": reason,
                 "audio_identity": None, "poweramp_verified": False}
 
