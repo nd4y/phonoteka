@@ -444,8 +444,15 @@ class Worker:
                 self.stopping = True
                 heartbeat_task.cancel()
                 self.state = "stopped"
-                self.heartbeat()
+                # This must precede every fallible database/logging operation.
+                # Cancelled asyncio futures can still have live executor writes;
+                # drain synchronously while both scheduler/storage guards remain
+                # held, with no await/cancellation point before completion.
                 self.pool.shutdown(wait=True, cancel_futures=True)
+                try:
+                    self.heartbeat()
+                except Exception:
+                    LOG.warning("Could not persist the final worker heartbeat", exc_info=True)
 
 
 def main():

@@ -274,3 +274,54 @@ def test_mutation_scheduler_failure_drains_inflight_write_before_exit(client, se
     assert other_finished.is_set(), "Executor writes must finish before worker releases its storage guard"
     assert db.fetchone(settings.db_path, "SELECT state FROM jobs WHERE id=?", (running_id,))["state"] == "interrupted"
     assert db.fetchone(settings.db_path, "SELECT state FROM jobs WHERE id=?", (next_id,))["state"] == "queued"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Storage guard requires Linux")
+def test_final_heartbeat_failure_cannot_release_guards_before_executor_drains(settings, monkeypatch):
+    settings = replace(settings, read_only=False, storage_verified=True)
+    worker = Worker(settings)
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    future = None
+    checked_shutdown = []
+    original_shutdown = worker.pool.shutdown
+    original_heartbeat = worker.heartbeat
+
+    def active_io():
+        started.set()
+        assert release.wait(3)
+        finished.set()
+
+    def claim_without_job():
+        nonlocal future
+        future = worker.pool.submit(active_io)
+        assert started.wait(2)
+        return None
+
+    def fail_final_heartbeat():
+        if worker.state == "stopped":
+            raise OSError("simulated database failure in final heartbeat")
+        original_heartbeat()
+
+    def verify_guarded_shutdown(*args, **kwargs):
+        assert future is not None and not future.done()
+        with pytest.raises(RuntimeError):
+            with scheduler_guard(settings.state_dir):
+                pass
+        with pytest.raises(media.MediaError, match="Another worker owns"):
+            with media.writer_guard(settings.storage_guard_dir, "competing-writer"):
+                pass
+        checked_shutdown.append(True)
+        release.set()
+        original_shutdown(*args, **kwargs)
+        assert finished.is_set()
+
+    monkeypatch.setattr(worker, "claim_job", claim_without_job)
+    monkeypatch.setattr(worker, "heartbeat", fail_final_heartbeat)
+    monkeypatch.setattr(worker.pool, "shutdown", verify_guarded_shutdown)
+    try:
+        asyncio.run(worker.run(once=True))
+        assert checked_shutdown == [True]
+        assert finished.is_set()
+    finally:
+        release.set()
+        original_shutdown(wait=True, cancel_futures=True)
