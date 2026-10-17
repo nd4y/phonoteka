@@ -102,6 +102,20 @@ def test_password_reset_revokes_session_and_epoch(client, settings):
     assert "replacement" not in settings.db_path.read_bytes().decode("latin1")
 
 
+def test_password_verification_has_bounded_memory_concurrency(client, settings):
+    assert security.VERIFY_SLOTS.acquire(blocking=False)
+    assert security.VERIFY_SLOTS.acquire(blocking=False)
+    try:
+        response = client.post("/api/auth/login", json={"username": "owner", "password": "test-strong-owner-password-123"}, headers={"Origin": settings.app_url})
+        assert response.status_code == 429
+        assert response.json()["code"] == "login_busy"
+        assert response.headers["Retry-After"] == "2"
+    finally:
+        security.VERIFY_SLOTS.release()
+        security.VERIFY_SLOTS.release()
+    authenticated(client, settings)
+
+
 def test_durable_rate_limit_and_no_password_validation_echo(client, settings):
     payload = {"username": "owner", "password": "wrong-password-12345"}
     for _ in range(8):

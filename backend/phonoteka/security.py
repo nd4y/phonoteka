@@ -3,6 +3,7 @@
 import hashlib
 import secrets
 import time
+import threading
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
 from fastapi import HTTPException, Request
@@ -11,6 +12,7 @@ from . import db
 from .config import Settings
 
 HASHER = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=2)
+VERIFY_SLOTS = threading.BoundedSemaphore(2)
 
 
 def error(status: int, code: str, message: str, **extra):
@@ -94,10 +96,14 @@ def login(request: Request, settings: Settings, username: str, password: str):
         conn.execute("INSERT INTO login_attempts(client,at) VALUES(?,?)", (client,now))
     hashed = db.setting(settings.db_path, "owner_password_hash", "")
     good_password = False
+    if not VERIFY_SLOTS.acquire(blocking=False):
+        raise error(429, "login_busy", "Проверка входа занята. Повторите через несколько секунд", retry_after=2)
     try:
         good_password = HASHER.verify(hashed, password)
     except (VerifyMismatchError, VerificationError):
         pass
+    finally:
+        VERIFY_SLOTS.release()
     if not good_password or not secrets.compare_digest(username.encode(), settings.owner_username.encode()):
         raise error(401, "invalid_credentials", "Неверный логин или пароль")
     token, csrf = secrets.token_urlsafe(48), secrets.token_urlsafe(32)
