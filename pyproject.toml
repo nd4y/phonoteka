@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phonoteka"
+version = "0.1.0a1"
+description = "Single-owner music library workbench"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.135.1",
+  "uvicorn==0.42.0",
+  "argon2-cffi==25.1.0",
+  "mutagen==1.47.0",
+  "Pillow==12.3.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.0.3", "httpx==0.28.1"]
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["backend"]

@@ -1,0 +1,96 @@
+name: phonoteka
+x-common: &common
+  image: ${PHONOTEKA_IMAGE:?Set a tested immutable image digest}
+  user: "${PUID:-10001}:${PGID:-10001}"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+  stop_grace_period: 60s
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+x-env: &env
+  APP_URL: ${APP_URL:?Set the HTTPS URL}
+  STATE_DIR: /state
+  WORK_ROOT: /work
+  SOURCE_ROOT: /original
+  PUBLICATION_ROOT: /publication
+  STORAGE_GUARD_DIR: /storage-guard
+  OWNER_USERNAME: ${OWNER_USERNAME:-owner}
+  OWNER_PASSWORD_FILE: /run/secrets/owner_password
+  READ_ONLY: ${READ_ONLY:-true}
+  STORAGE_VERIFIED: ${STORAGE_VERIFIED:-false}
+  INSTANCE_ID: ${INSTANCE_ID:?Set an instance ID}
+  FILE_WORKERS: ${FILE_WORKERS:-2}
+  IO_THREADS: ${IO_THREADS:-2}
+services:
+  app:
+    <<: *common
+    environment: *env
+    ports: ["127.0.0.1:8036:8000"]
+    mem_limit: 512m
+    cpu_shares: 256
+    volumes:
+      - type: bind
+        source: ${STATE_PATH:?}
+        target: /state
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORK_PATH:?}
+        target: /work
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${ORIGINAL_PATH:?}
+        target: /original
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${PASSWORD_FILE:?}
+        target: /run/secrets/owner_password
+        read_only: true
+        bind: {create_host_path: false}
+  worker:
+    <<: *common
+    command: [python, -m, phonoteka.worker]
+    environment: *env
+    healthcheck:
+      test: [CMD, python, -m, phonoteka.worker, --health]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    mem_limit: 1536m
+    cpu_shares: 128
+    volumes:
+      - type: bind
+        source: ${STATE_PATH:?}
+        target: /state
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORK_PATH:?}
+        target: /work
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${ORIGINAL_PATH:?}
+        target: /original
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${PUBLICATION_PATH:?}
+        target: /publication
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${GUARD_PATH:?}
+        target: /storage-guard
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${PASSWORD_FILE:?}
+        target: /run/secrets/owner_password
+        read_only: true
+        bind: {create_host_path: false}

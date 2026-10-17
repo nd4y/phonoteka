@@ -1,0 +1,97 @@
+name: Test and build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: phonoteka-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - name: Backend tests with actual media codecs
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python3 -m venv .venv
+          .venv/bin/pip install -c requirements.lock '.[test]'
+          .venv/bin/python -m pytest -q
+      - name: Frontend tests and production build
+        run: |
+          cd frontend
+          npm ci --no-audit --no-fund
+          npm test
+          npm run build
+      - name: Container build
+        run: |
+          docker build --pull \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t phonoteka:ci .
+      - name: Container smoke and isolation
+        run: python3 tests/container_smoke.py
+      - name: Save tested image
+        run: |
+          docker save phonoteka:ci | gzip > phonoteka-image.tar.gz
+          sha256sum phonoteka-image.tar.gz > phonoteka-image.sha256
+          docker inspect phonoteka:ci --format '{{.Id}}' > image-id.txt
+          printf '%s\n' "$GITHUB_SHA" > revision.txt
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: tested-amd64-image
+          path: |
+            phonoteka-image.tar.gz
+            phonoteka-image.sha256
+            image-id.txt
+            revision.txt
+          retention-days: 7
+  publish:
+    needs: verify
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    steps:
+      - name: Load tested image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n tested-amd64-image
+          sha256sum -c phonoteka-image.sha256
+          gzip -dc phonoteka-image.tar.gz | docker load
+          test "$(docker inspect phonoteka:ci --format '{{.Id}}')" = "$(cat image-id.txt)"
+      - name: Publish immutable revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag phonoteka:ci "$image:sha-$GITHUB_SHA"
+          docker push "$image:sha-$GITHUB_SHA"
+          docker inspect "$image:sha-$GITHUB_SHA" --format '{{index .RepoDigests 0}}' > image-digest.txt
+          cat image-digest.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: image-digest
+          path: image-digest.txt
+          retention-days: 90
