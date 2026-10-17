@@ -372,6 +372,19 @@ def test_cue_inventory_preview_and_write_protection(client, settings):
             response = client.post('/api/jobs', json={'kind': kind, 'track_ids': [track['id']]}, headers={**headers, 'Idempotency-Key': str(uuid.uuid4())})
             assert response.status_code == 409, response.text
     assert media.sha256_file(path) == original_sha == media.sha256_file(settings.source_root/path.name)
+    assert client.get('/api/tracks?search=Searchable').json()['total'] == 1
+    with pytest.raises(media.MediaError) as exc:
+        Worker(settings).process_item({'kind': 'publish'}, {'track_id': audio['id'], 'sha256': audio['sha256'], 'relative_path': audio['relative_path']})
+    assert exc.value.code == 'cue_read_only'
+    # A damaged sheet cannot unlock a previously known album image.
+    valid_cue = cue_path.read_text()
+    cue_path.write_text('broken')
+    job(client, headers, 'scan'); drain(settings)
+    assert client.get(f"/api/tracks/{audio['id']}").json()['can_write'] is False
+    cue_path.write_text(valid_cue)
+    job(client, headers, 'scan'); drain(settings)
+    album = client.get('/api/tracks?filter=cue').json()['items'][0]
+    endpoint = f"/api/tracks/{album['id']}/cue/2/audio"
     # A dependency can change without changing the CUE bytes: rescan refreshes it.
     path.rename(path.with_suffix('.away'))
     job(client, headers, 'scan'); drain(settings)

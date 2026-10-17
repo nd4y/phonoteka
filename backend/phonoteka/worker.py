@@ -199,6 +199,9 @@ class Worker:
             if current:
                 identity = current["id"]
                 old = json.loads(current["metadata"])
+                for key in ("cue_sheets", "cue_album_image"):
+                    if key in old:
+                        meta[key] = old[key]
                 if current["sha256"] == meta["sha256"]:
                     for key in ("audit", "publication", "cue_sheets", "cue_album_image"):
                         if key in old:
@@ -228,6 +231,7 @@ class Worker:
         with db.transaction(self.settings.db_path) as conn:
             rows = conn.execute("SELECT id,relative_path,metadata FROM tracks WHERE is_current=1 AND status<>'missing'").fetchall()
             links = {}
+            uncertain = any(json.loads(row['metadata']).get('cue', {}).get('errors') for row in rows)
             for row in rows:
                 meta = json.loads(row['metadata'])
                 document = meta.get('cue', {})
@@ -242,6 +246,9 @@ class Worker:
             for row in rows:
                 meta = json.loads(row['metadata'])
                 if meta.get('format') == 'cue':
+                    continue
+                # A damaged sheet must not silently unlock a known album image.
+                if uncertain and meta.get('cue_album_image') and row['relative_path'] not in links:
                     continue
                 meta['cue_sheets'] = links.get(row['relative_path'], [])
                 meta['cue_album_image'] = any(x['track_count'] > 1 for x in meta['cue_sheets'])
