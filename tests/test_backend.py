@@ -339,3 +339,46 @@ def test_final_heartbeat_failure_cannot_release_guards_before_executor_drains(se
     finally:
         release.set()
         original_shutdown(wait=True, cancel_futures=True)
+
+
+def test_cue_inventory_preview_and_write_protection(client, settings):
+    headers = authenticated(client, settings)
+    path = synthetic(settings)
+    original_sha = media.sha256_file(path)
+    cue_path = settings.work_root/'album.cue'
+    cue_path.write_text('PERFORMER "Artist"\nTITLE "Album"\nFILE "sample.wav" WAVE\nTRACK 01 AUDIO\nTITLE "First"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nTITLE "Searchable second"\nINDEX 01 00:01:00')
+    job(client, headers, 'scan'); drain(settings)
+    tracks = client.get('/api/tracks').json()['items']
+    album = next(t for t in tracks if t['format'] == 'cue')
+    audio = next(t for t in tracks if t['format'] == 'flac')
+    assert len(tracks) == 2
+    assert album['cue']['errors'] == [] and len(album['cue']['warnings']) == 1
+    assert album['cue']['tracks'][1]['duration'] == 1
+    assert not album['can_write'] and not audio['can_write']
+    assert audio['cue_album_image'] and audio['cue_sheets'][0]['id'] == album['id']
+    assert client.get('/api/tracks?filter=cue').json()['total'] == 1
+    summary = client.get('/api/summary').json()
+    assert summary['cue_sheets'] == 1 and summary['cue_tracks'] == 2
+    assert client.get(f"/api/tracks/{album['id']}/audio").status_code == 409
+    endpoint = f"/api/tracks/{album['id']}/cue/2/audio"
+    response = client.get(endpoint, headers={'Range': 'bytes=0-31'})
+    assert response.status_code == 206 and response.content == path.read_bytes()[:32]
+    assert client.get(f"/api/tracks/{audio['id']}/cue/1/audio").status_code == 409
+    assert client.get(endpoint, headers={'Range': 'bytes=0-1,4-5'}).status_code == 416
+    for track in [album, audio]:
+        response = client.post(f"/api/tracks/{track['id']}/proposal", json={'tags': {'title': 'Bad'}}, headers={**headers, 'If-Match': '"'+track['sha256']+'"'})
+        assert response.status_code == 409, response.text
+        for kind in ['apply', 'publish', 'rollback']:
+            response = client.post('/api/jobs', json={'kind': kind, 'track_ids': [track['id']]}, headers={**headers, 'Idempotency-Key': str(uuid.uuid4())})
+            assert response.status_code == 409, response.text
+    assert media.sha256_file(path) == original_sha == media.sha256_file(settings.source_root/path.name)
+    # A dependency can change without changing the CUE bytes: rescan refreshes it.
+    path.rename(path.with_suffix('.away'))
+    job(client, headers, 'scan'); drain(settings)
+    assert client.get(f"/api/tracks/{album['id']}").json()['status'] == 'needs_review'
+    path.with_suffix('.away').rename(path)
+    job(client, headers, 'scan'); drain(settings)
+    assert client.get(f"/api/tracks/{album['id']}").json()['status'] == 'indexed'
+    assert client.get(endpoint).status_code == 200
+    client.post('/api/auth/logout', headers=headers)
+    assert client.get(endpoint).status_code == 401

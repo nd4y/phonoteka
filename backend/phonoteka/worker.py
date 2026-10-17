@@ -18,11 +18,11 @@ import sys
 import time
 import uuid
 
-from . import db, media
+from . import db, media, cue
 from .config import Settings
 
 LOG = logging.getLogger("phonoteka.worker")
-AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".aiff", ".ape", ".wv", ".wma", ".webm"}
+AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".aiff", ".ape", ".wv", ".wma", ".webm", ".cue"}
 EXCLUDED_DIRS = {"@eadir", "#recycle", ".trash", ".snapshot", ".phonoteka-staging", "@recycle"}
 
 
@@ -189,7 +189,7 @@ class Worker:
     def scan_one(self, relative, scan_id):
         path = self.settings.work_root / relative
         before = path.stat()
-        meta = normalize_metadata(media.inspect_audio(path, self.settings.roots))
+        meta = normalize_metadata(cue.inspect_cue(path, self.settings.work_root) if path.suffix.lower() == '.cue' else media.inspect_audio(path, self.settings.roots))
         after = path.stat()
         if (before.st_size,before.st_mtime_ns,before.st_ino) != (after.st_size,after.st_mtime_ns,after.st_ino):
             raise media.MediaError("file_changing", "File changed during inventory")
@@ -200,7 +200,7 @@ class Worker:
                 identity = current["id"]
                 old = json.loads(current["metadata"])
                 if current["sha256"] == meta["sha256"]:
-                    for key in ("audit", "publication"):
+                    for key in ("audit", "publication", "cue_sheets", "cue_album_image"):
                         if key in old:
                             meta[key] = old[key]
                     status = current["status"] if current["status"] not in {"missing", "error"} else "indexed"
@@ -213,11 +213,39 @@ class Worker:
                     conn.execute("INSERT INTO tracks(id,relative_path,sha256,metadata,status,scan_id,created_at,updated_at) VALUES(?,?,?,?,'needs_review',?,?,?)", (identity,relative,meta["sha256"],db.encode(meta),scan_id,now,now))
                     db.event(conn, "file_replaced", {"previous_track_id": previous_id, "track_id": identity})
                     return {"track_id": identity, "relative_path": relative, "identity_changed": True}
+                if meta.get('format') == 'cue':
+                    status = 'needs_review' if meta.get('cue', {}).get('errors') else 'indexed'
                 conn.execute("UPDATE tracks SET sha256=?,metadata=?,status=?,scan_id=?,updated_at=? WHERE id=?", (meta["sha256"],db.encode(meta),status,scan_id,now,identity))
             else:
                 identity = str(uuid.uuid4())
                 conn.execute("INSERT INTO tracks(id,relative_path,sha256,metadata,scan_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (identity,relative,meta["sha256"],db.encode(meta),scan_id,now,now))
+                if meta.get('cue', {}).get('errors'):
+                    conn.execute("UPDATE tracks SET status='needs_review' WHERE id=?", (identity,))
         return {"track_id": identity, "relative_path": relative}
+
+    def link_cue_sheets(self):
+        """Mark album images explicitly; individual CUE songs never write their tags."""
+        with db.transaction(self.settings.db_path) as conn:
+            rows = conn.execute("SELECT id,relative_path,metadata FROM tracks WHERE is_current=1 AND status<>'missing'").fetchall()
+            links = {}
+            for row in rows:
+                meta = json.loads(row['metadata'])
+                document = meta.get('cue', {})
+                counts = {}
+                for track in document.get('tracks', []):
+                    source = document['files'][track['file_index']]
+                    if source.get('relative_path'):
+                        path = source['relative_path']
+                        counts[path] = counts.get(path, 0) + 1
+                for path, count in counts.items():
+                    links.setdefault(path, []).append({'id': row['id'], 'title': document.get('title') or Path(row['relative_path']).stem, 'track_count': count})
+            for row in rows:
+                meta = json.loads(row['metadata'])
+                if meta.get('format') == 'cue':
+                    continue
+                meta['cue_sheets'] = links.get(row['relative_path'], [])
+                meta['cue_album_image'] = any(x['track_count'] > 1 for x in meta['cue_sheets'])
+                conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), row['id']))
 
     async def scan(self, job):
         identity = await self.io(root_identity, self.settings.work_root)
@@ -244,6 +272,7 @@ class Worker:
         if complete:
             with db.transaction(self.settings.db_path) as conn:
                 conn.execute("UPDATE tracks SET status='missing',updated_at=? WHERE is_current=1 AND (scan_id IS NULL OR scan_id<>?)", (db.utcnow(),job["id"]))
+        await self.io(self.link_cue_sheets)
         db.set_setting(self.settings.db_path, "last_scan", db.encode({"id": job["id"], "state": "complete" if complete else "partial", "errors": errors[:50], "at": db.utcnow()}))
         state = "cancelled_partial" if self.cancelled(job["id"]) and stats["completed"] else "cancelled" if self.cancelled(job["id"]) else "succeeded" if complete else "completed_with_errors"
         self.finish(job["id"], state, "partial_scan" if not complete else None)
@@ -287,6 +316,9 @@ class Worker:
         current = db.fetchone(self.settings.db_path, "SELECT * FROM tracks WHERE id=? AND is_current=1", (item["track_id"],))
         if not current or current["sha256"] != item["sha256"]:
             raise media.MediaError("conflict", "Input revision is no longer current")
+        meta = json.loads(current['metadata'])
+        if meta.get('format') == 'cue' or (meta.get('cue_album_image') and job['kind'] != 'audit'):
+            raise media.MediaError('cue_read_only', 'CUE и альбомные образы открыты только для чтения')
         if job["kind"] == "audit":
             result = media.audit_audio(path, self.settings.roots)
             if result.get("sha256") != item["sha256"]:

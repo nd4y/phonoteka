@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
-from . import __version__, db, security
+from . import __version__, db, security, cue
 from .config import Settings
 
 
@@ -86,7 +86,7 @@ def public_track(settings: Settings, row: dict, detail=False):
         **meta, "id": row["id"], "relative_path": row["relative_path"],
         "filename": Path(row["relative_path"]).name,
         "sha256": row["sha256"], "revision": row["sha256"], "status": row["status"],
-        "can_write": settings.writable and bool(meta.get("write_supported", meta.get("format", "").lower() in {"mp3", "flac"})) and row["status"] != "missing",
+        "can_write": settings.writable and not meta.get('cue_album_image') and bool(meta.get("write_supported", meta.get("format", "").lower() in {"mp3", "flac"})) and row["status"] != "missing",
         "tags": {key: (value[0] if value else "") if isinstance(value, list) else value for key, value in meta.get("tags", {}).items()},
         "tag_values": meta.get("tags", {}), "has_art": bool(meta.get("has_art", False)),
         "lyrics": meta.get("lyrics", ""), "lrc": meta.get("lrc", ""),
@@ -207,12 +207,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def summary(request: Request):
         security.require_session(request, settings)
         rows = db.fetchall(settings.db_path, "SELECT metadata,status,sha256 FROM tracks WHERE is_current=1")
-        count = {"total": len(rows), "missing_tags": 0, "missing_art": 0, "missing_lyrics": 0, "needs_review": 0, "published": 0}
+        count = {"total": len(rows), "missing_tags": 0, "missing_art": 0, "missing_lyrics": 0, "needs_review": 0, "published": 0, "cue_sheets": 0, "cue_tracks": 0}
         formats = {}
         for row in rows:
             meta = json.loads(row["metadata"])
             fmt = meta.get("format", "unknown")
             formats[fmt] = formats.get(fmt, 0) + 1
+            if fmt == 'cue':
+                count['cue_sheets'] += 1
+                count['cue_tracks'] += len(meta.get('cue', {}).get('tracks', []))
+                count['needs_review'] += bool(meta.get('cue', {}).get('errors')) or row['status'] == 'missing'
+                continue
             count["missing_tags"] += not (meta.get("tags", {}).get("title") and meta.get("tags", {}).get("artist"))
             count["missing_art"] += not meta.get("has_art", False)
             count["missing_lyrics"] += not meta.get("lrc", "")
@@ -237,9 +242,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             args += [term, term]
         filters = {
             "all": "1=1",
+            "cue": "json_extract(t.metadata,'$.format')='cue'",
             "review": "(t.status IN ('needs_review','conflict','error','missing') OR EXISTS (SELECT 1 FROM proposals p WHERE p.track_id=t.id AND p.input_sha256=t.sha256))",
-            "missing_lyrics": "COALESCE(json_extract(t.metadata,'$.lrc'),'')=''",
-            "missing_art": "COALESCE(json_extract(t.metadata,'$.has_art'),0)=0",
+            "missing_lyrics": "json_extract(t.metadata,'$.format')<>'cue' AND COALESCE(json_extract(t.metadata,'$.lrc'),'')=''",
+            "missing_art": "json_extract(t.metadata,'$.format')<>'cue' AND COALESCE(json_extract(t.metadata,'$.has_art'),0)=0",
             "published": "json_extract(t.metadata,'$.publication.sha256')=t.sha256",
         }
         if filter not in filters:
@@ -279,9 +285,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         now, identity = db.utcnow(), str(uuid.uuid4())
         payload = body.model_dump(exclude_unset=True, exclude={"base_proposal_id"})
         with db.transaction(settings.db_path) as conn:
-            row = conn.execute("SELECT sha256 FROM tracks WHERE id=? AND is_current=1", (track_id,)).fetchone()
+            row = conn.execute("SELECT sha256,metadata FROM tracks WHERE id=? AND is_current=1", (track_id,)).fetchone()
             if not row:
                 raise security.error(404, "track_not_found", "Трек не найден")
+            meta = json.loads(row['metadata'])
+            if meta.get('format') == 'cue' or meta.get('cue_album_image'):
+                raise security.error(409, 'cue_read_only', 'CUE и альбомные образы открыты только для чтения')
             if match.strip('"') != row["sha256"]:
                 raise security.error(412, "revision_conflict", "Файл изменился. Обновите карточку")
             if body.base_proposal_id:
@@ -304,8 +313,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         range_header = request.headers.get("range", "")
         if "," in range_header or len(range_header) > 100:
             raise security.error(416, "unsupported_range", "Поддерживается один диапазон байтов")
-        path = resolve_track_path(settings, _track_row(settings, track_id))
+        row = _track_row(settings, track_id)
+        if json.loads(row['metadata']).get('format') == 'cue':
+            raise security.error(409, 'cue_select_track', 'Выберите композицию в списке CUE')
+        path = resolve_track_path(settings, row)
         return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream", headers={"Cache-Control": "private, no-store"})
+
+    @app.get('/api/tracks/{track_id}/cue/{number}/audio')
+    def cue_audio(request: Request, track_id: str, number: int):
+        security.require_session(request, settings)
+        header = request.headers.get('range', '')
+        if ',' in header or len(header) > 100:
+            raise security.error(416, 'unsupported_range', 'Поддерживается один диапазон байтов')
+        row = _track_row(settings, track_id)
+        try:
+            path = cue.playback_path(settings.work_root, row['relative_path'], json.loads(row['metadata']), number)
+        except cue.MediaError as exc:
+            raise security.error(409, exc.code, exc.message)
+        except OSError:
+            raise security.error(404, 'cue_file_missing', 'Файл CUE или аудио недоступен')
+        return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or 'application/octet-stream', headers={'Cache-Control': 'private, no-store'})
 
     @app.get("/api/tracks/{track_id}/art")
     def art(request: Request, track_id: str):
@@ -363,6 +390,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 track = conn.execute("SELECT * FROM tracks WHERE id=? AND is_current=1", (track_id,)).fetchone()
                 if not track:
                     raise security.error(404, "track_not_found", "Трек не найден", file_id=track_id)
+                meta = json.loads(track['metadata'])
+                if meta.get('format') == 'cue' or (meta.get('cue_album_image') and body.kind != 'audit'):
+                    raise security.error(409, 'cue_read_only', 'CUE и альбомные образы не изменяются заданиями записи')
                 item = {"track_id": track_id, "sha256": track["sha256"], "relative_path": track["relative_path"]}
                 if body.kind == "apply":
                     if body.params.get("proposal_id"):
