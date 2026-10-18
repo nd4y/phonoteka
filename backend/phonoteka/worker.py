@@ -161,6 +161,8 @@ class Worker:
         return False
 
     def authorize(self, job):
+        if db.setting(self.settings.db_path,'recovery_required','false')=='true':
+            raise media.MediaError('recovery_required','Сначала завершите сверку восстановленного состояния')
         if not self.settings.writable:
             raise media.MediaError("read_only", "Music writes are disabled")
         if int(db.setting(self.settings.db_path, "auth_epoch", "0")) != job["auth_epoch"]:
@@ -450,8 +452,11 @@ class Worker:
         path = self.settings.work_root/item['relative_path']
         await self.io(media._expect, path, item['sha256'])
         meta = json.loads(row['metadata'])
+        if 'duration' in meta and not float(meta['duration'])>0:
+            probe=await self.io(media.probe_audio,path);meta['duration']=probe['duration'];meta['duration_source']='ffprobe_fallback'
         if self.providers is None: self.providers = Providers(self.settings)
         def authorized():
+            if db.setting(self.settings.db_path,'recovery_required','false')=='true':raise media.MediaError('recovery_required','Восстановление требует сверки')
             if int(db.setting(self.settings.db_path,'auth_epoch','0'))!=job['auth_epoch'] or self.cancelled(job['id']):
                 raise media.MediaError('authorization_revoked','Analysis authorization revoked')
         authorized()
@@ -572,7 +577,8 @@ class Worker:
         items=[i for i in items if i['track_id'] not in done]
         async def one(item):
             nonlocal retry_at
-            if retry_at or self.cancelled(job["id"]):
+            pause=json.loads(db.fetchone(self.settings.db_path,'SELECT payload FROM jobs WHERE id=?',(job['id'],))['payload']).get('pause_requested')
+            if retry_at or pause or self.cancelled(job["id"]):
                 return
             key = item["track_id"]
             self.item_result(job["id"], key, "running", {})
@@ -596,8 +602,15 @@ class Worker:
                     result["recovery_required"] = True
                 self.item_result(job["id"], key, state, result)
         await self.bounded_items(items, one)
+        current=db.fetchone(self.settings.db_path,'SELECT * FROM jobs WHERE id=?',(job['id'],))
+        paused=json.loads(current['payload']).get('pause_requested')
+        if paused and current['completed']+current['failed']<current['total'] and not self.cancelled(job['id']):
+            with db.transaction(self.settings.db_path) as conn:
+                conn.execute("UPDATE jobs SET state='paused',stage='paused',updated_at=? WHERE id=?",(db.utcnow(),job['id']))
+                db.event(conn,'job_paused',{'job_id':job['id']})
+            return
         if retry_at and not self.cancelled(job['id']):
-            payload['retry_at']=retry_at
+            payload=json.loads(current['payload']);payload['retry_at']=retry_at
             with db.transaction(self.settings.db_path) as conn:
                 conn.execute("UPDATE jobs SET state='queued',stage='waiting_provider',payload=?,updated_at=? WHERE id=?",(db.encode(payload),db.utcnow(),job['id']))
                 db.event(conn,'job_waiting',{'job_id':job['id'],'retry_at':retry_at})

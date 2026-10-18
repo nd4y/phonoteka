@@ -84,3 +84,15 @@ def test_fingerprint_query_replaces_wrong_embedded_tags(tmp_path):
         assert all('Wrong' not in query for query in queries)
         await p.close()
     asyncio.run(run())
+
+
+def test_bad_duration_and_undecodable_tail_use_real_start(tmp_path):
+    cfg=settings(tmp_path)
+    for root in cfg.roots.values():root.mkdir()
+    path=cfg.work_root/'short.mp3'
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=440:duration=15','-c:a','libmp3lame',str(path)],check=True)
+    unknown,offset=recognition.sample(path,cfg.roots,0)
+    assert 0<offset<5
+    wrong,offset=recognition.sample(path,cfg.roots,124)
+    assert offset==0
+    with wave.open(io.BytesIO(wrong)) as wav:assert wav.getnframes()==192000

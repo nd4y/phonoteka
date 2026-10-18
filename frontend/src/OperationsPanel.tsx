@@ -1,0 +1,9 @@
+import {useEffect,useState} from 'react';
+import {api,messageFor} from './api';
+type Info={version:string;recovery_required:boolean;worker_age_seconds:number|null;storage:Record<string,{free?:number;unavailable?:boolean}>;provider_cache:{entries:number;bytes:number};last_state_backup:{created_at:string;verified:boolean}|null};
+export function OperationsPanel(){
+ const [info,setInfo]=useState<Info|null>(null),[error,setError]=useState('');
+ async function load(){try{setInfo(await api('/reports/operations'));setError('');}catch(e){setError(messageFor(e));}}
+ useEffect(()=>{void load();},[]);
+ return <section className="panel settings-panel"><div className="panel-heading"><h2>Состояние и восстановление</h2><button className="button secondary" onClick={()=>void load()}>Обновить состояние</button></div>{error&&<p role="alert">{error}</p>}{info&&<><p>{info.recovery_required?'Режим восстановления: доступны сканирование и аудит. Запись заблокирована до административной сверки.':'Обычный режим'}</p><dl className="file-facts">{Object.entries(info.storage).map(([key,value])=><div key={key}><dt>Свободно: {key}</dt><dd>{value.free==null?'Недоступно':(value.free/1024**3).toFixed(1)+' ГиБ'}</dd></div>)}<div><dt>Последний backup состояния</dt><dd>{info.last_state_backup?new Date(info.last_state_backup.created_at).toLocaleString('ru-RU'):'Не зарегистрирован встроенной процедурой'}</dd></div><div><dt>Кеш источников</dt><dd>{info.provider_cache.entries} записей · {(info.provider_cache.bytes/1024**2).toFixed(1)} МиБ</dd></div></dl></>}<p className="muted small">Версии отката сохраняются. Backup состояния не включает музыкальные деревья. Восстановление и очистка незавершенных временных файлов доступны администратору через CLI обслуживания.</p><a className="button subtle" href="/api/reports/operations" download>Скачать обезличенную диагностику</a></section>;
+}

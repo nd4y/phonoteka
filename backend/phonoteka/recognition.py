@@ -20,6 +20,8 @@ POLICY = 'shazamio-0.8.1-sample-v1'
 
 def sample(path, roots, duration, offset=None):
     path = media._validate(path, roots)
+    if not math.isfinite(duration) or duration<=0:
+        duration=float(media.probe_audio(path).get('duration',0))
     if not math.isfinite(duration) or not 3 <= duration <= 6 * 3600:
         raise media.MediaError('recognition_duration', 'Для отпечатка нужна запись от 3 секунд до 6 часов')
     offset = min(45., max(0., duration * .25)) if offset is None else offset
@@ -28,6 +30,9 @@ def sample(path, roots, duration, offset=None):
     args = ['-nostdin', '-threads', '1', '-ss', str(offset), '-t', str(length), '-map', '0:a:0',
             '-vn', '-sn', '-dn', '-ac', '1', '-ar', '16000', '-f', 's16le', 'pipe:1']
     proc = media._process(path, 'ffmpeg', args, timeout=45)
+    # Some MP3 headers advertise frames beyond the decodable tail. Preserve the
+    # actual offset in evidence and try the beginning once instead of losing it.
+    if len(proc.stdout)<32000 and offset>0:return sample(path,roots,duration,0)
     if proc.returncode or not 32000 <= len(proc.stdout) <= 384000 or len(proc.stdout) % 2:
         raise media.MediaError('decode_failed', 'Некорректный декодированный фрагмент')
     output = io.BytesIO()

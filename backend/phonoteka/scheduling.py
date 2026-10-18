@@ -39,6 +39,7 @@ def install(app,settings):
 
 
 def tick(settings,now=None):
+    if db.setting(settings.db_path,'recovery_required','false')=='true':return
     now=time.time() if now is None else now
     with db.transaction(settings.db_path) as conn:
         row=conn.execute("SELECT value FROM settings WHERE key='schedule'").fetchone()

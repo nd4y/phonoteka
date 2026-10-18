@@ -38,7 +38,7 @@ def bearer(request,settings):
     if request.method=='GET':
         allowed='read' in scopes and (path in {'/api/summary','/api/providers','/api/events','/api/openapi.json'} or path.startswith(('/api/tracks','/api/jobs','/api/reports','/api/exports')))
     elif request.method=='POST':
-        if path=='/api/jobs' or re.fullmatch(r'/api/jobs/[^/]+/cancel',path):allowed=bool(set(scopes)&{'jobs:analysis','jobs:write'})
+        if path=='/api/jobs' or re.fullmatch(r'/api/jobs/[^/]+/(cancel|pause|resume)',path):allowed=bool(set(scopes)&{'jobs:analysis','jobs:write'})
         elif re.fullmatch(r'/api/tracks/[^/]+/(proposal|analysis/select)',path):allowed='jobs:write' in scopes
         elif path=='/api/deliveries':allowed='jobs:write' in scopes
     if not allowed:raise security.error(403,'scope_denied','Недостаточно прав API-токена')

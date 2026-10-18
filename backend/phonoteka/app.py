@@ -115,6 +115,7 @@ def public_job(settings: Settings, row: dict, detail=False):
     result["progress"] = round(100 * (row["completed"] + row["failed"]) / total) if total else 0
     result["cancel_requested"] = bool(row["cancel_requested"])
     result['retry_at']=json.loads(row['payload']).get('retry_at') if row['stage']=='waiting_provider' else None
+    result['pause_requested']=bool(json.loads(row['payload']).get('pause_requested'))
     if detail:
         items = db.fetchall(settings.db_path, "SELECT item_key,state,result FROM job_items WHERE job_id=? ORDER BY item_key LIMIT 10000", (row["id"],))
         result["results"] = [{"track_id": item["item_key"], "state": item["state"], **json.loads(item["result"])} for item in items]
@@ -150,10 +151,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Фонотека API", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
-    from . import automation,scheduling,exports
+    from . import automation,scheduling,exports,operations
     automation.install(app,settings)
     scheduling.install(app,settings)
     exports.install(app,settings)
+    operations.install(app,settings)
     @app.get('/api/openapi.json',include_in_schema=False)
     def schema(request:Request):
         security.require_session(request,settings)
@@ -236,9 +238,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             count["published"] += meta.get("publication", {}).get("sha256") == row["sha256"]
         active = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs WHERE state IN ('queued','running','waiting','interrupted')")["n"]
         heartbeat = json.loads(db.setting(settings.db_path, "worker_heartbeat", "{}"))
-        return {**count, "formats": formats, "active_jobs": active, "read_only": not settings.writable,
+        recovery=db.setting(settings.db_path,'recovery_required','false')=='true';writable=settings.writable and not recovery
+        return {**count, "formats": formats, "active_jobs": active, "read_only": not writable,'recovery_required':recovery,
                 "worker": {**heartbeat, "online": time.time()-heartbeat.get("at", 0) < 30 and heartbeat.get("state") != "stopped"},
-                "capabilities": {"edit": True, "apply": settings.writable, "publish": settings.writable, "audit": True, "metadata_search": settings.external_metadata, "recognition": settings.external_fingerprints, "cue_export": settings.writable, "replaygain": True, "asr": bool(settings.inference_url)},
+                "capabilities": {"edit": True, "apply": writable, "publish": writable, "audit": True, "metadata_search": settings.external_metadata and not recovery, "recognition": settings.external_fingerprints and not recovery, "cue_export": writable, "replaygain": not recovery, "asr": bool(settings.inference_url) and not recovery},
                 "roots": {"work": str(settings.work_root)}, "version": __version__}
 
     @app.get("/api/tracks")
@@ -374,6 +377,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def create_job(request: Request, body: JobInput):
         active = security.require_session(request, settings, True)
         automation.check_job(active,body.kind)
+        if db.setting(settings.db_path,'recovery_required','false')=='true' and body.kind not in {'scan','audit'}:
+            raise security.error(409,'recovery_required','После восстановления доступны только сканирование и аудит до сверки администратором')
         key = request.headers.get("idempotency-key", "")
         if not key or len(key) > 128:
             raise security.error(428, "idempotency_key_required", "Передайте Idempotency-Key длиной до 128 символов")
@@ -477,6 +482,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             row = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (identity,)).fetchone())
         return public_job(settings, row)
 
+    @app.post('/api/jobs/{job_id}/pause')
+    @app.post('/api/jobs/{job_id}/resume')
+    def pause_resume(request:Request,job_id:str):
+        action=request.url.path.rsplit('/',1)[-1]
+        active=security.require_session(request,settings,True)
+        with db.transaction(settings.db_path) as conn:
+            row=conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+            if not row:raise security.error(404,'job_not_found','Задание не найдено')
+            automation.check_job(active,row['kind'])
+            if row['kind'] in {'scan','export_ready','replaygain_album'}:raise security.error(409,'pause_unsupported','Этот этап выполняется одной согласованной операцией')
+            payload=json.loads(row['payload'])
+            if action=='pause':
+                if row['state'] not in {'queued','running','paused'}:raise security.error(409,'job_not_active','Задание уже завершено')
+                payload['pause_requested']=True
+                state='paused' if row['state'] in {'queued','paused'} else 'running'
+                stage='paused' if state=='paused' else row['stage']
+            else:
+                if row['state']!='paused':raise security.error(409,'job_not_paused','Задание не приостановлено')
+                if db.setting(settings.db_path,'recovery_required','false')=='true':raise security.error(409,'recovery_required','Сначала завершите восстановление')
+                payload['pause_requested']=False;payload.pop('auth_token_id',None)
+                if active.get('api_token_id'):payload['auth_token_id']=active['api_token_id']
+                state='queued';stage='waiting_provider' if payload.get('retry_at',0)>time.time() else 'pending'
+            conn.execute('UPDATE jobs SET payload=?,state=?,stage=?,auth_epoch=?,updated_at=? WHERE id=?',(db.encode(payload),state,stage,active['auth_epoch'],db.utcnow(),job_id))
+            db.event(conn,'job_'+action,{'job_id':job_id})
+        return public_job(settings,db.fetchone(settings.db_path,'SELECT * FROM jobs WHERE id=?',(job_id,)))
+
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel(request: Request, job_id: str):
         active=security.require_session(request, settings, True)
@@ -561,8 +592,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async def stream():
             nonlocal after
             while not await request.is_disconnected():
-                if not await asyncio.to_thread(security.session, request, settings):
-                    break
+                try:await asyncio.to_thread(security.require_session,request,settings)
+                except HTTPException:break
                 boundary = await asyncio.to_thread(db.fetchone, settings.db_path, "SELECT MIN(id) AS first,MAX(id) AS last FROM events")
                 if after and boundary["first"] and after < boundary["first"]-1:
                     after = boundary["last"] or 0

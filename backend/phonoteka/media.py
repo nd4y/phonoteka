@@ -423,8 +423,12 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
             easy = mutagen.File(stream, easy=True)
             if easy and easy.tags:
                 tags = {key: list(value) for key, value in easy.tags.items() if key in _TEXT_FRAMES}
+        duration=float(audio.info.length)
+        duration_source='native'
+        if not 0<duration<float('inf'):
+            duration=float(probe_audio(path).get('duration',0));duration_source='ffprobe_fallback'
         return {"sha256": digest, "size": info.st_size, "mtime_ns": info.st_mtime_ns,
-                **intake.describe(path,audio), "duration": float(audio.info.length),
+                **intake.describe(path,audio), "duration": duration,'duration_source':duration_source,
                 "tags": tags, "has_art": has_art, "lyrics": lyrics, "lrc": lrc, "lyrics_warning": lyrics_warning,
                 "write_supported": write_supported, "write_block_reason": reason,
                 "audio_identity": None, "poweramp_verified": False}
@@ -502,7 +506,9 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
     audio = _load_audio(path)
     if audio is None or not isinstance(audio, (MP3, WAVE, AIFF, FLAC, *formats.PROFILES)):
         raise MediaError("unsupported_format", "Only MP3 and FLAC writes are supported")
-    if parsed and any(line["start_ms"] > int(audio.info.length * 1000) + 1000 for line in parsed["lines"]):
+    duration=float(audio.info.length)
+    if parsed and not 0<duration<float('inf'):duration=probe_audio(path)['duration']
+    if parsed and any(line["start_ms"] > int(duration * 1000) + 1000 for line in parsed["lines"]):
         raise MediaError("invalid_lyrics", "A lyric timestamp exceeds audio duration")
     cover_info = _cover(cover) if cover is not None else None
     if isinstance(audio, (MP3, WAVE, AIFF)):
