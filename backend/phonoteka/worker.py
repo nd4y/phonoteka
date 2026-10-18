@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-from . import db, media, cue, inference_client
+from . import db, media, cue, inference_client, intake
 from .providers import Providers, ProviderError
 from .config import Settings
 
@@ -94,7 +94,14 @@ def enumerate_audio(root: Path):
         dirs[:] = [name for name in dirs if name.lower() not in EXCLUDED_DIRS and not (Path(folder)/name).is_symlink()]
         for name in names:
             path = Path(folder)/name
-            if path.suffix.lower() in AUDIO_EXTENSIONS:
+            candidate=path.suffix.lower() in AUDIO_EXTENSIONS
+            if not candidate and not path.is_symlink():
+                try:
+                    with media._file(path) as stream:candidate=intake.header_is_audio(stream.read(32))
+                except (OSError,media.MediaError) as exc:
+                    errors.append({'code':'discovery_unreadable','relative_path':str(path.relative_to(root))})
+                    continue
+            if candidate:
                 if path.is_symlink():
                     errors.append({"code": "symlink_skipped", "relative_path": str(path.relative_to(root))})
                     continue
@@ -319,7 +326,7 @@ class Worker:
             old = json.loads(current["metadata"])
             if job["kind"] == "publish":
                 metadata = old
-                metadata["publication"] = {"sha256": item["sha256"], "relative_path": item["relative_path"], "published_at": db.utcnow(), "job_id": job["id"],
+                metadata["publication"] = {"sha256": item["sha256"], "relative_path": intake.publication_relative(item["relative_path"],metadata), "published_at": db.utcnow(), "job_id": job["id"],
                                            "exception": json.loads(job["payload"]).get("params", {}).get("exception_reason")}
                 status = current["status"]
             else:
@@ -381,7 +388,7 @@ class Worker:
             if audit.get("state") != "passed" or audit.get("sha256") != item["sha256"]:
                 raise media.MediaError("audit_failed", "Publication requires a current successful audio audit")
             previous_pub = meta.get("publication", {})
-            destination = self.settings.publication_root / "Ready" / item["relative_path"]
+            destination = self.settings.publication_root / "Ready" / intake.publication_relative(item["relative_path"],meta)
             if previous_pub.get("sha256") == item["sha256"] and destination.is_file() and media.sha256_file(destination) == item["sha256"]:
                 return {"skipped": True, "reason": "already_published", "sha256": item["sha256"]}
             result = media.publish(path, destination, item["sha256"], self.settings.roots, self.settings.publication_root,

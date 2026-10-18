@@ -31,7 +31,7 @@ from mutagen.id3 import ID3, ID3NoHeaderError, APIC, SYLT, TXXX, UFID, Frames
 from mutagen.mp3 import MP3
 from mutagen.wave import WAVE
 from mutagen.aiff import AIFF
-from . import formats
+from . import formats, intake
 from PIL import Image, UnidentifiedImageError
 
 
@@ -420,7 +420,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
             if easy and easy.tags:
                 tags = {key: list(value) for key, value in easy.tags.items() if key in _TEXT_FRAMES}
         return {"sha256": digest, "size": info.st_size, "mtime_ns": info.st_mtime_ns,
-                "format": path.suffix.lower().lstrip("."), "duration": float(audio.info.length),
+                **intake.describe(path,audio), "duration": float(audio.info.length),
                 "tags": tags, "has_art": has_art, "lyrics": lyrics, "lrc": lrc, "lyrics_warning": lyrics_warning,
                 "write_supported": write_supported, "write_block_reason": reason,
                 "audio_identity": None, "poweramp_verified": False}

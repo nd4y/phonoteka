@@ -525,3 +525,31 @@ def test_alignment_freezes_reference_at_enqueue(settings):
         client.post(f'/api/tracks/{identity}/proposal',json={'tags':{},'lrc':'[00:02.00]Other words'},headers={**headers,'If-Match':'"'+sha+'"'})
         stored=json.loads(db.fetchone(settings.db_path,'SELECT payload FROM jobs WHERE id=?',(task['id'],))['payload'])
         assert stored['items'][0]['reference_text']=='[00:01.00]Original words'
+
+
+def test_extensionless_and_wrong_suffix_audio_cycle(settings):
+    settings=replace(settings,read_only=False,storage_verified=True)
+    with TestClient(create_app(settings),base_url=settings.app_url) as client:
+        headers=authenticated(client,settings)
+        original=synthetic(settings,'mp3');noext=settings.work_root/'download_123';original.rename(noext)
+        disguised=settings.work_root/'audio.dat';shutil.copy2(noext,disguised)
+        (settings.work_root/'image.png').write_bytes(b'\x89PNG\r\n\x1a\n')
+        (settings.work_root/'.nomedia').write_bytes(b'')
+        task=job(client,headers,'scan');drain(settings)
+        tracks=client.get('/api/tracks').json()['items'];assert len(tracks)==2
+        assert all(t['format']=='mp3' and t['can_write'] for t in tracks)
+        track=next(t for t in tracks if t['relative_path']=='download_123')
+        assert track['extension_missing']
+        response=client.get('/api/tracks/'+track['id']+'/audio',headers={'Range':'bytes=0-31'})
+        assert response.status_code==206 and response.headers['content-type']=='audio/mpeg'
+        before=media.audio_identity(noext)
+        client.post('/api/tracks/'+track['id']+'/proposal',json={'tags':{'title':'Verified name'}},headers={**headers,'If-Match':'"'+track['sha256']+'"'})
+        apply=job(client,headers,'apply',[track['id']]);drain(settings)
+        assert client.get('/api/jobs/'+apply['id']).json()['state']=='succeeded'
+        assert noext.exists() and media.audio_identity(noext)==before
+        published=job(client,headers,'publish',[track['id']],params={'allow_incomplete':True,'exception_reason':'Controlled fixture without full metadata'})
+        drain(settings);assert client.get('/api/jobs/'+published['id']).json()['state']=='succeeded'
+        target=settings.publication_root/'Ready'/'download_123.mp3'
+        assert target.exists() and media.sha256_file(target)==media.sha256_file(noext)
+        assert client.get('/api/tracks/'+track['id']).json()['publication']['relative_path']=='download_123.mp3'
+        assert noext.exists() and not (settings.work_root/'download_123.mp3').exists()

@@ -6,6 +6,7 @@ The application is a single-owner service. Original audio is mounted read-only. 
 
 - Async bounded file workers, durable jobs, idempotency, restart recovery, revisions, file history and rollback.
 - Native read/write profiles tested with audio packet and unrelated metadata preservation: MP3 ID3v2.3/v2.4, FLAC, M4A/MP4, Ogg Vorbis, Opus, WAV and AIFF. No audio re-encoding for tag changes.
+- Discovery checks bounded file signatures as well as extensions, including extensionless MP3 caches. Detected container controls preview MIME. Working filenames stay unchanged; Ready adds the verified extension when absent or misleading, with existing destination conflict checks.
 - Additional local FFmpeg demuxer profiles are read-only. Invalid files remain in the catalog with an explicit error. Playlists and remote input URLs are not decoded.
 - CUE parsing, encodings, single/multiple FILE, INDEX preview, guarded album images. CUE splitting, independent composition tagging and publishing are not available yet.
 - Free MusicBrainz metadata search, LRCLIB plain/synchronized lyrics, Cover Art Archive and local front artwork. One candidate per kind becomes a proposal. Plain text stays untimed and cannot silently become synchronized lyrics.

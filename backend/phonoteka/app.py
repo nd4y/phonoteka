@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
-from . import __version__, db, security, cue, reports
+from . import __version__, db, security, cue, reports, intake
 from .config import Settings
 
 
@@ -319,7 +319,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if json.loads(row['metadata']).get('format') == 'cue':
             raise security.error(409, 'cue_select_track', 'Выберите композицию в списке CUE')
         path = resolve_track_path(settings, row)
-        return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream", headers={"Cache-Control": "private, no-store"})
+        return FileResponse(path, media_type=intake.MIMES.get(json.loads(row["metadata"]).get("format")) or mimetypes.guess_type(path.name)[0] or "application/octet-stream", headers={"Cache-Control": "private, no-store"})
 
     @app.get('/api/tracks/{track_id}/cue/{number}/audio')
     def cue_audio(request: Request, track_id: str, number: int):
