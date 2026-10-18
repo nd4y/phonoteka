@@ -5,6 +5,9 @@ Run inside a resource-limited, isolated build-01 container, for example:
       --output /reports/performance-15min.json
 Use 1800 seconds for the separate sustained-resource observation. Short runs
 explicitly remain smoke tests. Temporary state is removed on every exit.
+Optional --ready-file signals the first actual resource sample after measurement
+starts, for coordinating another isolated harness. It does not change the clock,
+sample cadence, load duration or acceptance thresholds, or prove product health.
 """
 from __future__ import annotations
 
@@ -403,7 +406,48 @@ async def exercise(base_url, password, args, process):
                 except Exception as error:
                     failures.append({"category": name, "error": type(error).__name__, "status": response.status_code if response is not None else None})
 
-        await asyncio.gather(*(load(index) for index in range(args.concurrency)))
+        readiness = None
+        if args.ready_file:
+            async def publish_readiness():
+                # Use the authenticated observation route, never a synthetic
+                # sample or a fixed startup delay. Keep ordinary load running.
+                async with asyncio.timeout(10):
+                    while True:
+                        if process.poll() is not None:
+                            raise RuntimeError("isolated uvicorn exited before measurement readiness")
+                        response = await clients[0].get("/__acceptance/observations")
+                        response.raise_for_status()
+                        sample = next((item for item in response.json()["resources"][baseline_resources:]
+                                       if item["at"] >= started), None)
+                        if sample is not None:
+                            signal = {"state": "measurement_sample_observed", "pid": os.getpid(),
+                                      "measurement_started_at_monotonic": started,
+                                      "resource_sample_at_monotonic": sample["at"],
+                                      "ready_at_monotonic": time.monotonic()}
+                            target = args.ready_file
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            if target.exists() or target.is_symlink():
+                                raise RuntimeError("measurement readiness path already exists")
+                            temporary = target.with_name(target.name + f".{os.getpid()}.writing")
+                            with temporary.open("x", encoding="utf-8") as stream:
+                                os.fchmod(stream.fileno(), 0o600)
+                                json.dump(signal, stream)
+                                stream.flush()
+                                os.fsync(stream.fileno())
+                            temporary.replace(target)
+                            return signal
+                        await asyncio.sleep(.05)
+            load_tasks = [asyncio.create_task(load(index)) for index in range(args.concurrency)]
+            try:
+                readiness = await publish_readiness()
+                await asyncio.gather(*load_tasks)
+            finally:
+                for task in load_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*load_tasks, return_exceptions=True)
+        else:
+            await asyncio.gather(*(load(index) for index in range(args.concurrency)))
         await asyncio.sleep(max(0, started + args.duration_seconds - time.monotonic()))
         elapsed = time.monotonic() - started
         for index, task in enumerate(sse_tasks):
@@ -416,8 +460,11 @@ async def exercise(base_url, password, args, process):
         observations['progress'] = [point for point in observations['progress'] if started <= point['at'] <= started + elapsed]
         observations['spans'] = [span for span in observations['spans'] if started <= span['start'] <= started + elapsed]
         observations['measurement_started_at_monotonic'] = started
-        return {"elapsed_seconds": elapsed, "requests": {name: distribution(values) for name, values in latencies.items()},
-                "failures": failures, "checks": checks, "sse": sse, "observations": observations}
+        result = {"elapsed_seconds": elapsed, "requests": {name: distribution(values) for name, values in latencies.items()},
+                  "failures": failures, "checks": checks, "sse": sse, "observations": observations}
+        if readiness is not None:
+            result["measurement_readiness"] = readiness
+        return result
     finally:
         stopping.set()
         for task in sse_tasks:
@@ -506,6 +553,8 @@ def main():
     parser.add_argument("--max-rss-growth-mib", type=float, default=64)
     parser.add_argument("--max-fd-growth", type=int, default=32)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--ready-file", type=Path,
+                        help="Atomic signal after the first measured resource sample; coordination only, not product health")
     parser.add_argument("--serve", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--fd", type=int, help=argparse.SUPPRESS)
