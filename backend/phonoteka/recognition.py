@@ -66,11 +66,13 @@ class SignatureTransport:
                     delay = min(86400, max(60, int(value))) if value.isdigit() else 300
                     await asyncio.to_thread(db.set_setting, self.providers.settings.db_path, 'provider_breaker:shazam',
                                             db.encode({'until': time.time() + delay, 'reason': 'rate_limited'}))
+                    interval=float(await asyncio.to_thread(db.setting,self.providers.settings.db_path,'provider_interval:shazam','10'))
+                    await asyncio.to_thread(db.set_setting,self.providers.settings.db_path,'provider_interval:shazam',str(min(120,interval*2)))
                     raise ProviderError('rate_limited', 'shazam', 'Shazam ограничил частоту запросов')
                 if response.status_code in (401, 403):
                     raise ProviderError('provider_unauthorized', 'shazam', 'Shazam отклонил доступ')
                 if response.status_code != 200:
-                    raise ProviderError('provider_unavailable', 'shazam', 'Shazam временно недоступен')
+                    raise ProviderError('provider_unavailable', 'shazam', 'Shazam временно недоступен: HTTP '+str(response.status_code))
                 raw = bytearray()
                 async for part in response.aiter_bytes():
                     raw.extend(part)
@@ -80,7 +82,7 @@ class SignatureTransport:
                 if not isinstance(result, dict): raise ValueError('Expected object')
                 return result
         except (httpx.HTTPError, ValueError) as exc:
-            raise ProviderError('provider_unavailable', 'shazam', 'Ошибка сети или ответа Shazam') from exc
+            raise ProviderError('provider_unavailable', 'shazam', 'Ошибка сети или ответа Shazam: '+type(exc).__name__) from exc
 
 
 async def recognize(providers, audio, offset, authorize=lambda: None):
@@ -107,7 +109,9 @@ async def recognize(providers, audio, offset, authorize=lambda: None):
                 await asyncio.to_thread(providers.cache, key, 'shazam', data)
             except (ProviderError, asyncio.TimeoutError) as exc:
                 code = getattr(exc, 'code', 'provider_unavailable')
-                if code in {'provider_unavailable', 'provider_unauthorized'}:
+                if code=='provider_unavailable':
+                    await asyncio.to_thread(providers.unavailable,'shazam')
+                elif code=='provider_unauthorized':
                     await asyncio.to_thread(db.set_setting, providers.settings.db_path, 'provider_breaker:shazam',
                                             db.encode({'until': time.time() + 1200, 'reason': code}))
                 if isinstance(exc, ProviderError): raise

@@ -64,7 +64,11 @@ def session(request: Request, settings: Settings):
     return None
 
 
-def require_session(request: Request, settings: Settings, mutation=False):
+def require_session(request: Request, settings: Settings, mutation=False, *, owner_only=False):
+    if request.headers.get('authorization'):
+        if owner_only:raise error(403,'owner_session_required','Нужна сессия владельца в браузере')
+        from .automation import bearer
+        return bearer(request,settings)
     active = session(request, settings)
     if not active:
         raise error(401, "authentication_required", "Войдите в приложение")

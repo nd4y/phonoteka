@@ -32,7 +32,9 @@ def front(audio):
 def inspect(audio, fields):
     tags = {}
     for field in fields:
-        values = audio.get(key(audio, field), [])
+        name=key(audio,field)
+        variants=[k for k in audio if k.casefold()==name.casefold()]
+        values = audio.get(variants[0], []) if variants else []
         if not values:
             continue
         if isinstance(audio, MP4) and field in {'tracknumber','discnumber'}:
@@ -50,6 +52,9 @@ def edit(audio, tags, lyrics, cover, cover_info, values):
         name = key(audio, field)
         data = values(val)
         if isinstance(audio, MP4):
+            if name.startswith('----:'):
+                for existing in list(audio):
+                    if existing.casefold()==name.casefold():del audio[existing]
             if field in {'tracknumber','discnumber'} and data:
                 parts = data[0].split('/')
                 data = [(int(parts[0]), int(parts[1]) if len(parts)>1 else 0)]
@@ -79,7 +84,7 @@ def untouched(audio, tags, lyrics, cover):
     excluded = {key(audio, f) for f in tags}
     if lyrics is not None: excluded.add('©lyr' if isinstance(audio, MP4) else 'lyrics')
     if cover is not None: excluded.add('covr' if isinstance(audio, MP4) else 'metadata_block_picture')
-    result = {'fields': {k:repr(v) for k,v in (audio.tags or {}).items() if k not in excluded}}
+    result = {'fields': {k:repr(v) for k,v in (audio.tags or {}).items() if k.casefold() not in {x.casefold() for x in excluded}}}
     if cover is not None:
         if isinstance(audio, MP4): other=[bytes(x) for x in audio.get('covr', [])[1:]]
         else: other=[p.write() for p in [Picture(base64.b64decode(v,validate=True)) for v in audio.get('metadata_block_picture', [])] if p.type!=3]

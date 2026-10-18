@@ -16,7 +16,7 @@ async def process(worker, job, item):
     meta=json.loads(row['metadata'])
     if meta.get('input_error'): raise media.MediaError('invalid_audio','Cannot transcribe invalid input')
     token=(await worker.io(settings.inference_secret_file.read_text)).strip()
-    body={'relative_path':item['relative_path'],'sha256':item['sha256'],'language':params.get('language') or None,'generation':params.get('generation',0),'reference_text':item.get('reference_text') if job['kind']=='align' else None}
+    body={'relative_path':item['relative_path'],'sha256':item['sha256'],'language':params.get('language') or None,'generation':item.get('generation',params.get('generation',0)),'reference_text':item.get('reference_text') if job['kind']=='align' else None}
     async with httpx.AsyncClient(base_url=settings.inference_url,timeout=15,headers={'Authorization':'Bearer '+token}) as client:
         health=await client.get('/health');health.raise_for_status();model=health.json()['model'];revision=health.json()['model_revision']
         if health.json().get('contract')!='transcribe-v2': raise media.MediaError('inference_contract','Update app and inference to compatible versions')

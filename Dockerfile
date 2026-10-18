@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
     STATE_DIR=/state WORK_ROOT=/work SOURCE_ROOT=/original \
     PUBLICATION_ROOT=/publication STORAGE_GUARD_DIR=/storage-guard \
     STATIC_DIR=/app/frontend/dist
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libebur128-1 libchromaprint-tools ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 10001 phonoteka && useradd -u 10001 -g phonoteka -M phonoteka
 WORKDIR /app

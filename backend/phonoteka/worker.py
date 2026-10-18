@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness
+from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports
 from .providers import Providers, ProviderError
 from .config import Settings
 
@@ -144,7 +144,7 @@ class Worker:
         with db.transaction(self.settings.db_path) as conn:
             busy = bool(self.inference_task and not self.inference_task.done())
             ordinary_busy = bool(self.normal_task and not self.normal_task.done())
-            row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND (?=0 OR kind NOT IN ('transcribe','align')) AND (?=0 OR kind IN ('transcribe','align')) ORDER BY created_at,id LIMIT 1",(int(busy),int(ordinary_busy))).fetchone()
+            row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND COALESCE(json_extract(payload,'$.retry_at'),0)<=? AND (?=0 OR kind NOT IN ('transcribe','align')) AND (?=0 OR kind IN ('transcribe','align')) ORDER BY created_at,id LIMIT 1",(time.time(),int(busy),int(ordinary_busy))).fetchone()
             if not row:
                 return None
             conn.execute("UPDATE jobs SET state='running',stage=?,heartbeat=?,updated_at=? WHERE id=?", (row["kind"],time.time(),db.utcnow(),row["id"]))
@@ -152,8 +152,13 @@ class Worker:
             return dict(row)
 
     def cancelled(self, job_id):
-        row = db.fetchone(self.settings.db_path, "SELECT cancel_requested FROM jobs WHERE id=?", (job_id,))
-        return self.stopping or not row or bool(row["cancel_requested"])
+        row = db.fetchone(self.settings.db_path, "SELECT cancel_requested,payload FROM jobs WHERE id=?", (job_id,))
+        if self.stopping or not row or bool(row['cancel_requested']):return True
+        token_id=json.loads(row['payload']).get('auth_token_id')
+        if token_id:
+            token=db.fetchone(self.settings.db_path,'SELECT revoked,expires,auth_epoch FROM api_tokens WHERE id=?',(token_id,))
+            return not token or token['revoked'] or token['expires']<=time.time() or token['auth_epoch']!=int(db.setting(self.settings.db_path,'auth_epoch','0'))
+        return False
 
     def authorize(self, job):
         if not self.settings.writable:
@@ -221,7 +226,7 @@ class Worker:
                     if key in old:
                         meta[key] = old[key]
                 if current["sha256"] == meta["sha256"]:
-                    for key in ("audit", "publication", "cue_sheets", "cue_album_image", "derived_from", "cue_export"):
+                    for key in ("audit", "publication", "cue_sheets", "cue_album_image", "derived_from", "cue_export", "audio_export"):
                         if key in old:
                             meta[key] = old[key]
                     status = current["status"] if current["status"] not in {"missing", "error"} else "indexed"
@@ -348,21 +353,24 @@ class Worker:
         if not current or current["sha256"] != item["sha256"]:
             raise media.MediaError("conflict", "Input revision is no longer current")
         meta = json.loads(current['metadata'])
-        if job['kind']=='extract_cue':
+        if job['kind'] in {'extract_cue','normalize_audio'}:
             self.authorize(job)
-            result=cue_export.export(path,meta,self.settings,lambda:self.authorize(job))
+            from . import derivatives
+            exporter=cue_export if job['kind']=='extract_cue' else derivatives
+            result=exporter.export(path,meta,self.settings,lambda:self.authorize(job))
             derived=[]
             for entry in result['files']:
                 indexed=self.scan_one(entry['relative_path'],None)
                 with db.transaction(self.settings.db_path) as conn:
                     row=conn.execute('SELECT metadata FROM tracks WHERE id=?',(indexed['track_id'],)).fetchone()
-                    data=json.loads(row['metadata']);data['derived_from']={**entry,'sheet_id':item['track_id'],'sheet_sha256':item['sha256'],'export_identity':result['identity']}
+                    data=json.loads(row['metadata']);data['derived_from']={**entry,'parent_track_id':item['track_id'],'parent_sha256':item['sha256'],'export_identity':result['identity']}
+                    if job['kind']=='extract_cue':data['derived_from'].update(sheet_id=item['track_id'],sheet_sha256=item['sha256'])
                     conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(data),indexed['track_id']))
                 derived.append(indexed['track_id'])
             with db.transaction(self.settings.db_path) as conn:
-                meta['cue_export']={'identity':result['identity'],'track_ids':derived,'count':len(derived),'gap_policy':result['gap_policy']}
+                meta['cue_export' if job['kind']=='extract_cue' else 'audio_export']={'identity':result['identity'],'track_ids':derived,'count':len(derived),'gap_policy':result.get('gap_policy')}
                 conn.execute('UPDATE tracks SET metadata=?,updated_at=? WHERE id=? AND sha256=?',(db.encode(meta),db.utcnow(),item['track_id'],item['sha256']))
-                db.event(conn,'cue_extracted',{'track_id':item['track_id'],'count':len(derived),'export_identity':result['identity']})
+                db.event(conn,'cue_extracted' if job['kind']=='extract_cue' else 'audio_normalized',{'track_id':item['track_id'],'count':len(derived),'export_identity':result['identity']})
             return {'state':'succeeded','derived_track_ids':derived,'reused':result.get('reused',False),'identity':result['identity']}
         if meta.get('format') == 'cue' or (meta.get('cue_album_image') and job['kind'] not in {'audit','analyze'}):
             raise media.MediaError('cue_read_only', 'CUE и альбомные образы открыты только для чтения')
@@ -464,7 +472,7 @@ class Worker:
             if previous:
                 identified=next((c for c in json.loads(previous['payload']).get('candidates',[]) if c.get('provider')=='shazam'),None)
         if self.settings.external_metadata:
-            result = await self.providers.analyze(meta, item['relative_path'],identified)
+            result = await self.providers.analyze(meta, item['relative_path'],identified,authorized)
         else:
             result={'input_sha256':item['sha256'],'query_source':'audio_fingerprint','candidates':[],'sources':[],
                     'automatic_apply':False,'state':'incomplete'}
@@ -495,7 +503,17 @@ class Worker:
                     result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider')=='shazam')
             conn.execute('INSERT OR REPLACE INTO analyses VALUES(?,?,?,?)',(item['track_id'],item['sha256'],db.encode(result),db.utcnow()))
             db.event(conn,'analysis_completed',{'track_id':item['track_id'],'state':result['state']})
-        return {'state':result['state'],'candidates':len(result['candidates']),'sources':result['sources']}
+        retry=[]
+        for source in result['sources']:
+            if source['provider'] not in ({'shazam'} if fingerprint else {'musicbrainz','lrclib','coverartarchive'}):continue
+            if source['state'] not in {'rate_limited','provider_cooldown','provider_unavailable','budget_exhausted'}:continue
+            breaker=json.loads(db.setting(self.settings.db_path,'provider_breaker:'+source['provider'],'{}'))
+            due=breaker.get('until',time.time()+60)
+            if source['state']=='budget_exhausted':
+                first=db.fetchone(self.settings.db_path,'SELECT MIN(at) AS at FROM provider_calls WHERE provider=?',(source['provider'],))
+                due=(first['at'] if first and first['at'] else time.time())+86401
+            retry.append(max(time.time()+10,due))
+        return {'state':result['state'],'candidates':len(result['candidates']),'sources':result['sources'],**({'retry_at':max(retry)} if retry else {})}
 
     def local_cover(self, path):
         for name in ('cover.jpg','folder.jpg','front.jpg','cover.png','folder.png'):
@@ -513,9 +531,48 @@ class Worker:
         self.state = job["kind"]
         if job["kind"] == "scan":
             return await self.scan(job)
-        items = json.loads(job["payload"])["items"]
+        if job['kind']=='replaygain_album':
+            from . import album_loudness
+            items=json.loads(job['payload'])['items']
+            def authorized():
+                if self.cancelled(job['id']) or int(db.setting(self.settings.db_path,'auth_epoch','0'))!=job['auth_epoch']:
+                    raise media.MediaError('authorization_revoked','Album analysis authorization revoked')
+            try:
+                values=await self.io(album_loudness.analyze,[{**i,'path':self.settings.work_root/i['relative_path']} for i in items],self.settings.roots,authorized)
+                with db.transaction(self.settings.db_path) as conn:
+                    for item,candidate in zip(items,values):
+                        current=conn.execute('SELECT sha256 FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
+                        if not current or current['sha256']!=item['sha256']:raise media.MediaError('conflict','Album input changed')
+                        previous=conn.execute('SELECT * FROM analyses WHERE track_id=?',(item['track_id'],)).fetchone()
+                        data=json.loads(previous['payload']) if previous and previous['input_sha256']==item['sha256'] else {'candidates':[],'sources':[],'input_sha256':item['sha256'],'query_source':'local_audio'}
+                        data['candidates']=[c for c in data['candidates'] if c.get('provider')!='local_replaygain']+[candidate]
+                        data['sources']=[s for s in data['sources'] if s.get('provider')!='local_replaygain']+[{'provider':'local_replaygain','state':'candidate'}]
+                        data['state']='candidates'
+                        conn.execute('INSERT OR REPLACE INTO analyses VALUES(?,?,?,?)',(item['track_id'],item['sha256'],db.encode(data),db.utcnow()))
+                    db.event(conn,'album_loudness_measured',{'job_id':job['id'],'files':len(items)})
+                for item,candidate in zip(items,values):self.item_result(job['id'],item['track_id'],'succeeded',{'state':'needs_review','tags':candidate['tags']})
+                self.finish(job['id'],'succeeded')
+            except Exception as exc:
+                for item in items:self.item_result(job['id'],item['track_id'],'failed',self.failure(exc))
+                self.finish(job['id'],'failed',self.failure(exc)['code'])
+            return
+        if job['kind']=='export_ready':
+            def authorized():
+                if self.cancelled(job['id']) or int(db.setting(self.settings.db_path,'auth_epoch','0'))!=job['auth_epoch']:
+                    raise media.MediaError('authorization_revoked','Export authorization revoked')
+            with db.transaction(self.settings.db_path) as conn:conn.execute('UPDATE jobs SET total=1 WHERE id=?',(job['id'],))
+            try:
+                result=await self.io(exports.generate,self.settings,authorized)
+                self.item_result(job['id'],'export','succeeded',result);self.finish(job['id'],'succeeded')
+            except Exception as exc:
+                self.item_result(job['id'],'export','failed',self.failure(exc));self.finish(job['id'],'failed',self.failure(exc)['code'])
+            return
+        payload=json.loads(job['payload']);items=payload['items'];retry_at=0
+        done={r['item_key'] for r in db.fetchall(self.settings.db_path,"SELECT item_key FROM job_items WHERE job_id=? AND state IN ('succeeded','failed','conflict','needs_review')",(job['id'],))}
+        items=[i for i in items if i['track_id'] not in done]
         async def one(item):
-            if self.cancelled(job["id"]):
+            nonlocal retry_at
+            if retry_at or self.cancelled(job["id"]):
                 return
             key = item["track_id"]
             self.item_result(job["id"], key, "running", {})
@@ -524,7 +581,10 @@ class Worker:
                     result = await inference_client.process(self,job,item)
                 else:
                     result = await self.analyze_item(job, item) if job['kind'] in {'analyze','recognize'} else await self.io(self.process_item, job, item)
-                self.item_result(job["id"], key, "succeeded", result)
+                if result.get('retry_at'):
+                    retry_at=max(retry_at,result['retry_at'])
+                    self.item_result(job['id'],key,'deferred',result)
+                else:self.item_result(job["id"], key, "succeeded", result)
             except Exception as exc:
                 result = self.failure(exc)
                 journals = self.settings.state_dir / "backups" / key / job["id"]
@@ -536,6 +596,12 @@ class Worker:
                     result["recovery_required"] = True
                 self.item_result(job["id"], key, state, result)
         await self.bounded_items(items, one)
+        if retry_at and not self.cancelled(job['id']):
+            payload['retry_at']=retry_at
+            with db.transaction(self.settings.db_path) as conn:
+                conn.execute("UPDATE jobs SET state='queued',stage='waiting_provider',payload=?,updated_at=? WHERE id=?",(db.encode(payload),db.utcnow(),job['id']))
+                db.event(conn,'job_waiting',{'job_id':job['id'],'retry_at':retry_at})
+            return
         stats = db.fetchone(self.settings.db_path, "SELECT * FROM jobs WHERE id=?", (job["id"],))
         interrupted = db.fetchone(self.settings.db_path, "SELECT COUNT(*) AS n FROM job_items WHERE job_id=? AND state='interrupted'", (job["id"],))["n"]
         if interrupted:
@@ -601,8 +667,12 @@ class Worker:
             self.state = "idle"
             self.heartbeat()
             heartbeat_task = asyncio.create_task(self.heartbeats())
+            next_schedule=0
             try:
                 while not self.stopping:
+                    if time.monotonic()>=next_schedule:
+                        await self.io(scheduling.tick,self.settings)
+                        next_schedule=time.monotonic()+30
                     job = self.claim_job()
                     if job:
                         task=asyncio.create_task(self.background_job(job))

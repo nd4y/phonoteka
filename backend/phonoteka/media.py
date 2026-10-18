@@ -55,7 +55,7 @@ _MB_DESCRIPTIONS = {
     "musicbrainz_artistid": "MusicBrainz Artist Id", "musicbrainz_albumartistid": "MusicBrainz Album Artist Id",
     "musicbrainz_releasetrackid": "MusicBrainz Release Track Id",
 }
-_RG_FIELDS = {'replaygain_track_gain','replaygain_track_peak'}
+_RG_FIELDS = {'replaygain_track_gain','replaygain_track_peak','replaygain_album_gain','replaygain_album_peak'}
 _CUSTOM_FIELDS = _MB_FIELDS | _RG_FIELDS
 _MB_DESCRIPTIONS.update({key:key for key in _RG_FIELDS})
 
@@ -374,7 +374,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                     tags[field] = [str(value) for value in existing.getall(frame)[0].text]
             if existing:
                 for field, description in _MB_DESCRIPTIONS.items():
-                    frames = existing.getall(f"TXXX:{description}")
+                    frames = [frame for frame in existing.getall('TXXX') if frame.desc.casefold()==description.casefold()]
                     if frames:
                         tags[field] = [str(value) for value in frames[0].text]
                 if "UFID:http://musicbrainz.org" in existing:
@@ -533,7 +533,8 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
                     audio.tags.add(Frames[frame](encoding=encoding, text=values))
             else:
                 description = _MB_DESCRIPTIONS[field]
-                audio.tags.delall(f"TXXX:{description}")
+                for frame in list(audio.tags.getall('TXXX')):
+                    if frame.desc.casefold()==description.casefold():audio.tags.delall(frame.HashKey)
                 if values:
                     audio.tags.add(TXXX(encoding=encoding, desc=description, text=values))
         if parsed is not None:
@@ -621,7 +622,7 @@ def _untouched_signature(path: Path, tags: Mapping[str, Any], lrc: str | None, c
             if not audio.tags:
                 return {"frames": {}, "unknown": [], **({"chunks":_chunk_signature(path)} if isinstance(audio,(WAVE,AIFF)) else {})}
             frames = {key: repr(frame) for key, frame in audio.tags.items()
-                      if key not in excluded and not (lrc is not None and key.startswith("SYLT:"))
+                      if key.casefold() not in {x.casefold() for x in excluded} and not (lrc is not None and key.startswith("SYLT:"))
                       and not (cover is not None and key.startswith("APIC:") and frame.type == 3)}
             return {"frames": frames, "unknown": [hashlib.sha256(raw).hexdigest() for raw in audio.tags.unknown_frames], **({"chunks":_chunk_signature(path)} if isinstance(audio,(WAVE,AIFF)) else {})}
         if isinstance(audio, formats.PROFILES):

@@ -114,6 +114,12 @@ def initialize(path: Path) -> None:
         );
         CREATE TABLE IF NOT EXISTS provider_calls (id INTEGER PRIMARY KEY, provider TEXT NOT NULL, at REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS provider_calls_time ON provider_calls(provider,at);
+        CREATE TABLE IF NOT EXISTS api_tokens (
+            id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL, scopes TEXT NOT NULL,
+            created REAL NOT NULL, expires REAL NOT NULL, last_used REAL, revoked INTEGER NOT NULL DEFAULT 0,
+            auth_epoch INTEGER NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS delivery_receipts (id TEXT PRIMARY KEY, export_id TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
         PRAGMA user_version=1;
         COMMIT;
         """)

@@ -31,6 +31,10 @@ class Settings:
     provider_daily_limit: int = 2500
     external_metadata: bool = False
     external_fingerprints: bool = False
+    theaudiodb_enabled: bool = False
+    theaudiodb_artwork: bool = False
+    discogs_enabled: bool = False
+    discogs_token_file: Path | None = None
     musicbrainz_host: str = "musicbrainz.org"
     inference_url: str = ""
     inference_secret_file: Path | None = None
@@ -62,6 +66,10 @@ class Settings:
             inference_secret_file=path("INFERENCE_SECRET_FILE", "/run/secrets/inference_key"),
             external_metadata=boolean("EXTERNAL_METADATA", False),
             external_fingerprints=boolean("EXTERNAL_FINGERPRINTS", False),
+            theaudiodb_enabled=boolean('THEAUDIODB_ENABLED',False),
+            theaudiodb_artwork=boolean('THEAUDIODB_ARTWORK',False),
+            discogs_enabled=boolean('DISCOGS_ENABLED',False),
+            discogs_token_file=Path(os.environ['DISCOGS_TOKEN_FILE']) if os.environ.get('DISCOGS_TOKEN_FILE') else None,
             musicbrainz_host=os.environ.get("MUSICBRAINZ_HOST", "musicbrainz.org"),
             provider_daily_limit=max(1,min(int(os.environ.get("PROVIDER_DAILY_LIMIT","2500")),10000)),
             io_threads=max(1, min(int(os.environ.get("IO_THREADS", "2")), 8)),

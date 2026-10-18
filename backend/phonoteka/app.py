@@ -40,7 +40,7 @@ class ProposalInput(BaseModel):
 
 class JobInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["scan", "audit", "apply", "rollback", "publish", "analyze", "recognize", "transcribe", "align", "extract_cue", "replaygain"]
+    kind: Literal["scan", "audit", "apply", "rollback", "publish", "analyze", "recognize", "transcribe", "align", "extract_cue", "replaygain", "replaygain_album", "export_ready", "normalize_audio"]
     track_ids: list[str] = Field(default_factory=list, max_length=10000)
     params: dict = Field(default_factory=dict)
 
@@ -114,6 +114,7 @@ def public_job(settings: Settings, row: dict, detail=False):
     result = {key: row[key] for key in ("id", "kind", "state", "stage", "total", "completed", "failed", "cancel_requested", "created_at", "updated_at", "error")}
     result["progress"] = round(100 * (row["completed"] + row["failed"]) / total) if total else 0
     result["cancel_requested"] = bool(row["cancel_requested"])
+    result['retry_at']=json.loads(row['payload']).get('retry_at') if row['stage']=='waiting_provider' else None
     if detail:
         items = db.fetchall(settings.db_path, "SELECT item_key,state,result FROM job_items WHERE job_id=? ORDER BY item_key LIMIT 10000", (row["id"],))
         result["results"] = [{"track_id": item["item_key"], "state": item["state"], **json.loads(item["result"])} for item in items]
@@ -149,6 +150,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Фонотека API", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
+    from . import automation,scheduling,exports
+    automation.install(app,settings)
+    scheduling.install(app,settings)
+    exports.install(app,settings)
+    @app.get('/api/openapi.json',include_in_schema=False)
+    def schema(request:Request):
+        security.require_session(request,settings)
+        return app.openapi()
     app.add_middleware(BodyLimitMiddleware)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(settings.app_url).hostname, "localhost", "127.0.0.1", "testserver"])
 
@@ -364,10 +373,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/jobs", status_code=202)
     def create_job(request: Request, body: JobInput):
         active = security.require_session(request, settings, True)
+        automation.check_job(active,body.kind)
         key = request.headers.get("idempotency-key", "")
         if not key or len(key) > 128:
             raise security.error(428, "idempotency_key_required", "Передайте Idempotency-Key длиной до 128 символов")
-        if body.kind in {"apply", "rollback", "publish", "extract_cue"} and not settings.writable:
+        if body.kind in {"apply", "rollback", "publish", "extract_cue", "normalize_audio"} and not settings.writable:
             raise security.error(409, "read_only", "Запись отключена до проверки конфигурации хранилища")
         if set(body.params) - {"proposal_id", "history_id", "allow_incomplete", "exception_reason", "scope", "language", "generation"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
@@ -380,6 +390,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body.kind in {'transcribe','align'} and not settings.inference_url:
             raise security.error(409,'inference_disabled','ASR не настроен')
         ids = list(dict.fromkeys(body.track_ids))
+        if body.kind=='replaygain_album' and not 1<=len(ids)<=200:
+            raise security.error(422,'invalid_album','Выберите 1-200 файлов одной группы альбома')
         if body.params.get('scope'):
             if body.kind not in {'analyze','recognize','replaygain'} or body.params['scope'] not in {'all','pending'} or ids:
                 raise security.error(422,'invalid_scope','Полная библиотека доступна только для анализа')
@@ -399,9 +411,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise security.error(409,'provider_disabled','Внешние метаданные отключены')
         if body.kind=='recognize' and not settings.external_fingerprints:
             raise security.error(409,'provider_disabled','Отправка аудиоотпечатков отключена')
-        if body.kind == "scan" and ids:
+        if body.kind in {"scan","export_ready"} and ids:
             raise security.error(422, "invalid_scope", "Сканирование выполняется для всей библиотеки")
-        if body.kind != "scan" and not ids:
+        if body.kind not in {"scan","export_ready"} and not ids:
             raise security.error(422, "tracks_required", "Выберите конкретные треки")
         request_hash = hashlib.sha256(db.encode(body.model_dump()).encode()).hexdigest()
         now, identity = db.utcnow(), str(uuid.uuid4())
@@ -418,12 +430,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if not track:
                     raise security.error(404, "track_not_found", "Трек не найден", file_id=track_id)
                 meta = json.loads(track['metadata'])
+                if body.kind=='normalize_audio' and (meta.get('write_supported') or meta.get('input_error')):
+                    raise security.error(409,'native_or_invalid','Файл уже поддерживает запись либо поврежден')
                 if body.kind=='extract_cue':
                     if meta.get('format')!='cue' or meta.get('cue',{}).get('errors'):
                         raise security.error(409,'invalid_cue','Нужен корректный CUE с доступными аудиофайлами')
                 elif meta.get('format') == 'cue' or (meta.get('cue_album_image') and body.kind not in {'audit','analyze','transcribe','align'}):
                     raise security.error(409, 'cue_read_only', 'CUE и альбомные образы не изменяются заданиями записи')
                 item = {"track_id": track_id, "sha256": track["sha256"], "relative_path": track["relative_path"]}
+                if body.kind in {'transcribe','align'} and 'generation' not in body.params:
+                    last=conn.execute("SELECT j.payload,j.state,i.value AS item,ji.state AS item_state FROM jobs j,json_each(j.payload,'$.items') i LEFT JOIN job_items ji ON ji.job_id=j.id AND ji.item_key=? WHERE j.kind=? AND json_extract(i.value,'$.track_id')=? AND json_extract(i.value,'$.sha256')=? ORDER BY j.created_at DESC,j.rowid DESC LIMIT 1",(track_id,body.kind,track_id,track['sha256'])).fetchone()
+                    generation=0
+                    if last:
+                        generation=json.loads(last['item']).get('generation',json.loads(last['payload']).get('params',{}).get('generation',0))
+                        if last['item_state'] in {'failed','needs_review','interrupted'} or last['state'] in {'failed','cancelled','cancelled_partial','interrupted'}:generation+=1
+                    if generation>1000000:raise security.error(409,'generation_limit','Достигнут предел повторов ASR')
+                    item['generation']=generation
                 if body.kind=='align':
                     proposal=conn.execute('SELECT payload FROM proposals WHERE track_id=? AND input_sha256=? ORDER BY created_at DESC,rowid DESC LIMIT 1',(track_id,track['sha256'])).fetchone()
                     text=(json.loads(proposal['payload']).get('lrc') if proposal else '') or meta.get('lrc') or meta.get('lyrics')
@@ -448,6 +470,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     item["history_id"] = history["id"]
                 items.append(item)
             payload = {"items": items, "params": body.params}
+            if active.get('api_token_id'):payload['auth_token_id']=active['api_token_id']
             conn.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch) VALUES(?,?,'queued','pending',?,?,?,?,?)", (identity,body.kind,db.encode(payload),len(items),now,now,active["auth_epoch"]))
             conn.execute("INSERT INTO idempotency VALUES('owner:jobs',?,?,?,?)", (key,request_hash,identity,now))
             db.event(conn, "job_created", {"job_id": identity, "kind": body.kind})
@@ -456,11 +479,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel(request: Request, job_id: str):
-        security.require_session(request, settings, True)
+        active=security.require_session(request, settings, True)
         with db.transaction(settings.db_path) as conn:
             row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not row:
                 raise security.error(404, "job_not_found", "Задание не найдено")
+            automation.check_job(active,row['kind'])
             if row["state"] in {"queued", "waiting", "paused"}:
                 conn.execute("UPDATE jobs SET state='cancelled',stage='cancelled',cancel_requested=1,updated_at=? WHERE id=?", (db.utcnow(),job_id))
             elif row["state"] == "running":
@@ -481,7 +505,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get('/api/providers')
     def provider_status(request: Request):
         security.require_session(request, settings)
-        return {'external_metadata':settings.external_metadata,'external_fingerprints':settings.external_fingerprints,'daily_limit':settings.provider_daily_limit,'providers':[{'id':x,'configured':settings.external_metadata,'capabilities':caps} for x,caps in [('musicbrainz',['metadata']),('lrclib',['lyrics']),('coverartarchive',['cover'])]]+[{'id':'shazam','configured':settings.external_fingerprints,'capabilities':['fingerprint'],'unofficial':True}]+[{'id':x,'configured':False,'state':'key_required'} for x in ['acoustid','audd','acrcloud']]}
+        providers=[{'id':x,'configured':settings.external_metadata,'capabilities':caps} for x,caps in [('musicbrainz',['metadata']),('lrclib',['lyrics']),('coverartarchive',['cover'])]]
+        providers += [{'id':'shazam','configured':settings.external_fingerprints,'capabilities':['fingerprint'],'unofficial':True},
+                      {'id':'theaudiodb','configured':settings.external_metadata and settings.theaudiodb_enabled,'capabilities':['release']+(['cover'] if settings.theaudiodb_artwork else [])},
+                      {'id':'discogs','configured':bool(settings.external_metadata and settings.discogs_enabled and settings.discogs_token_file and settings.discogs_token_file.is_file()),'capabilities':['release']},
+                      *[{'id':x,'configured':False,'state':'key_required'} for x in ['acoustid','audd','acrcloud']]]
+        for provider in providers:
+            provider['calls_24h']=db.fetchone(settings.db_path,'SELECT COUNT(*) AS n FROM provider_calls WHERE provider=? AND at>?',(provider['id'],time.time()-86400))['n']
+            breaker=json.loads(db.setting(settings.db_path,'provider_breaker:'+provider['id'],'{}'))
+            provider['retry_at']=breaker.get('until') if breaker.get('until',0)>time.time() else None
+            provider['state']='disabled' if not provider['configured'] else breaker.get('reason','ready') if provider['retry_at'] else 'ready'
+            if provider['id'] in {'acoustid','audd','acrcloud'}:provider['state']='key_required'
+        return {'external_metadata':settings.external_metadata,'external_fingerprints':settings.external_fingerprints,'daily_limit':settings.provider_daily_limit,'providers':providers}
 
     @app.post('/api/tracks/{track_id}/analysis/select',status_code=201)
     async def select_analysis(request: Request, track_id: str):

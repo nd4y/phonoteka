@@ -15,8 +15,8 @@ from . import db, media
 
 POLICY_VERSION = 'public-v1'
 USER_AGENT = 'Phonoteka/0.2 (https://github.com/nd4y/phonoteka; personal music catalog)'
-HOSTS = {'beta.musicbrainz.org','musicbrainz.org','lrclib.net','coverartarchive.org','archive.org','api.acoustid.org'}
-INTERVAL = {'musicbrainz':1.1,'lrclib':.5,'coverartarchive':1.1,'acoustid':.4,'shazam':2.0}
+HOSTS = {'beta.musicbrainz.org','musicbrainz.org','lrclib.net','coverartarchive.org','archive.org','api.acoustid.org','www.theaudiodb.com','r2.theaudiodb.com','api.discogs.com'}
+INTERVAL = {'musicbrainz':1.1,'lrclib':.5,'coverartarchive':1.1,'acoustid':.4,'shazam':10.0,'theaudiodb':2.1,'discogs':1.1}
 
 
 def normalized(value):
@@ -85,10 +85,12 @@ class Providers:
         async with lock:
             delay=self.next.get(provider,0)-time.monotonic()
             if delay>0: await asyncio.sleep(delay)
-            self.next[provider]=time.monotonic()+INTERVAL.get(provider,1)
+            interval=INTERVAL.get(provider,1)
+            if provider=='shazam':interval=max(interval,float(await asyncio.to_thread(db.setting,self.settings.db_path,'provider_interval:shazam','10')))
+            self.next[provider]=time.monotonic()+interval
         await asyncio.to_thread(self.reserve,provider)
 
-    async def get(self, provider, url, params=None, *, binary=False):
+    async def get(self, provider, url, params=None, *, binary=False, headers=None):
         key=hashlib.sha256(db.encode([POLICY_VERSION,url,params,binary]).encode()).hexdigest()
         cached=await asyncio.to_thread(db.fetchone,self.settings.db_path,'SELECT payload FROM provider_cache WHERE key=? AND expires>?',(key,time.time()))
         if cached: return json.loads(cached['payload'])
@@ -99,10 +101,12 @@ class Providers:
             try:
                 for redirect in range(5):
                     host=urlsplit(target).hostname or ''
+                    if headers and host!=urlsplit(url).hostname:
+                        raise ProviderError('unsafe_provider_url',provider,'Переадресация авторизованного запроса запрещена')
                     if urlsplit(target).scheme!='https' or (host not in HOSTS and not host.endswith('.archive.org')):
                         raise ProviderError('unsafe_provider_url',provider,'Источник вернул запрещенный адрес')
                     await self.throttle(provider)
-                    async with self.semaphore, self.client.stream('GET',target,params=params if target==url else None) as response:
+                    async with self.semaphore, self.client.stream('GET',target,params=params if target==url else None,headers=headers) as response:
                         if response.status_code in (301,302,303,307,308):
                             target=str(response.url.join(response.headers.get('location','')))
                             continue
@@ -192,7 +196,7 @@ class Providers:
         mime,_,_=media._cover(base64.b64decode(raw))
         return {'id':'caa:'+release_id,'provider':'coverartarchive','kind':'cover','cover':'data:'+mime+';base64,'+raw,'release_id':release_id,'source_url':url,'match':{'state':'needs_review','reasons':['confirm_release']}}
 
-    async def analyze(self, meta, relative, identified=None):
+    async def analyze(self, meta, relative, identified=None, authorize=lambda:None):
         query,provenance=query_tags(meta,relative)
         if identified:
             query={k:scalar(identified['tags'],k) for k in ('title','artist','album')}
@@ -204,6 +208,7 @@ class Providers:
             result['sources']=[{'provider':'musicbrainz','state':'insufficient_metadata'},{'provider':'lrclib','state':'insufficient_metadata'},{'provider':'acoustid','state':'key_required'}]
             return result
         for provider,call in [('musicbrainz',self.musicbrainz),('lrclib',self.lyrics)]:
+            authorize()
             try:
                 candidates=await call(query,meta.get('duration',0))
                 result['candidates'].extend(candidates)
@@ -215,6 +220,7 @@ class Providers:
         matching=[c for c in result['candidates'] if c['kind']=='metadata' and c['match']['state']=='matching_metadata']
         releases={v['id'] for c in matching for v in c.get('releases',[]) if query['album'] and normalized(v['title'])==normalized(query['album'])}
         if not meta.get('has_art') and len(releases)==1:
+            authorize()
             try:
                 art=await self.cover(next(iter(releases)))
                 if art: result['candidates'].append(art)
@@ -222,4 +228,7 @@ class Providers:
             except (ProviderError, media.MediaError) as exc: result['sources'].append({'provider':'coverartarchive','state':exc.code})
         result['state']='candidates' if result['candidates'] else 'no_match' if all(x['state']=='no_match' for x in result['sources']) else 'incomplete' 
         result['sources'].append({'provider':'acoustid','state':'key_required'})
+        from . import catalogs
+        await catalogs.enrich(self,result,query,meta,authorize)
+        if result['candidates']:result['state']='candidates'
         return result
