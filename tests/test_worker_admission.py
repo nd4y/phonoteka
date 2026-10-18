@@ -4,6 +4,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import io
+import json
 import threading
 import time
 import wave
@@ -83,8 +84,14 @@ def controlled_segment(settings, client, headers, job_id, calls, control):
     assert len(started)==len(finished)==settings.file_workers
     assert set(started)==set(finished),'every already started operation must finish'
     assert state['active_count']==state['failed']==0
-    assert len(db.fetchall(settings.db_path,'SELECT item_key FROM job_items WHERE job_id=?',(job_id,)))==state['completed']
-    assert all(row['state']=='succeeded' for row in state['results'])
+    persisted=db.fetchall(settings.db_path,'SELECT item_key,state,result FROM job_items WHERE job_id=?',(job_id,))
+    assert len(persisted)==state['completed']
+    assert all(row['state']=='succeeded' for row in persisted)
+    assert all(json.loads(row['result'])['state']=='passed' for row in persisted)
+    # The API flattens the operation result after the durable lifecycle state;
+    # the synthetic operation's "passed" outcome is therefore public here.
+    assert len(state['results'])==state['completed']
+    assert all(row['state']=='passed' for row in state['results'])
     return state,set(started)
 
 
@@ -157,7 +164,13 @@ def test_provider_wait_stops_large_queue_admission_without_failed_or_completed_i
         assert state['state']=='queued' and state['stage']=='waiting_provider'
         assert state['total']==512 and state['completed']==state['failed']==0
         assert state['retry_at']>time.time() and state['eta_reason']=='waiting_provider'
-        assert len(state['results'])==1 and state['results'][0]['state']=='deferred'
+        persisted=db.fetchall(cfg.db_path,'SELECT item_key,state,result FROM job_items WHERE job_id=?',(queued['id'],))
+        assert len(persisted)==1 and all(row['state']=='deferred' for row in persisted)
+        assert persisted[0]['item_key']==calls[0]
+        outcome=json.loads(persisted[0]['result'])
+        assert outcome['state']=='incomplete' and outcome['retry_at']==state['retry_at']
+        assert len(state['results'])==1 and state['results'][0]['state']=='incomplete'
+        assert state['results'][0]['retry_at']==state['retry_at']
 
 
 def test_consumer_error_with_full_ten_thousand_source_does_not_deadlock(settings):
