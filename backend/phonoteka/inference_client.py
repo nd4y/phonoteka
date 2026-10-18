@@ -4,7 +4,6 @@ import json
 import time
 import httpx
 from . import db, media
-from .alignment import align_lines
 
 
 async def process(worker, job, item):
@@ -17,10 +16,11 @@ async def process(worker, job, item):
     meta=json.loads(row['metadata'])
     if meta.get('input_error'): raise media.MediaError('invalid_audio','Cannot transcribe invalid input')
     token=(await worker.io(settings.inference_secret_file.read_text)).strip()
-    body={'relative_path':item['relative_path'],'sha256':item['sha256'],'language':params.get('language') or None,'generation':params.get('generation',0)}
+    body={'relative_path':item['relative_path'],'sha256':item['sha256'],'language':params.get('language') or None,'generation':params.get('generation',0),'reference_text':item.get('reference_text') if job['kind']=='align' else None}
     async with httpx.AsyncClient(base_url=settings.inference_url,timeout=15,headers={'Authorization':'Bearer '+token}) as client:
         health=await client.get('/health');health.raise_for_status();model=health.json()['model'];revision=health.json()['model_revision']
-        remote_id=hashlib.sha256(json.dumps([body,model,revision,'transcribe-v1'],sort_keys=True).encode()).hexdigest()
+        if health.json().get('contract')!='transcribe-v2': raise media.MediaError('inference_contract','Update app and inference to compatible versions')
+        remote_id=hashlib.sha256(json.dumps([body,model,revision,'transcribe-v2'],sort_keys=True).encode()).hexdigest()
         worker.item_result(job['id'],item['track_id'],'running',{'inference_job_id':remote_id,'model':model})
         # The remote API deduplicates by the complete input contract, including model and generation.
         for attempt in range(2):
@@ -49,13 +49,8 @@ async def process(worker, job, item):
         else: raise media.MediaError('inference_timeout','ASR deadline reached; remote outcome must be reconciled')
     await worker.io(media._expect,settings.work_root/item['relative_path'],item['sha256'])
     if result.get('input_sha256')!=item['sha256']: raise media.MediaError('inference_contract','Wrong audio revision')
-    aligned=None
-    if job['kind']=='align':
-        proposal=await worker.io(db.fetchone,settings.db_path,'SELECT payload FROM proposals WHERE track_id=? AND input_sha256=? ORDER BY created_at DESC LIMIT 1',(item['track_id'],item['sha256']))
-        text=json.loads(proposal['payload']).get('lrc','') if proposal else ''
-        text=text or meta.get('lrc') or meta.get('lyrics')
-        if not text: raise media.MediaError('lyrics_required','Сначала выберите или сохраните текст')
-        aligned=align_lines(text,result.get('words',[]),meta['duration'])
+    aligned=result.pop('alignment',None)
+    if job['kind']=='align' and not aligned: raise media.MediaError('inference_contract','Alignment result missing')
     if worker.cancelled(job['id']) or int(db.setting(settings.db_path,'auth_epoch','0'))!=job['auth_epoch']:
         raise media.MediaError('authorization_revoked','Analysis authorization revoked')
     with db.transaction(settings.db_path) as conn:

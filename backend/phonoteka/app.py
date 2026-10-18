@@ -408,6 +408,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if meta.get('format') == 'cue' or (meta.get('cue_album_image') and body.kind not in {'audit','analyze','transcribe','align'}):
                     raise security.error(409, 'cue_read_only', 'CUE и альбомные образы не изменяются заданиями записи')
                 item = {"track_id": track_id, "sha256": track["sha256"], "relative_path": track["relative_path"]}
+                if body.kind=='align':
+                    proposal=conn.execute('SELECT payload FROM proposals WHERE track_id=? AND input_sha256=? ORDER BY created_at DESC,rowid DESC LIMIT 1',(track_id,track['sha256'])).fetchone()
+                    text=(json.loads(proposal['payload']).get('lrc') if proposal else '') or meta.get('lrc') or meta.get('lyrics')
+                    if not text or len(text)>100000: raise security.error(422,'lyrics_required','Нужен текст длиной до 100000 символов')
+                    item['reference_text']=text
                 if body.kind == "apply":
                     if body.params.get("proposal_id"):
                         prop = conn.execute("SELECT * FROM proposals WHERE id=? AND track_id=?", (body.params["proposal_id"],track_id)).fetchone()

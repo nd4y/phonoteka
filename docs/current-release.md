@@ -11,7 +11,7 @@ The application is a single-owner service. Original audio is mounted read-only. 
 - Free MusicBrainz metadata search, LRCLIB plain/synchronized lyrics, Cover Art Archive and local front artwork. One candidate per kind becomes a proposal. Plain text stays untimed and cannot silently become synchronized lyrics.
 - Provider caching bounded to 256 MiB, daily request budget, rate spacing, retries and outage cooldown. No audio is uploaded by these public metadata searches. Missing keys are explicit; text search is not audio fingerprint identification.
 - Separate CPU ASR image with pinned faster-whisper small weights. Durable idempotent jobs, input SHA checks, one inference at a time, independent ordinary queue, CPU 2 / RAM 3 GiB. Local decoding to 16 kHz PCM, up to 30 minutes, original timestamps.
-- Independent ASR word anchors can match reference lyric lines. Unmatched lines retain no timestamp. This is not a phoneme forced aligner, and musical timing quality has not passed the specification pilot. Every result requires review.
+- Known reference words are aligned through Whisper cross-attention and DTW in bounded windows selected from independent ASR anchors. Lines without independent anchors or sufficient alignment confidence retain no timestamp. The reference is frozen at job creation. Musical timing quality has not passed the specification pilot; every result requires review.
 - Authenticated collection reports, exact duplicates, verified packet duplicates, album track-number gaps inferred from tags, CSV/JSON export. No duplicate deletion or claim of complete release identification.
 
 ## Deployment
@@ -22,4 +22,4 @@ GitHub verifies real codecs, frontend, container behavior and real model inferen
 
 ## Remaining acceptance boundaries
 
-External fingerprint recognition requires a configured legitimate API key. Current free sources can return no match or an unavailable service. ASR does not establish the artist. A corrupted file cannot be reconstructed from a filename. Physical offline Poweramp playback is a separate device check. The full v1 specification still includes unimplemented forced alignment quality gates, CUE export, ReplayGain, broader provider adapters, delivery confirmation and scoped automation API.
+External fingerprint recognition requires a configured legitimate API key. Current free sources can return no match or an unavailable service. ASR does not establish the artist. A corrupted file cannot be reconstructed from a filename. Physical offline Poweramp playback is a separate device check. The full v1 specification still includes unvalidated musical alignment quality gates, CUE export, ReplayGain, broader provider adapters, delivery confirmation and scoped automation API.

@@ -27,12 +27,12 @@ def align_lines(text, words, duration):
     for index,line in enumerate(original):
         indexes=[i for i,owner in enumerate(owners) if owner==index]
         found=[i for i in indexes if i in mapped]
-        state='unaligned';stamp=None
+        state='unaligned';stamp=None;end_stamp=None
         if indexes and len(found)==len(indexes):
             stamps=[mapped[i]['start'] for i in indexes]
             ends=[mapped[i]['end'] for i in indexes]
             if stamps==sorted(stamps) and stamps[0]>=previous and ends[-1]-stamps[0]<=max(15,len(indexes)*2):
-                stamp=round(stamps[0]*1000);state='anchored';previous=stamps[-1]
-        result.append({'text':line['text'],'original_ms':line.get('start_ms'),'start_ms':stamp,'state':state,'matched_words':len(found),'words':len(indexes)})
+                stamp=round(stamps[0]*1000);end_stamp=round(ends[-1]*1000);state='anchored';previous=stamps[-1]
+        result.append({'text':line['text'],'original_ms':line.get('start_ms'),'start_ms':stamp,'end_ms':end_stamp,'state':state,'matched_words':len(found),'words':len(indexes)})
     complete=bool(result) and all(x['state']=='anchored' for x in result)
     return {'method':'independent_asr_word_anchors_v1','text_sha256':hashlib.sha256(text.encode()).hexdigest(),'lines':result,'coverage':sum(x['state']=='anchored' for x in result)/max(1,len(result)),'complete':complete,'automatic_acceptance':False,'state':'needs_review' if complete else 'partially_aligned','lrc':serialize_lrc(result) if complete else None}

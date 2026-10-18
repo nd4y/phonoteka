@@ -41,9 +41,10 @@ class Input(BaseModel):
     sha256:str=Field(pattern='^[0-9a-f]{64}$')
     language:str|None=Field(default=None,pattern='^[a-z]{2,3}$')
     generation:int=Field(default=0,ge=0,le=1000000)
+    reference_text:str|None=Field(default=None,max_length=100000)
 
 
-def identity(body): return hashlib.sha256(json.dumps([body,MODEL,MODEL_REVISION,'transcribe-v1'],sort_keys=True).encode()).hexdigest()
+def identity(body): return hashlib.sha256(json.dumps([body,MODEL,MODEL_REVISION,'transcribe-v2'],sort_keys=True).encode()).hexdigest()
 
 
 def execute(body):
@@ -68,12 +69,16 @@ def execute(body):
         segments,info_asr=MODEL_INSTANCE.transcribe(samples,language=body.get('language'),beam_size=5,word_timestamps=True,vad_filter=False,condition_on_previous_text=False)
         words=[];lines=[]
         for segment in segments:
-            if segment.no_speech_prob>.6 or segment.avg_logprob<-1: continue
-            lines.append({'start':segment.start,'end':segment.end,'text':segment.text,'avg_logprob':segment.avg_logprob,'no_speech_prob':segment.no_speech_prob})
+            if segment.no_speech_prob>.6 and segment.avg_logprob<-1: continue
+            lines.append({'start':segment.start,'end':segment.end,'text':segment.text,'avg_logprob':segment.avg_logprob,'no_speech_prob':segment.no_speech_prob,'uncertain':segment.no_speech_prob>.6 or segment.avg_logprob<-1})
             words.extend({'start':w.start,'end':w.end,'word':w.word,'probability':w.probability} for w in segment.words or [])
             if len(words)>20000: raise ValueError('ASR output exceeded word limit')
+    alignment=None
+    if body.get('reference_text'):
+        from .forced_alignment import align_reference
+        alignment=align_reference(MODEL_INSTANCE,samples,body['reference_text'],info_asr.language,words,info['duration'])
     media._expect(source,body['sha256'])
-    return {'state':'draft','engine':'faster-whisper','engine_version':'1.2.1','model':MODEL,'model_revision':MODEL_REVISION,'language':info_asr.language,'duration':info['duration'],'input_sha256':body['sha256'],'words':words,'segments':lines,'text':'\n'.join(x['text'].strip() for x in lines),'automatic_acceptance':False,'timeline':'original_audio_seconds'}
+    return {'alignment':alignment,'state':'draft','engine':'faster-whisper','engine_version':'1.2.1','model':MODEL,'model_revision':MODEL_REVISION,'language':info_asr.language,'duration':info['duration'],'input_sha256':body['sha256'],'words':words,'segments':lines,'text':'\n'.join(x['text'].strip() for x in lines),'automatic_acceptance':False,'timeline':'original_audio_seconds'}
 
 
 async def worker():
@@ -109,7 +114,7 @@ async def lifespan(app):
 app=FastAPI(lifespan=lifespan)
 
 @app.get('/health')
-def health(): return {'status':'ok','model':MODEL,'model_revision':MODEL_REVISION,'capabilities':['transcribe'],'parallelism':1}
+def health(): return {'status':'ok','model':MODEL,'model_revision':MODEL_REVISION,'capabilities':['transcribe','align'],'contract':'transcribe-v2','parallelism':1}
 
 @app.post('/jobs',status_code=202)
 def submit(body:Input,request:Request):

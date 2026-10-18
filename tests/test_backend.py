@@ -515,3 +515,13 @@ def test_metadata_refresh_retains_same_revision_asr(client,settings):
     result=json.loads(db.fetchone(settings.db_path,'SELECT payload FROM analyses WHERE track_id=?',(identity,))['payload'])
     assert result['asr']==previous['asr'] and result['alignment']==previous['alignment']
     assert result['candidates']==previous['candidates']
+
+
+def test_alignment_freezes_reference_at_enqueue(settings):
+    settings=replace(settings,inference_url='http://inference:8001')
+    with TestClient(create_app(settings),base_url=settings.app_url) as client:
+        headers=authenticated(client,settings);identity,sha=seed(settings,lrc='[00:01.00]Original words')
+        task=job(client,headers,'align',[identity])
+        client.post(f'/api/tracks/{identity}/proposal',json={'tags':{},'lrc':'[00:02.00]Other words'},headers={**headers,'If-Match':'"'+sha+'"'})
+        stored=json.loads(db.fetchone(settings.db_path,'SELECT payload FROM jobs WHERE id=?',(task['id'],))['payload'])
+        assert stored['items'][0]['reference_text']=='[00:01.00]Original words'

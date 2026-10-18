@@ -24,7 +24,27 @@ with tempfile.TemporaryDirectory() as directory:
         result=status['result'];assert 'test' in result['text'].lower(),result
         assert len(result['words'])>5 and all(0<=w['start']<=w['end']<=result['duration']+.1 for w in result['words'])
         assert result['automatic_acceptance'] is False
-        print(json.dumps({'real_model':result['model'],'revision':result['model_revision'],'words':len(result['words']),'timeline_valid':True,'deduplication':True}))
+        alignment_body={**body,'reference_text':'This is a music library test.\nWe are checking the words and their timing.'}
+        aligned_job=request('/jobs',alignment_body)
+        assert aligned_job['id']!=first['id']
+        for _ in range(180):
+            aligned_status=request('/jobs/'+aligned_job['id'])
+            if aligned_status['state'] in {'failed','succeeded'}:break
+            time.sleep(2)
+        assert aligned_status['state']=='succeeded',aligned_status
+        alignment=aligned_status['result']['alignment']
+        assert alignment['method']=='whisper_attention_dtw_with_independent_asr_anchors_v1'
+        assert alignment['coverage']>0,alignment
+        assert alignment['automatic_acceptance'] is False
+        assert all(line['start_ms'] is None or 0<=line['start_ms']<=line['end_ms']<=result['duration']*1000+100 for line in alignment['lines'])
+        unrelated=request('/jobs',{**body,'reference_text':'A submarine landed silently on the distant planet.'})
+        for _ in range(180):
+            wrong=request('/jobs/'+unrelated['id'])
+            if wrong['state'] in {'failed','succeeded'}:break
+            time.sleep(2)
+        assert wrong['state']=='succeeded',wrong
+        assert wrong['result']['alignment']['coverage']==0 and wrong['result']['alignment']['lrc'] is None
+        print(json.dumps({'real_model':result['model'],'revision':result['model_revision'],'words':len(result['words']),'timeline_valid':True,'deduplication':True,'forced_alignment_coverage':alignment['coverage']}))
     except BaseException:
         subprocess.run(['docker','logs','--tail','100',name],check=False)
         raise
