@@ -21,6 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
 from . import __version__, db, security, cue, reports, intake, youtube
+from .telemetry import log
 from .config import Settings
 
 
@@ -146,12 +147,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.validate()
         await asyncio.to_thread(db.initialize, settings.db_path)
         await asyncio.to_thread(security.bootstrap, settings)
+        log('service_ready')
         yield
+        log('service_stopping')
 
     app = FastAPI(title="Фонотека API", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
-    from . import automation,scheduling,exports,operations
+    from . import automation,scheduling,exports,operations,observability
+    observability.install(app,settings)
     automation.install(app,settings)
     scheduling.install(app,settings)
     exports.install(app,settings)
@@ -162,7 +166,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         security.require_session(request,settings)
         return app.openapi()
     app.add_middleware(BodyLimitMiddleware)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(settings.app_url).hostname, "localhost", "127.0.0.1", "testserver"])
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(settings.app_url).hostname, "localhost", "127.0.0.1", "testserver", "app", "phonoteka-app"])
 
     @app.middleware("http")
     async def security_headers(request, call_next):

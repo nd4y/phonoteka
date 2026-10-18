@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from . import db, media
+from .telemetry import Metrics, provider_operation
 
 POLICY_VERSION = 'public-v1'
 USER_AGENT = 'Phonoteka/0.2 (https://github.com/nd4y/phonoteka; personal music catalog)'
@@ -59,8 +60,9 @@ class ProviderError(Exception):
 
 
 class Providers:
-    def __init__(self, settings, transport=None):
+    def __init__(self, settings, transport=None, metrics=None):
         self.settings=settings
+        self.metrics=metrics or Metrics('worker')
         self.client=httpx.AsyncClient(timeout=httpx.Timeout(20,connect=8),limits=httpx.Limits(max_connections=4,max_keepalive_connections=4),headers={'User-Agent':USER_AGENT},transport=transport,follow_redirects=False)
         self.locks={};self.next={};self.semaphore=asyncio.Semaphore(4)
 
@@ -90,10 +92,13 @@ class Providers:
             self.next[provider]=time.monotonic()+interval
         await asyncio.to_thread(self.reserve,provider)
 
+    @provider_operation('metadata')
     async def get(self, provider, url, params=None, *, binary=False, headers=None):
         key=hashlib.sha256(db.encode([POLICY_VERSION,url,params,binary]).encode()).hexdigest()
         cached=await asyncio.to_thread(db.fetchone,self.settings.db_path,'SELECT payload FROM provider_cache WHERE key=? AND expires>?',(key,time.time()))
-        if cached: return json.loads(cached['payload'])
+        if cached:
+            self.metrics.cache_hits.labels(provider).inc()
+            return json.loads(cached['payload'])
         breaker=json.loads(await asyncio.to_thread(db.setting,self.settings.db_path,'provider_breaker:'+provider,'{}'))
         if breaker.get('until',0)>time.time(): raise ProviderError('provider_cooldown',provider,'Источник временно отключен после повторных ошибок')
         target=url

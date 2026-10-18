@@ -1,8 +1,10 @@
-# Current implementation: 0.5.0 alpha
+# Current implementation: 0.6.0 alpha
 
 The application is a single-owner service. Original audio is mounted read-only. Changes are proposed, reviewed, atomically written to the separate working copy, audited, and published to a separate Ready directory. The current image is not a claim that all specification acceptance criteria have passed.
 
 ## Available
+
+- Dedicated-token Prometheus metrics for API/worker/inference, aggregate SQLite queue/collection/provider gauges, process counters and duration histograms; JSON stdout logs with generated request IDs and no user file paths or secrets. A reproducible 47-panel Grafana dashboard includes metrics and VictoriaLogs. See [observability](observability.md).
 
 - YouTube provenance from embedded URLs, yt-dlp filenames and bounded sidecars, inherited source links for derivatives, owner confirmation/unlink, public video metadata and up to three search candidates using pinned yt-dlp without media downloads/cookies. Search does not establish the exact original upload. See [YouTube provenance](youtube.md).
 

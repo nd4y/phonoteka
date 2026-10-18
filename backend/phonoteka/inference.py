@@ -11,9 +11,11 @@ import sqlite3
 import tempfile
 import time
 import wave
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Response
 from pydantic import BaseModel, Field
 from . import cue, media
+from .telemetry import Metrics, ObserveHTTP, metrics_authorized, CONTENT_TYPE_LATEST, log
+from .metrics import DatabaseCollector
 
 ROOT=Path(os.environ.get('WORK_ROOT','/work'))
 STATE=Path(os.environ.get('INFERENCE_STATE','/inference'))
@@ -24,6 +26,9 @@ if MODEL not in MODELS: raise ValueError('Model must be selected by deployment f
 SECRET=Path(os.environ.get('INFERENCE_SECRET_FILE','/run/secrets/inference_key'))
 MODEL_INSTANCE=None
 LOG=logging.getLogger('phonoteka.inference')
+METRICS=Metrics('inference')
+METRICS.registry.register(DatabaseCollector(inference_path=STATE/'jobs.sqlite3'))
+METRICS_SECRET=Path(os.environ['METRICS_TOKEN_FILE']) if os.environ.get('METRICS_TOKEN_FILE') else None
 
 
 def connect():
@@ -56,6 +61,8 @@ def execute(body):
     if MODEL_INSTANCE is None:
         from faster_whisper import WhisperModel
         MODEL_INSTANCE=WhisperModel('/models/faster-whisper-small',device='cpu',compute_type='int8',cpu_threads=2,num_workers=1,local_files_only=True)
+        METRICS.model_loaded.set(1)
+        log('inference_model_loaded')
     # Decode in a bounded, network-disabled ffmpeg process. Input timestamps remain unchanged.
     with tempfile.TemporaryDirectory(dir=STATE) as directory:
         pcm=Path(directory)/'analysis.wav'
@@ -88,15 +95,20 @@ async def worker():
             if row: conn.execute("UPDATE jobs SET state='running',updated=? WHERE id=?",(time.time(),row['id']))
         if not row:
             await asyncio.sleep(.5);continue
+        started=time.perf_counter()
+        log('inference_started',job_id=row['id'])
         try:
             result=await asyncio.to_thread(execute,json.loads(row['input']))
             state='succeeded'
         except Exception as exc:
-            LOG.exception("Inference job failed: %s", row["id"])
+            LOG.exception('Inference job failed',extra={'event':'inference_failed','fields':{'job_id':row['id']}})
             # Never persist credentials, request headers, or arbitrary model traceback.
             result={'code':getattr(exc,'code','inference_failed'),'message':str(exc)[:300] if isinstance(exc,(media.MediaError,ValueError)) else 'Inference failed; see private service diagnostics'};state='failed'
         with connect() as conn:
             conn.execute('UPDATE jobs SET state=?,result=?,updated=? WHERE id=?',(state,json.dumps(result,ensure_ascii=False),time.time(),row['id']))
+        duration=time.perf_counter()-started
+        METRICS.inference_jobs.labels(state).inc();METRICS.inference_duration.observe(duration)
+        log('inference_finished',job_id=row['id'],state=state,duration_seconds=round(duration,6))
 
 
 @asynccontextmanager
@@ -107,11 +119,19 @@ async def lifespan(app):
         conn.execute('CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,input TEXT NOT NULL,state TEXT NOT NULL,result TEXT,created REAL NOT NULL,updated REAL NOT NULL)')
         conn.execute("UPDATE jobs SET state='interrupted' WHERE state='running'")
     task=asyncio.create_task(worker())
+    log('service_ready')
     yield
+    log('service_stopping')
     task.cancel()
 
 
 app=FastAPI(lifespan=lifespan)
+app.add_middleware(ObserveHTTP,metrics=METRICS)
+
+@app.get('/metrics',include_in_schema=False)
+def metrics(request:Request):
+    if not metrics_authorized(request.headers,METRICS_SECRET): raise HTTPException(401,'Metrics token required')
+    return Response(METRICS.render(),media_type=CONTENT_TYPE_LATEST,headers={'Cache-Control':'no-store'})
 
 @app.get('/health')
 def health(): return {'status':'ok','model':MODEL,'model_revision':MODEL_REVISION,'capabilities':['transcribe','align'],'contract':'transcribe-v2','parallelism':1}

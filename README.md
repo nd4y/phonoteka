@@ -46,3 +46,5 @@ npm run build
 
 
 Обслуживание: [проверенный backup/restore и режим восстановления](docs/maintenance.md).
+
+Metrics, JSON stdout and Grafana: [observability](docs/observability.md). Import [dashboard JSON](monitoring/phonoteka-dashboard.json); regenerate with `python monitoring/build_dashboard.py`.

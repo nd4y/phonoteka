@@ -28,6 +28,8 @@ x-env: &env
   INSTANCE_ID: ${INSTANCE_ID:?Set an instance ID}
   FILE_WORKERS: ${FILE_WORKERS:-2}
   IO_THREADS: ${IO_THREADS:-2}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  METRICS_TOKEN_FILE: /run/secrets/metrics_token
   MUSICBRAINZ_HOST: ${MUSICBRAINZ_HOST:-musicbrainz.org}
   EXTERNAL_METADATA: ${EXTERNAL_METADATA:-false}
   EXTERNAL_FINGERPRINTS: ${EXTERNAL_FINGERPRINTS:-false}
@@ -43,6 +45,11 @@ services:
     mem_limit: 512m
     cpu_shares: 256
     volumes:
+      - type: bind
+        source: ${METRICS_TOKEN_FILE:?Set a dedicated scrape token file}
+        target: /run/secrets/metrics_token
+        read_only: true
+        bind: {create_host_path: false}
       - type: bind
         source: ${STATE_PATH:?}
         target: /state
@@ -75,6 +82,11 @@ services:
     mem_limit: 1536m
     cpu_shares: 128
     volumes:
+      - type: bind
+        source: ${METRICS_TOKEN_FILE:?}
+        target: /run/secrets/metrics_token
+        read_only: true
+        bind: {create_host_path: false}
       - type: bind
         source: ${STATE_PATH:?}
         target: /state
@@ -115,9 +127,16 @@ services:
       INFERENCE_SECRET_FILE: /run/secrets/inference_key
       ASR_MODEL: small
       OMP_NUM_THREADS: "2"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      METRICS_TOKEN_FILE: /run/secrets/metrics_token
     mem_limit: 3g
     cpus: 2
     volumes:
+      - type: bind
+        source: ${METRICS_TOKEN_FILE:?}
+        target: /run/secrets/metrics_token
+        read_only: true
+        bind: {create_host_path: false}
       - type: bind
         source: ${WORK_PATH:?}
         target: /work

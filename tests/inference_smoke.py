@@ -3,10 +3,11 @@ import hashlib,json,pathlib,subprocess,tempfile,time,urllib.request
 with tempfile.TemporaryDirectory() as directory:
     root=pathlib.Path(directory);(root/'work').mkdir();(root/'state').mkdir()
     (root/'key').write_text('test-inference-key-not-production')
+    (root/'metrics-key').write_text('test-metrics-key-distinct-from-inference')
     subprocess.run(['espeak','-w',str(root/'work'/'speech.wav'),'This is a music library test. We are checking the words and their timing.'],check=True)
     subprocess.run(['chmod','-R','a+rwx',str(root)],check=True)
     name='phonoteka-inference-test'
-    subprocess.run(['docker','run','-d','--name',name,'--user','10001:10001','--memory','3g','--cpus','2','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=128m','-p','127.0.0.1:18001:8001','-v',str(root/'work')+':/work:ro','-v',str(root/'state')+':/inference:rw','-v',str(root/'key')+':/run/secrets/inference_key:ro','phonoteka-inference:ci'],check=True)
+    subprocess.run(['docker','run','-d','--name',name,'--user','10001:10001','--memory','3g','--cpus','2','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=128m','-p','127.0.0.1:18001:8001','-v',str(root/'work')+':/work:ro','-v',str(root/'state')+':/inference:rw','-v',str(root/'key')+':/run/secrets/inference_key:ro','-v',str(root/'metrics-key')+':/run/secrets/metrics_token:ro','-e','METRICS_TOKEN_FILE=/run/secrets/metrics_token','phonoteka-inference:ci'],check=True)
     def request(path,body=None):
         req=urllib.request.Request('http://127.0.0.1:18001'+path,data=json.dumps(body).encode() if body else None,headers={'Content-Type':'application/json','Authorization':'Bearer test-inference-key-not-production'})
         with urllib.request.urlopen(req,timeout=10) as response:return json.load(response)
@@ -44,6 +45,13 @@ with tempfile.TemporaryDirectory() as directory:
             time.sleep(2)
         assert wrong['state']=='succeeded',wrong
         assert wrong['result']['alignment']['coverage']==0 and wrong['result']['alignment']['lrc'] is None
+        req=urllib.request.Request('http://127.0.0.1:18001/metrics',headers={'Authorization':'Bearer test-metrics-key-distinct-from-inference'})
+        with urllib.request.urlopen(req) as response:
+            metrics=response.read().decode();assert 'phonoteka_inference_model_loaded 1.0' in metrics and 'phonoteka_collector_up 1.0' in metrics and 'phonoteka_inference_duration_seconds_count 3.0' in metrics
+        logs=subprocess.run(['docker','logs',name],capture_output=True,text=True,check=True)
+        events=[json.loads(line) for line in logs.stdout.splitlines() if line.strip()]
+        assert any(e['event']=='inference_finished' for e in events)
+        assert 'speech.wav' not in logs.stdout and 'test-metrics-key' not in logs.stdout and not logs.stderr
         print(json.dumps({'real_model':result['model'],'revision':result['model_revision'],'words':len(result['words']),'timeline_valid':True,'deduplication':True,'forced_alignment_coverage':alignment['coverage']}))
     except BaseException:
         subprocess.run(['docker','logs','--tail','100',name],check=False)

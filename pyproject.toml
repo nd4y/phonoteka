@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phonoteka"
-version = "0.5.0a1"
+version = "0.6.0a1"
 description = "Single-owner music library workbench"
 requires-python = ">=3.12"
 dependencies = [
@@ -16,6 +16,7 @@ dependencies = [
   "httpx==0.28.1",
   "shazamio==0.8.1",
   "yt-dlp==2026.8.19",
+  "prometheus-client==0.26.0",
   "audioop-lts==0.2.2; python_version >= '3.13'",
 ]
 

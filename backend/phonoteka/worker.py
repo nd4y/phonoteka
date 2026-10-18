@@ -21,6 +21,7 @@ import uuid
 from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube
 from .providers import Providers, ProviderError
 from .config import Settings
+from .telemetry import Metrics, configure_logging, context, log, opaque_id, bounded, KINDS, worker_server
 
 LOG = logging.getLogger("phonoteka.worker")
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".aiff", ".ape", ".wv", ".wma", ".webm", ".cue", ".m4b", ".oga", ".aif", ".mp4", ".mka", ".mkv", ".dsf", ".dff", ".ac3", ".wave", ".bin"}
@@ -125,6 +126,8 @@ class Worker:
         self.providers = None
         self.inference_task = None
         self.normal_task = None
+        self.metrics = Metrics('worker')
+        self.item_started = {}
 
     async def io(self, fn, *args, **kwargs):
         loop = asyncio.get_running_loop()
@@ -177,11 +180,25 @@ class Worker:
             failed = conn.execute("SELECT COUNT(*) FROM job_items WHERE job_id=? AND state IN ('failed','conflict','needs_review')", (job_id,)).fetchone()[0]
             conn.execute("UPDATE jobs SET completed=?,failed=?,updated_at=?,heartbeat=? WHERE id=?", (completed,failed,db.utcnow(),time.time(),job_id))
             db.event(conn, "job_progress", {"job_id": job_id, "completed": completed, "failed": failed, "track_id": key, "state": state})
+            kind = conn.execute('SELECT kind FROM jobs WHERE id=?',(job_id,)).fetchone()['kind']
+        if state == 'running':
+            self.item_started[job_id,key] = time.perf_counter()
+        else:
+            kind = bounded(kind,KINDS)
+            self.metrics.items.labels(kind,bounded(state,{'succeeded','failed','needs_review','conflict','interrupted','deferred'})).inc()
+            started = self.item_started.pop((job_id,key),None)
+            duration = time.perf_counter()-started if started is not None else None
+            if duration is not None: self.metrics.item_duration.labels(kind).observe(duration)
+            log('item_finished',logging.WARNING if state in {'failed','conflict','interrupted','needs_review','deferred'} else logging.INFO,
+                job_id=job_id,track_id=opaque_id(key),kind=kind,state=state,completed=completed,failed=failed,
+                duration_seconds=round(duration,6) if duration is not None else None,
+                code=bounded(result.get('code'),{'conflict','revision_conflict','needs_review','invalid_lyrics','unsupported_format','authorization_revoked','provider_unavailable','rate_limited','budget_exhausted','cancelled','storage_unavailable','decode_failed','internal_error'}) if result.get('code') else None)
 
     def finish(self, job_id, state, error=None):
         with db.transaction(self.settings.db_path) as conn:
             conn.execute("UPDATE jobs SET state=?,stage=?,error=?,updated_at=? WHERE id=?", (state,state,error,db.utcnow(),job_id))
             db.event(conn, "job_finished", {"job_id": job_id, "state": state})
+        log('job_finished',logging.ERROR if state in {'failed','interrupted'} else logging.INFO,job_id=job_id,state=state)
 
     async def bounded_items(self, items, fn):
         queue = asyncio.Queue(maxsize=self.settings.file_workers * 2)
@@ -325,7 +342,7 @@ class Worker:
             return {"code": exc.code, "message": exc.message, "retryable": exc.retryable}
         if isinstance(exc, OSError):
             return {"code": "storage_error", "message": "Ошибка доступа к хранилищу", "retryable": True}
-        LOG.exception("Unexpected file operation failure")
+        LOG.exception('Unexpected file operation failure',extra={'event':'file_operation_failed'})
         return {"code": "internal_error", "message": "Ошибка обработки файла", "retryable": False}
 
     def persist_mutation(self, job, item, result, metadata=None):
@@ -460,7 +477,7 @@ class Worker:
         meta = json.loads(row['metadata'])
         if 'duration' in meta and not float(meta['duration'])>0:
             probe=await self.io(media.probe_audio,path);meta['duration']=probe['duration'];meta['duration_source']='ffprobe_fallback'
-        if self.providers is None: self.providers = Providers(self.settings)
+        if self.providers is None: self.providers = Providers(self.settings,metrics=self.metrics)
         def authorized():
             if db.setting(self.settings.db_path,'recovery_required','false')=='true':raise media.MediaError('recovery_required','Восстановление требует сверки')
             if int(db.setting(self.settings.db_path,'auth_epoch','0'))!=job['auth_epoch'] or self.cancelled(job['id']):
@@ -538,7 +555,7 @@ class Worker:
         data=youtube.merge(await self.io(youtube.discover,path,self.settings,meta),meta.get('youtube'))
         params=json.loads(job['payload']).get('params',{});retry_at=0
         if params.get('youtube_lookup'):
-            if self.providers is None:self.providers=Providers(self.settings)
+            if self.providers is None:self.providers=Providers(self.settings,metrics=self.metrics)
             analysis=await self.io(db.fetchone,self.settings.db_path,'SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256']))
             try:
                 data=await youtube.enrich(self.providers,data,meta,item['relative_path'],json.loads(analysis['payload']) if analysis else {},params.get('youtube_search',False),authorized)
@@ -622,7 +639,7 @@ class Worker:
         payload=json.loads(job['payload']);items=payload['items'];retry_at=0
         done={r['item_key'] for r in db.fetchall(self.settings.db_path,"SELECT item_key FROM job_items WHERE job_id=? AND state IN ('succeeded','failed','conflict','needs_review')",(job['id'],))}
         items=[i for i in items if i['track_id'] not in done]
-        async def one(item):
+        async def one_inner(item):
             nonlocal retry_at
             pause=json.loads(db.fetchone(self.settings.db_path,'SELECT payload FROM jobs WHERE id=?',(job['id'],))['payload']).get('pause_requested')
             if retry_at or pause or self.cancelled(job["id"]):
@@ -649,6 +666,8 @@ class Worker:
                         conn.execute("UPDATE tracks SET status='needs_review' WHERE id=?", (key,))
                     result["recovery_required"] = True
                 self.item_result(job["id"], key, state, result)
+        async def one(item):
+            with context(track_id=opaque_id(item['track_id'])): await one_inner(item)
         await self.bounded_items(items, one)
         current=db.fetchone(self.settings.db_path,'SELECT * FROM jobs WHERE id=?',(job['id'],))
         paused=json.loads(current['payload']).get('pause_requested')
@@ -656,12 +675,14 @@ class Worker:
             with db.transaction(self.settings.db_path) as conn:
                 conn.execute("UPDATE jobs SET state='paused',stage='paused',updated_at=? WHERE id=?",(db.utcnow(),job['id']))
                 db.event(conn,'job_paused',{'job_id':job['id']})
+            log('job_paused',job_id=job['id'],kind=job['kind'])
             return
         if retry_at and not self.cancelled(job['id']):
             payload=json.loads(current['payload']);payload['retry_at']=retry_at
             with db.transaction(self.settings.db_path) as conn:
                 conn.execute("UPDATE jobs SET state='queued',stage='waiting_provider',payload=?,updated_at=? WHERE id=?",(db.encode(payload),db.utcnow(),job['id']))
                 db.event(conn,'job_waiting',{'job_id':job['id'],'retry_at':retry_at})
+            log('job_waiting_provider',logging.WARNING,job_id=job['id'],kind=job['kind'],retry_at=retry_at)
             return
         stats = db.fetchone(self.settings.db_path, "SELECT * FROM jobs WHERE id=?", (job["id"],))
         interrupted = db.fetchone(self.settings.db_path, "SELECT COUNT(*) AS n FROM job_items WHERE job_id=? AND state='interrupted'", (job["id"],))["n"]
@@ -707,6 +728,9 @@ class Worker:
                 self.finish(job["id"], "succeeded", "recovered_after_restart")
 
     async def background_job(self, job):
+        self.metrics.jobs_active.labels(job['kind']).inc()
+        token = context(job_id=job['id'],kind=job['kind']); token.__enter__()
+        log('job_started',job_id=job['id'],kind=job['kind'],total=job['total'])
         try:
             await self.process(job)
         except Exception as exc:
@@ -715,6 +739,8 @@ class Worker:
             if state=='interrupted': self.stopping=True
         finally:
             self.state='idle'
+            self.metrics.jobs_active.labels(job['kind']).dec()
+            token.__exit__(None,None,None)
 
     async def run(self, once=False):
         self.settings.validate()
@@ -765,7 +791,7 @@ class Worker:
                 try:
                     self.heartbeat()
                 except Exception:
-                    LOG.warning("Could not persist the final worker heartbeat", exc_info=True)
+                    LOG.warning('Could not persist the final worker heartbeat',exc_info=True,extra={'event':'heartbeat_persist_failed'})
 
 
 def main():
@@ -773,17 +799,22 @@ def main():
     parser.add_argument("--once", action="store_true", help="Drain queued jobs, then stop")
     parser.add_argument("--health", action="store_true", help="Check worker heartbeat")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging('worker')
     settings = Settings.from_env()
     if args.health:
         heartbeat = json.loads(db.setting(settings.db_path, "worker_heartbeat", "{}"))
         return 0 if time.time()-heartbeat.get("at", 0) < 30 and heartbeat.get("state") != "stopped" else 1
     worker = Worker(settings)
+    server = worker_server(worker.metrics,settings.metrics_token_file,9000) if settings.metrics_token_file else None
+    log('worker_starting',count=settings.file_workers)
     def stop(*_):
         worker.stopping = True
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    asyncio.run(worker.run(args.once))
+    try: asyncio.run(worker.run(args.once))
+    finally:
+        if server: server.shutdown(); server.server_close()
+        log('worker_stopped')
     return 0
 
 

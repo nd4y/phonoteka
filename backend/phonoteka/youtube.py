@@ -185,7 +185,8 @@ async def enrich(providers, data, meta, relative, analysis, search=False, author
         else:
             breaker = json.loads(await asyncio.to_thread(db.setting,providers.settings.db_path,'provider_breaker:youtube','{}'))
             if breaker.get('until',0) > time.time(): raise ProviderError('provider_cooldown','youtube','YouTube временно недоступен')
-            authorize();await providers.throttle('youtube');authorize();entries = await flat_search(query)
+            with providers.metrics.provider('youtube','search'):
+                authorize();await providers.throttle('youtube');authorize();entries = await flat_search(query)
             await asyncio.to_thread(providers.cache,key,'youtube',entries)
         for entry in entries:
             identity = entry.get('id')

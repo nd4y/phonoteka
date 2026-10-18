@@ -1,0 +1,28 @@
+scrape_configs:
+  - job_name: phonoteka-app
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    authorization:
+      credentials_file: /run/secrets/phonoteka_metrics_token
+    static_configs:
+      - targets: ['phonoteka-app:8000']
+        labels: {app: phonoteka, service: app, instance: st1}
+  - job_name: phonoteka-worker
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metrics_path: /metrics/worker
+    authorization:
+      credentials_file: /run/secrets/phonoteka_metrics_token
+    static_configs:
+      - targets: ['phonoteka-app:8000']
+        labels: {app: phonoteka, service: worker, instance: st1}
+  - job_name: phonoteka-inference
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metrics_path: /metrics/inference
+    authorization:
+      credentials_file: /run/secrets/phonoteka_metrics_token
+    static_configs:
+      - targets: ['phonoteka-app:8000']
+        labels: {app: phonoteka, service: inference, instance: st1}

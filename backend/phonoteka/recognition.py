@@ -48,6 +48,10 @@ class SignatureTransport:
         self.authorize = authorize
 
     async def request(self, method, url, *args, **kwargs):
+        with self.providers.metrics.provider('shazam','fingerprint'):
+            return await self._request(method,url,*args,**kwargs)
+
+    async def _request(self, method, url, *args, **kwargs):
         parsed = urlsplit(url)
         payload = kwargs.get('json')
         if (method != 'POST' or parsed.scheme != 'https' or parsed.hostname != 'amp.shazam.com'

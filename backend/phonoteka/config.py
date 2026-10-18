@@ -39,6 +39,7 @@ class Settings:
     musicbrainz_host: str = "musicbrainz.org"
     inference_url: str = ""
     inference_secret_file: Path | None = None
+    metrics_token_file: Path | None = None
 
     def __post_init__(self):
         if self.musicbrainz_host not in {"musicbrainz.org", "beta.musicbrainz.org"}:
@@ -68,6 +69,7 @@ class Settings:
             external_metadata=boolean("EXTERNAL_METADATA", False),
             external_fingerprints=boolean("EXTERNAL_FINGERPRINTS", False),
             youtube_enabled=boolean('YOUTUBE_ENABLED',False),
+            metrics_token_file=Path(os.environ['METRICS_TOKEN_FILE']) if os.environ.get('METRICS_TOKEN_FILE') else None,
             theaudiodb_enabled=boolean('THEAUDIODB_ENABLED',False),
             theaudiodb_artwork=boolean('THEAUDIODB_ARTWORK',False),
             discogs_enabled=boolean('DISCOGS_ENABLED',False),

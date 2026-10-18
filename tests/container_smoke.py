@@ -39,6 +39,8 @@ def main():
             (root/name).mkdir()
         password = uuid.uuid4().hex + '-container-test'
         (root/'secrets/password').write_text(password)
+        metrics_token=uuid.uuid4().hex+'-scrape-token'
+        (root/'secrets/metrics').write_text(metrics_token)
         (root/'guard/deployment.json').write_text(json.dumps({
             'storage_domain':prefix, 'instance_id':prefix,
             'work_root':'/work','source_root':'/original','publication_root':'/publication',
@@ -58,10 +60,12 @@ def main():
             'PUBLICATION_ROOT':'/publication','STORAGE_GUARD_DIR':'/storage-guard',
             'READ_ONLY':'false','STORAGE_VERIFIED':'true','INSTANCE_ID':prefix,
             'FILE_WORKERS':'2','IO_THREADS':'2',
+            'METRICS_TOKEN_FILE':'/run/secrets/metrics',
         }
         common=['docker','run','-d','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--tmpfs','/tmp:rw,size=128m,mode=1777']
         for key,value in env.items(): common += ['-e',f'{key}={value}']
         common += ['-v',f'{root}/state:/state','-v',f'{root}/original:/original:ro','-v',f'{root}/secrets/password:/run/secrets/password:ro']
+        common += ['-v',f'{root}/secrets/metrics:/run/secrets/metrics:ro']
         try:
             command(*common,'--name',app,'-p',f'127.0.0.1:{port}:8000','-v',f'{root}/work:/work:ro',image)
             command(*common,'--name',worker,'-v',f'{root}/work:/work','-v',f'{root}/publication:/publication','-v',f'{root}/guard:/storage-guard',image,'python','-m','phonoteka.worker')
@@ -138,7 +142,17 @@ def main():
             assert all(not next(m for m in x['Mounts'] if m['Destination']=='/original')['RW'] for x in inspect)
             request('/api/auth/logout','POST',{})
             assert not request('/api/auth/session')['authenticated']
+            metrics_req=urllib.request.Request(url+'/metrics',headers={'Authorization':'Bearer '+metrics_token})
+            with urllib.request.urlopen(metrics_req) as response:
+                metrics=response.read().decode();assert 'phonoteka_collection_files 2.0' in metrics and 'phonoteka_collector_up 1.0' in metrics
+            for name in (app,worker):
+                logs=subprocess.run(['docker','logs',name],capture_output=True,text=True,check=True)
+                events=[json.loads(line) for line in logs.stdout.splitlines() if line.strip()]
+                assert events and all('timestamp' in e and e['service'] in {'app','worker'} for e in events)
+                assert password not in logs.stdout and metrics_token not in logs.stdout and 'fixture.flac' not in logs.stdout
+                assert not logs.stderr,logs.stderr
             print('PASS: auth, CSRF session, production UI, scan, job dedup, stale guard, tags+LRC apply, audit, Ready, rollback, original hashes, container isolation')
+            print('PASS: authenticated Prometheus metrics, JSON stdout, no secret or file-path leakage')
         except Exception:
             for name in (app,worker):
                 subprocess.run(['docker','logs','--tail','35',name],check=False)
