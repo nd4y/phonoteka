@@ -30,8 +30,13 @@ class Settings:
     session_hours: int = 12
     provider_daily_limit: int = 2500
     external_metadata: bool = False
+    musicbrainz_host: str = "musicbrainz.org"
     inference_url: str = ""
     inference_secret_file: Path | None = None
+
+    def __post_init__(self):
+        if self.musicbrainz_host not in {"musicbrainz.org", "beta.musicbrainz.org"}:
+            raise ValueError("MUSICBRAINZ_HOST must be an official MusicBrainz endpoint")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -55,6 +60,7 @@ class Settings:
             inference_url=os.environ.get("INFERENCE_URL", "").rstrip("/"),
             inference_secret_file=path("INFERENCE_SECRET_FILE", "/run/secrets/inference_key"),
             external_metadata=boolean("EXTERNAL_METADATA", False),
+            musicbrainz_host=os.environ.get("MUSICBRAINZ_HOST", "musicbrainz.org"),
             provider_daily_limit=max(1,min(int(os.environ.get("PROVIDER_DAILY_LIMIT","2500")),10000)),
             io_threads=max(1, min(int(os.environ.get("IO_THREADS", "2")), 8)),
         )

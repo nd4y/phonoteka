@@ -75,3 +75,21 @@ def test_rate_limit_cooldown_and_incomplete_not_no_match(tmp_path):
         assert len(calls)==2
         await p.close()
     asyncio.run(run())
+
+
+def test_official_musicbrainz_endpoint_is_bounded(tmp_path, monkeypatch):
+    for value in ['127.0.0.1', 'musicbrainz.org.evil.example', 'http://musicbrainz.org', 'beta.musicbrainz.org/path']:
+        with pytest.raises(ValueError, match='official MusicBrainz'):
+            replace(settings(tmp_path), musicbrainz_host=value)
+    monkeypatch.setenv('MUSICBRAINZ_HOST', 'beta.musicbrainz.org')
+    assert Settings.from_env().musicbrainz_host == 'beta.musicbrainz.org'
+    calls=[]
+    def response(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, json={'recordings':[]})
+    async def run():
+        p=Providers(replace(settings(tmp_path), musicbrainz_host='beta.musicbrainz.org'),httpx.MockTransport(response))
+        assert await p.musicbrainz({'title':'Song','artist':'Singer'},100)==[]
+        await p.close()
+    asyncio.run(run())
+    assert len(calls)==1 and calls[0].startswith('https://beta.musicbrainz.org/ws/2/recording?')

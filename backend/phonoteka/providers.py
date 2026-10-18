@@ -15,7 +15,7 @@ from . import db, media
 
 POLICY_VERSION = 'public-v1'
 USER_AGENT = 'Phonoteka/0.2 (https://github.com/nd4y/phonoteka; personal music catalog)'
-HOSTS = {'musicbrainz.org','lrclib.net','coverartarchive.org','archive.org','api.acoustid.org'}
+HOSTS = {'beta.musicbrainz.org','musicbrainz.org','lrclib.net','coverartarchive.org','archive.org','api.acoustid.org'}
 INTERVAL = {'musicbrainz':1.1,'lrclib':.5,'coverartarchive':1.1,'acoustid':.4}
 
 
@@ -143,7 +143,7 @@ class Providers:
         def escape(value): return re.sub(r'([+\-&|!(){}\[\]^"~*?:\\/])',r'\\\1',value[:180])
         q='recording:"'+escape(query['title'])+'"'
         if query['artist']: q+=' AND artist:"'+escape(query['artist'])+'"'
-        data=await self.get('musicbrainz','https://musicbrainz.org/ws/2/recording',{'query':q,'fmt':'json','limit':8})
+        data=await self.get('musicbrainz','https://'+self.settings.musicbrainz_host+'/ws/2/recording',{'query':q,'fmt':'json','limit':8})
         candidates=[]
         for row in (data or {}).get('recordings',[])[:8]:
             artist=''.join(x.get('name',x.get('artist',{}).get('name',''))+x.get('joinphrase','') for x in row.get('artist-credit',[]))
