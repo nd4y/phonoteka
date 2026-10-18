@@ -117,6 +117,7 @@ class Worker:
         self.state = "starting"
         self.providers = None
         self.inference_task = None
+        self.normal_task = None
 
     async def io(self, fn, *args, **kwargs):
         loop = asyncio.get_running_loop()
@@ -135,7 +136,8 @@ class Worker:
     def claim_job(self):
         with db.transaction(self.settings.db_path) as conn:
             busy = bool(self.inference_task and not self.inference_task.done())
-            row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND (?=0 OR kind NOT IN ('transcribe','align')) ORDER BY created_at,id LIMIT 1",(int(busy),)).fetchone()
+            ordinary_busy = bool(self.normal_task and not self.normal_task.done())
+            row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND (?=0 OR kind NOT IN ('transcribe','align')) AND (?=0 OR kind IN ('transcribe','align')) ORDER BY created_at,id LIMIT 1",(int(busy),int(ordinary_busy))).fetchone()
             if not row:
                 return None
             conn.execute("UPDATE jobs SET state='running',stage=?,heartbeat=?,updated_at=? WHERE id=?", (row["kind"],time.time(),db.utcnow(),row["id"]))
@@ -499,11 +501,15 @@ class Worker:
             if totals["total"] and totals["total"] == totals["completed"]:
                 self.finish(job["id"], "succeeded", "recovered_after_restart")
 
-    async def background_inference(self, job):
+    async def background_job(self, job):
         try:
             await self.process(job)
         except Exception as exc:
-            self.finish(job['id'],'failed',self.failure(exc)['code'])
+            state = 'interrupted' if job['kind'] in {'apply','rollback','publish'} else 'failed'
+            self.finish(job['id'],state,self.failure(exc)['code'])
+            if state=='interrupted': self.stopping=True
+        finally:
+            self.state='idle'
 
     async def run(self, once=False):
         self.settings.validate()
@@ -521,36 +527,23 @@ class Worker:
                 while not self.stopping:
                     job = self.claim_job()
                     if job:
-                        if job['kind'] in {'transcribe','align'}:
-                            self.inference_task=asyncio.create_task(self.background_inference(job))
-                            continue
-                        try:
-                            await self.process(job)
-                        except Exception as exc:
-                            failure = self.failure(exc)
-                            # A failure while persisting progress may follow a
-                            # committed rename. Mutation jobs always reconcile
-                            # journals after restart before any replay is possible.
-                            state = "interrupted" if job["kind"] in {"apply", "rollback", "publish"} else "failed"
-                            self.finish(job["id"], state, failure["code"])
-                            if state == "interrupted":
-                                # Cancelled asyncio futures do not cancel running
-                                # ThreadPoolExecutor writes. Keep the guards until
-                                # the finally block drains every physical I/O task.
-                                self.stopping = True
-                        self.state = "idle"
-                    elif once:
-                        if self.inference_task and not self.inference_task.done():
-                            await self.inference_task
-                            continue
-                        break
-                    else:
-                        await asyncio.sleep(0.5)
+                        task=asyncio.create_task(self.background_job(job))
+                        if job['kind'] in {'transcribe','align'}: self.inference_task=task
+                        else: self.normal_task=task
+                        continue
+                    pending=[task for task in (self.normal_task,self.inference_task) if task and not task.done()]
+                    if once and not pending: break
+                    # Poll claims while either lane runs, so a newly queued ASR
+                    # can start during a long metadata batch (and vice versa).
+                    if pending:
+                        await asyncio.wait(pending,timeout=.1 if once else .5,return_when=asyncio.FIRST_COMPLETED)
+                    else: await asyncio.sleep(.5)
             finally:
                 self.stopping = True
-                if self.inference_task and not self.inference_task.done():
-                    try: await asyncio.wait_for(self.inference_task,timeout=20)
-                    except (asyncio.TimeoutError,asyncio.CancelledError): pass
+                for task in (self.normal_task,self.inference_task):
+                    if task and not task.done():
+                        try: await asyncio.wait_for(task,timeout=20)
+                        except (asyncio.TimeoutError,asyncio.CancelledError): pass
                 heartbeat_task.cancel()
                 self.state = "stopped"
                 # This must precede every fallible database/logging operation.

@@ -480,3 +480,22 @@ def test_slow_inference_does_not_block_ordinary_queue(settings,monkeypatch):
         assert completed==[ordinary['id']]
         assert client.get('/api/jobs/'+long_job['id']).json()['state']=='succeeded'
         assert client.get('/api/jobs/'+ordinary['id']).json()['state']=='succeeded'
+
+
+def test_inference_starts_during_existing_metadata_batch(settings,monkeypatch):
+    from phonoteka import inference_client
+    settings=replace(settings,inference_url='http://inference:8001',external_metadata=True)
+    with TestClient(create_app(settings),base_url=settings.app_url) as client:
+        headers=authenticated(client,settings);identity,_=seed(settings)
+        first=job(client,headers,'analyze',[identity]);second=job(client,headers,'transcribe',[identity])
+        started=[]
+        async def analyze(worker,task,item):
+            for _ in range(100):
+                if started:return {'candidates':[]}
+                await asyncio.sleep(.01)
+            raise AssertionError('Inference stalled behind metadata queue')
+        async def infer(worker,task,item):started.append(task['id']);return {'draft':True}
+        monkeypatch.setattr(Worker,'analyze_item',analyze);monkeypatch.setattr(inference_client,'process',infer)
+        drain(settings)
+        assert started==[second['id']]
+        assert all(client.get('/api/jobs/'+j['id']).json()['state']=='succeeded' for j in [first,second])
