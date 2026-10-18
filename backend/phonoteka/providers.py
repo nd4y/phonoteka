@@ -16,7 +16,7 @@ from . import db, media
 POLICY_VERSION = 'public-v1'
 USER_AGENT = 'Phonoteka/0.2 (https://github.com/nd4y/phonoteka; personal music catalog)'
 HOSTS = {'beta.musicbrainz.org','musicbrainz.org','lrclib.net','coverartarchive.org','archive.org','api.acoustid.org'}
-INTERVAL = {'musicbrainz':1.1,'lrclib':.5,'coverartarchive':1.1,'acoustid':.4}
+INTERVAL = {'musicbrainz':1.1,'lrclib':.5,'coverartarchive':1.1,'acoustid':.4,'shazam':2.0}
 
 
 def normalized(value):
@@ -182,8 +182,11 @@ class Providers:
         mime,_,_=media._cover(base64.b64decode(raw))
         return {'id':'caa:'+release_id,'provider':'coverartarchive','kind':'cover','cover':'data:'+mime+';base64,'+raw,'release_id':release_id,'source_url':url,'match':{'state':'needs_review','reasons':['confirm_release']}}
 
-    async def analyze(self, meta, relative):
+    async def analyze(self, meta, relative, identified=None):
         query,provenance=query_tags(meta,relative)
+        if identified:
+            query={k:scalar(identified['tags'],k) for k in ('title','artist','album')}
+            provenance='audio_fingerprint'
         result={'input_sha256':meta['sha256'],'policy':POLICY_VERSION,'query':query,'query_source':provenance,'candidates':[],'sources':[],'state':'needs_review','automatic_apply':False}
         if meta.get('input_error'):
             result.update(state='invalid_audio',sources=[{'provider':'local','state':'invalid_audio'}]);return result

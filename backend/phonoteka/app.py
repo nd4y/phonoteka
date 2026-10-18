@@ -40,7 +40,7 @@ class ProposalInput(BaseModel):
 
 class JobInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["scan", "audit", "apply", "rollback", "publish", "analyze", "transcribe", "align"]
+    kind: Literal["scan", "audit", "apply", "rollback", "publish", "analyze", "recognize", "transcribe", "align", "extract_cue", "replaygain"]
     track_ids: list[str] = Field(default_factory=list, max_length=10000)
     params: dict = Field(default_factory=dict)
 
@@ -229,7 +229,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         heartbeat = json.loads(db.setting(settings.db_path, "worker_heartbeat", "{}"))
         return {**count, "formats": formats, "active_jobs": active, "read_only": not settings.writable,
                 "worker": {**heartbeat, "online": time.time()-heartbeat.get("at", 0) < 30 and heartbeat.get("state") != "stopped"},
-                "capabilities": {"edit": True, "apply": settings.writable, "publish": settings.writable, "audit": True, "metadata_search": settings.external_metadata, "recognition": False, "asr": bool(settings.inference_url)},
+                "capabilities": {"edit": True, "apply": settings.writable, "publish": settings.writable, "audit": True, "metadata_search": settings.external_metadata, "recognition": settings.external_fingerprints, "cue_export": settings.writable, "replaygain": True, "asr": bool(settings.inference_url)},
                 "roots": {"work": str(settings.work_root)}, "version": __version__}
 
     @app.get("/api/tracks")
@@ -367,7 +367,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         key = request.headers.get("idempotency-key", "")
         if not key or len(key) > 128:
             raise security.error(428, "idempotency_key_required", "Передайте Idempotency-Key длиной до 128 символов")
-        if body.kind in {"apply", "rollback", "publish"} and not settings.writable:
+        if body.kind in {"apply", "rollback", "publish", "extract_cue"} and not settings.writable:
             raise security.error(409, "read_only", "Запись отключена до проверки конфигурации хранилища")
         if set(body.params) - {"proposal_id", "history_id", "allow_incomplete", "exception_reason", "scope", "language", "generation"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
@@ -381,11 +381,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise security.error(409,'inference_disabled','ASR не настроен')
         ids = list(dict.fromkeys(body.track_ids))
         if body.params.get('scope'):
-            if body.kind!='analyze' or body.params['scope']!='all' or ids:
+            if body.kind not in {'analyze','recognize','replaygain'} or body.params['scope']!='all' or ids:
                 raise security.error(422,'invalid_scope','Полная библиотека доступна только для анализа')
             ids=[row['id'] for row in db.fetchall(settings.db_path,"SELECT id FROM tracks WHERE is_current=1 AND status NOT IN ('error','missing') AND json_extract(metadata,'$.format')<>'cue' AND COALESCE(json_extract(metadata,'$.cue_album_image'),0)=0 LIMIT 10000")]
         if body.kind=='analyze' and not settings.external_metadata:
             raise security.error(409,'provider_disabled','Внешние метаданные отключены')
+        if body.kind=='recognize' and not settings.external_fingerprints:
+            raise security.error(409,'provider_disabled','Отправка аудиоотпечатков отключена')
         if body.kind == "scan" and ids:
             raise security.error(422, "invalid_scope", "Сканирование выполняется для всей библиотеки")
         if body.kind != "scan" and not ids:
@@ -405,7 +407,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if not track:
                     raise security.error(404, "track_not_found", "Трек не найден", file_id=track_id)
                 meta = json.loads(track['metadata'])
-                if meta.get('format') == 'cue' or (meta.get('cue_album_image') and body.kind not in {'audit','analyze','transcribe','align'}):
+                if body.kind=='extract_cue':
+                    if meta.get('format')!='cue' or meta.get('cue',{}).get('errors'):
+                        raise security.error(409,'invalid_cue','Нужен корректный CUE с доступными аудиофайлами')
+                elif meta.get('format') == 'cue' or (meta.get('cue_album_image') and body.kind not in {'audit','analyze','transcribe','align'}):
                     raise security.error(409, 'cue_read_only', 'CUE и альбомные образы не изменяются заданиями записи')
                 item = {"track_id": track_id, "sha256": track["sha256"], "relative_path": track["relative_path"]}
                 if body.kind=='align':
@@ -465,7 +470,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get('/api/providers')
     def provider_status(request: Request):
         security.require_session(request, settings)
-        return {'external_metadata':settings.external_metadata,'daily_limit':settings.provider_daily_limit,'providers':[{'id':x,'configured':settings.external_metadata,'capabilities':caps} for x,caps in [('musicbrainz',['metadata']),('lrclib',['lyrics']),('coverartarchive',['cover'])]]+[{'id':x,'configured':False,'state':'key_required'} for x in ['acoustid','audd','acrcloud']]}
+        return {'external_metadata':settings.external_metadata,'external_fingerprints':settings.external_fingerprints,'daily_limit':settings.provider_daily_limit,'providers':[{'id':x,'configured':settings.external_metadata,'capabilities':caps} for x,caps in [('musicbrainz',['metadata']),('lrclib',['lyrics']),('coverartarchive',['cover'])]]+[{'id':'shazam','configured':settings.external_fingerprints,'capabilities':['fingerprint'],'unofficial':True}]+[{'id':x,'configured':False,'state':'key_required'} for x in ['acoustid','audd','acrcloud']]}
 
     @app.post('/api/tracks/{track_id}/analysis/select',status_code=201)
     async def select_analysis(request: Request, track_id: str):

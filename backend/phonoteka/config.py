@@ -30,6 +30,7 @@ class Settings:
     session_hours: int = 12
     provider_daily_limit: int = 2500
     external_metadata: bool = False
+    external_fingerprints: bool = False
     musicbrainz_host: str = "musicbrainz.org"
     inference_url: str = ""
     inference_secret_file: Path | None = None
@@ -60,6 +61,7 @@ class Settings:
             inference_url=os.environ.get("INFERENCE_URL", "").rstrip("/"),
             inference_secret_file=path("INFERENCE_SECRET_FILE", "/run/secrets/inference_key"),
             external_metadata=boolean("EXTERNAL_METADATA", False),
+            external_fingerprints=boolean("EXTERNAL_FINGERPRINTS", False),
             musicbrainz_host=os.environ.get("MUSICBRAINZ_HOST", "musicbrainz.org"),
             provider_daily_limit=max(1,min(int(os.environ.get("PROVIDER_DAILY_LIMIT","2500")),10000)),
             io_threads=max(1, min(int(os.environ.get("IO_THREADS", "2")), 8)),

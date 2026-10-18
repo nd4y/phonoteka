@@ -55,6 +55,10 @@ _MB_DESCRIPTIONS = {
     "musicbrainz_artistid": "MusicBrainz Artist Id", "musicbrainz_albumartistid": "MusicBrainz Album Artist Id",
     "musicbrainz_releasetrackid": "MusicBrainz Release Track Id",
 }
+_RG_FIELDS = {'replaygain_track_gain','replaygain_track_peak'}
+_CUSTOM_FIELDS = _MB_FIELDS | _RG_FIELDS
+_MB_DESCRIPTIONS.update({key:key for key in _RG_FIELDS})
+
 MAX_LRC_BYTES, MAX_LRC_LINES = 2 * 1024 * 1024, 20000
 MAX_AUDIO_BYTES = 8 * 1024**3
 MAX_COVER_BYTES = 15 * 1024 * 1024
@@ -385,7 +389,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
             write_supported = version[1] in {3,4}
             reason = None if write_supported else "id3_version_not_supported"
         elif isinstance(audio, FLAC):
-            tags = {key: list(audio.get(key, [])) for key in (*_TEXT_FRAMES, *_MB_FIELDS) if audio.get(key)}
+            tags = {key: list(audio.get(key, [])) for key in (*_TEXT_FRAMES, *_CUSTOM_FIELDS) if audio.get(key)}
             has_art = any(picture.type == 3 for picture in audio.pictures)
             raw = audio.get("lyrics", [None])[0]
             lyrics = raw
@@ -404,7 +408,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                     lyrics_warning = exc.code
             write_supported, reason = True, None
         elif isinstance(audio, formats.PROFILES):
-            tags, raw, has_art = formats.inspect(audio, (*_TEXT_FRAMES, *_MB_FIELDS))
+            tags, raw, has_art = formats.inspect(audio, (*_TEXT_FRAMES, *_CUSTOM_FIELDS))
             lyrics = raw
             if raw and _LRC_TIME.search(raw):
                 try:
@@ -487,8 +491,12 @@ def _values(value: Any) -> list[str]:
 
 
 def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | None) -> None:
-    if set(tags) - set(_TEXT_FRAMES) - _MB_FIELDS:
+    if set(tags) - set(_TEXT_FRAMES) - _CUSTOM_FIELDS:
         raise MediaError("invalid_tags", "An unsupported tag field was requested")
+    for field in set(tags) & _RG_FIELDS:
+        values=_values(tags[field])
+        if len(values)>1 or (values and not re.fullmatch(r'[+-]?\d+(?:\.\d+)? dB' if field.endswith('gain') else r'\d+(?:\.\d+)?',values[0])):
+            raise MediaError('invalid_tags','Invalid ReplayGain value')
     parsed = parse_lrc(lrc) if lrc is not None else None
     normalized = serialize_lrc(parsed) if parsed else None
     audio = _load_audio(path)
@@ -607,7 +615,7 @@ def _untouched_signature(path: Path, tags: Mapping[str, Any], lrc: str | None, c
         audio = _load_audio(stream)
         if isinstance(audio, (MP3, WAVE, AIFF)):
             excluded = {('TYER' if key=='date' and audio.tags and audio.tags.version[1]==3 else _TEXT_FRAMES[key]) for key in tags if key in _TEXT_FRAMES}
-            excluded.update(f"TXXX:{_MB_DESCRIPTIONS[key]}" for key in tags if key in _MB_FIELDS and key != "musicbrainz_trackid")
+            excluded.update(f"TXXX:{_MB_DESCRIPTIONS[key]}" for key in tags if key in _CUSTOM_FIELDS and key != "musicbrainz_trackid")
             if "musicbrainz_trackid" in tags:
                 excluded.add("UFID:http://musicbrainz.org")
             if not audio.tags:

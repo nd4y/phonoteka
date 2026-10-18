@@ -16,7 +16,7 @@ def rows(settings):
 
 def summary(settings):
     exact=defaultdict(list);audio=defaultdict(list);albums=defaultdict(list)
-    counts={'files':0,'cue_sheets':0,'input_errors':0,'writable_profiles':0,'with_lyrics':0,'with_cover':0,'analyzed':0,'with_candidates':0,'no_match':0,'asr_drafts':0}
+    counts={'files':0,'cue_sheets':0,'input_errors':0,'writable_profiles':0,'with_lyrics':0,'with_cover':0,'analyzed':0,'with_candidates':0,'no_match':0,'asr_drafts':0,'fingerprint_matches':0,'fingerprint_no_match':0,'fingerprint_unavailable':0}
     for row,meta in rows(settings):
         counts['files']+=1
         if meta.get('format')=='cue':counts['cue_sheets']+=1;continue
@@ -32,6 +32,9 @@ def summary(settings):
             albums[(normalized(artist),normalized(album))].append({**entry,'album':album,'artist':artist,'track':scalar(tags,'tracknumber'),'disc':scalar(tags,'discnumber')})
     for row in db.fetchall(settings.db_path,'SELECT a.payload FROM analyses a JOIN tracks t ON t.id=a.track_id AND t.is_current=1 AND t.sha256=a.input_sha256'):
         data=json.loads(row['payload']);counts['analyzed']+=1;counts['with_candidates']+=bool(data.get('candidates'));counts['no_match']+=data.get('state')=='no_match';counts['asr_drafts']+=bool(data.get('asr'))
+        for source in data.get('sources',[]):
+            if source['provider']=='shazam':
+                counts['fingerprint_matches' if source['state']=='fingerprint_match' else 'fingerprint_no_match' if source['state']=='no_match' else 'fingerprint_unavailable']+=1
     album_report=[]
     for items in albums.values():
         observed=defaultdict(list);declared={}

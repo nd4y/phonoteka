@@ -92,6 +92,30 @@ def test_auth_cookie_csrf_and_private_endpoints(client, settings):
     assert client.get("/api/tracks").status_code == 401
 
 
+def test_fingerprint_opt_in_and_preserved_asr(settings, monkeypatch):
+    from phonoteka import recognition
+    with TestClient(create_app(settings),base_url=settings.app_url) as client:
+        headers=authenticated(client,settings);tid,sha=seed(settings)
+        response=client.post('/api/jobs',json={'kind':'recognize','track_ids':[tid]},headers={**headers,'Idempotency-Key':'disabled-fp'})
+        assert response.status_code==409
+    cfg=replace(settings,external_fingerprints=True)
+    monkeypatch.setattr(recognition,'sample',lambda *args:(b'sample',1))
+    async def found(*args):return {'id':'shazam:1','provider':'shazam','kind':'metadata','tags':{'title':'Actual','artist':'Singer'},'identification':'audio_fingerprint','match':{'state':'fingerprint_match','reasons':[]}}
+    monkeypatch.setattr(recognition,'recognize',found)
+    with db.transaction(cfg.db_path) as conn:
+        conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(tid,sha,db.encode({'asr':{'text':'retained'},'candidates':[]}),db.utcnow()))
+    with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
+        headers=authenticated(client,cfg)
+        queued=job(client,headers,'recognize',params={'scope':'all'})
+        drain(cfg)
+        assert client.get('/api/jobs/'+queued['id']).json()['state']=='succeeded'
+        detail=client.get('/api/tracks/'+tid).json()
+        assert detail['analysis']['asr']['text']=='retained'
+        assert detail['analysis']['candidates'][0]['tags']['title']=='Actual'
+        assert detail['sha256']==sha and not detail.get('proposal')
+        assert client.get('/api/reports/collection').json()['counts']['fingerprint_matches']==1
+
+
 def test_password_reset_revokes_session_and_epoch(client, settings):
     authenticated(client, settings)
     epoch = db.setting(settings.db_path, "auth_epoch")
