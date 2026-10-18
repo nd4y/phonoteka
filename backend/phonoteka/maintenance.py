@@ -57,6 +57,9 @@ def backup(settings,destination):
                 # Caches and active credentials are not portable backup artifacts.
                 dst.execute('DELETE FROM provider_cache');dst.execute('DELETE FROM sessions');dst.execute('DELETE FROM api_tokens');dst.commit()
                 dst.execute('PRAGMA wal_checkpoint(TRUNCATE)');dst.execute('PRAGMA journal_mode=DELETE')
+                # DELETE alone leaves cached/private rows in SQLite free pages.
+                # Compact the copy so excluded rows are absent from backup bytes.
+                dst.execute('VACUUM')
             for name in ('backups','exports'):
                 source=settings.state_dir/name
                 if not source.exists():continue

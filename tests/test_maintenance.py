@@ -13,8 +13,11 @@ def test_backup_restore_checks_artifacts_revokes_access_and_blocks_effects(setti
     with TestClient(create_app(settings),base_url=settings.app_url) as client:
         headers=authenticated(client,settings);job(client,headers,'scan');drain(settings)
         issued=client.post('/api/tokens',json={'name':'backup-test','scopes':['read']},headers=headers).json()
+        with db.transaction(settings.db_path) as conn:
+            conn.execute('INSERT INTO provider_cache VALUES(?,?,?,?)',('private-cache','test','private-cache-marker-do-not-export',9999999999))
         backup=tmp_path/'snapshot';result=maintenance.backup(settings,backup)
         assert result['verified'] and not result['music_included']
+        assert b'private-cache-marker-do-not-export' not in (backup/'phonoteka.sqlite3').read_bytes()
         restored=tmp_path/'restored';maintenance.restore(backup,restored)
         cfg=replace(settings,state_dir=restored)
         assert db.setting(cfg.db_path,'recovery_required')=='true'
