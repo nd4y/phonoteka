@@ -16,9 +16,11 @@ def rows(settings):
 
 def summary(settings):
     exact=defaultdict(list);audio=defaultdict(list);albums=defaultdict(list)
-    counts={'files':0,'cue_sheets':0,'input_errors':0,'writable_profiles':0,'with_lyrics':0,'with_cover':0,'analyzed':0,'with_candidates':0,'no_match':0,'asr_drafts':0,'fingerprint_matches':0,'fingerprint_no_match':0,'fingerprint_unavailable':0}
+    counts={'youtube_recorded':0,'youtube_confirmed':0,'youtube_candidates':0,'youtube_conflicts':0,'files':0,'cue_sheets':0,'input_errors':0,'writable_profiles':0,'with_lyrics':0,'with_cover':0,'analyzed':0,'with_candidates':0,'no_match':0,'asr_drafts':0,'fingerprint_matches':0,'fingerprint_no_match':0,'fingerprint_unavailable':0}
     for row,meta in rows(settings):
         counts['files']+=1
+        state=meta.get('youtube',{}).get('state')
+        for key,value in [('youtube_recorded','recorded'),('youtube_confirmed','owner_confirmed'),('youtube_candidates','candidates'),('youtube_conflicts','conflict')]:counts[key]+=state==value
         if meta.get('format')=='cue':counts['cue_sheets']+=1;continue
         counts['input_errors']+=bool(meta.get('input_error'))
         counts['writable_profiles']+=bool(meta.get('write_supported')) and not meta.get('cue_album_image',False)
@@ -56,7 +58,10 @@ def export(settings, kind):
     report=[]
     for row,meta in rows(settings):
         report.append({'id':row['id'],'path':row['relative_path'],'sha256':row['sha256'],'format':meta.get('format'),'status':row['status'],'title':scalar(meta.get('tags',{}),'title'),'artist':scalar(meta.get('tags',{}),'artist'),'album':scalar(meta.get('tags',{}),'album'),'duration':meta.get('duration'),'has_art':bool(meta.get('has_art')),'has_lrc':bool(meta.get('lrc')),'error':meta.get('input_error',{}).get('code',''),'write_supported':bool(meta.get('write_supported')) and not meta.get('cue_album_image',False)})
-    if kind=='json':return json.dumps({'files':report,'summary':summary(settings)},ensure_ascii=False,indent=2)
+    source={row['id']:meta.get('youtube',{}) for row,meta in rows(settings)}
+    for entry in report:
+        data=source.get(entry['id'],{});entry['youtube_url']='https://www.youtube.com/watch?v='+data['linked_id'] if data.get('linked_id') else '';entry['youtube_state']=data.get('state','unknown')
+    if kind=='json':return json.dumps({'files':report,'youtube':source,'summary':summary(settings)},ensure_ascii=False,indent=2)
     stream=io.StringIO();writer=csv.DictWriter(stream,fieldnames=list(report[0]) if report else ['id','path','status']);writer.writeheader()
     for row in report:
         # CSV formula injection protection applies to paths and provider/user tag text.

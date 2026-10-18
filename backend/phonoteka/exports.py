@@ -33,7 +33,8 @@ def generate(settings,authorize=lambda:None):
         path=media._validate(settings.publication_root/'Ready'/relative,settings.roots)
         media._expect(path,pub['sha256']);seen.add(relative)
         entries.append({'track_id':row['id'],'path':relative,'sha256':pub['sha256'],'size':path.stat().st_size,'duration':meta.get('duration',0),
-                        'title':scalar(meta.get('tags',{}),'title'),'artist':scalar(meta.get('tags',{}),'artist')})
+                        'title':scalar(meta.get('tags',{}),'title'),'artist':scalar(meta.get('tags',{}),'artist'),
+                        'youtube':meta.get('youtube',{})})
     if not entries:raise media.MediaError('empty_publication','Нет опубликованных актуальных версий для экспорта')
     identity=str(uuid.uuid4());base=settings.state_dir/'exports';media._make_directory(base)
     document={'id':identity,'created_at':db.utcnow(),'files':entries,'total_bytes':sum(x['size'] for x in entries),'verified_on':'server_ready','delivery_verified':False}

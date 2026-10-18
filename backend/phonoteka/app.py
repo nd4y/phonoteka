@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
-from . import __version__, db, security, cue, reports, intake
+from . import __version__, db, security, cue, reports, intake, youtube
 from .config import Settings
 
 
@@ -40,7 +40,7 @@ class ProposalInput(BaseModel):
 
 class JobInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["scan", "audit", "apply", "rollback", "publish", "analyze", "recognize", "transcribe", "align", "extract_cue", "replaygain", "replaygain_album", "export_ready", "normalize_audio"]
+    kind: Literal["scan", "audit", "apply", "rollback", "publish", "analyze", "recognize", "transcribe", "align", "extract_cue", "replaygain", "replaygain_album", "export_ready", "normalize_audio", "youtube"]
     track_ids: list[str] = Field(default_factory=list, max_length=10000)
     params: dict = Field(default_factory=dict)
 
@@ -156,6 +156,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     scheduling.install(app,settings)
     exports.install(app,settings)
     operations.install(app,settings)
+    youtube.install(app,settings)
     @app.get('/api/openapi.json',include_in_schema=False)
     def schema(request:Request):
         security.require_session(request,settings)
@@ -241,7 +242,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         recovery=db.setting(settings.db_path,'recovery_required','false')=='true';writable=settings.writable and not recovery
         return {**count, "formats": formats, "active_jobs": active, "read_only": not writable,'recovery_required':recovery,
                 "worker": {**heartbeat, "online": time.time()-heartbeat.get("at", 0) < 30 and heartbeat.get("state") != "stopped"},
-                "capabilities": {"edit": True, "apply": writable, "publish": writable, "audit": True, "metadata_search": settings.external_metadata and not recovery, "recognition": settings.external_fingerprints and not recovery, "cue_export": writable, "replaygain": not recovery, "asr": bool(settings.inference_url) and not recovery},
+                "capabilities": {"edit": True, "apply": writable, "publish": writable, "audit": True, "youtube": settings.youtube_enabled and not recovery, "metadata_search": settings.external_metadata and not recovery, "recognition": settings.external_fingerprints and not recovery, "cue_export": writable, "replaygain": not recovery, "asr": bool(settings.inference_url) and not recovery},
                 "roots": {"work": str(settings.work_root)}, "version": __version__}
 
     @app.get("/api/tracks")
@@ -384,8 +385,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise security.error(428, "idempotency_key_required", "Передайте Idempotency-Key длиной до 128 символов")
         if body.kind in {"apply", "rollback", "publish", "extract_cue", "normalize_audio"} and not settings.writable:
             raise security.error(409, "read_only", "Запись отключена до проверки конфигурации хранилища")
-        if set(body.params) - {"proposal_id", "history_id", "allow_incomplete", "exception_reason", "scope", "language", "generation"}:
+        if set(body.params) - {"proposal_id", "history_id", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
+        for name in ('youtube_lookup','youtube_search'):
+            if name in body.params and (body.kind!='youtube' or type(body.params[name]) is not bool):
+                raise security.error(422,'invalid_params','Параметры YouTube должны быть логическими значениями задания YouTube')
+        if body.params.get('youtube_search') and not body.params.get('youtube_lookup'):
+            raise security.error(422,'invalid_params','Поиск YouTube требует включенного сетевого запроса')
+        if body.kind=='youtube' and body.params.get('youtube_lookup') and not settings.youtube_enabled:
+            raise security.error(409,'provider_disabled','Сетевые запросы YouTube отключены')
         if body.params.get("allow_incomplete") and (not isinstance(body.params.get("exception_reason"), str) or not 5 <= len(body.params["exception_reason"]) <= 1000):
             raise security.error(422, "exception_reason_required", "Укажите причину публикации неполных метаданных")
         if body.params.get('language') and not re.fullmatch('[a-z]{2,3}',str(body.params['language'])):
@@ -398,7 +406,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body.kind=='replaygain_album' and not 1<=len(ids)<=200:
             raise security.error(422,'invalid_album','Выберите 1-200 файлов одной группы альбома')
         if body.params.get('scope'):
-            if body.kind not in {'analyze','recognize','replaygain'} or body.params['scope'] not in {'all','pending'} or ids:
+            if body.kind not in {'analyze','recognize','replaygain','youtube'} or body.params['scope'] not in {'all','pending'} or ids:
                 raise security.error(422,'invalid_scope','Полная библиотека доступна только для анализа')
             ids=[row['id'] for row in db.fetchall(settings.db_path,"SELECT id FROM tracks WHERE is_current=1 AND status NOT IN ('error','missing') AND json_extract(metadata,'$.format')<>'cue' AND COALESCE(json_extract(metadata,'$.cue_album_image'),0)=0 LIMIT 10000")]
             if body.params['scope']=='pending':
@@ -407,6 +415,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for row in db.fetchall(settings.db_path,"SELECT a.track_id,json_extract(s.value,'$.provider') AS provider,json_extract(s.value,'$.state') AS state FROM analyses a JOIN tracks t ON t.id=a.track_id AND t.sha256=a.input_sha256 AND t.is_current=1,json_each(a.payload,'$.sources') s"):
                     known.setdefault(row['track_id'],{})[row['provider']]=row['state']
                 for track_id in ids:
+                    if body.kind=='youtube':
+                        m=json.loads(db.fetchone(settings.db_path,'SELECT metadata FROM tracks WHERE id=?',(track_id,))['metadata']).get('youtube',{})
+                        complete=m.get('lookup_complete') if body.params.get('youtube_lookup') else m.get('scanned_at')
+                        if body.params.get('youtube_search'):complete=complete and (m.get('linked_id') or m.get('search_state') in {'candidates','no_match','insufficient_query'} or m.get('candidates'))
+                        if not complete:pending.append(track_id)
+                        continue
                     sources=known.get(track_id,{})
                     wanted=['shazam'] if body.kind=='recognize' else ['local_replaygain'] if body.kind=='replaygain' else ['musicbrainz','lrclib']
                     if any(sources.get(p) not in {'candidates','candidate','no_match','fingerprint_match'} for p in wanted):pending.append(track_id)
@@ -440,7 +454,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if body.kind=='extract_cue':
                     if meta.get('format')!='cue' or meta.get('cue',{}).get('errors'):
                         raise security.error(409,'invalid_cue','Нужен корректный CUE с доступными аудиофайлами')
-                elif meta.get('format') == 'cue' or (meta.get('cue_album_image') and body.kind not in {'audit','analyze','transcribe','align'}):
+                elif meta.get('format') == 'cue' or (meta.get('cue_album_image') and body.kind not in {'audit','analyze','transcribe','align','youtube'}):
                     raise security.error(409, 'cue_read_only', 'CUE и альбомные образы не изменяются заданиями записи')
                 item = {"track_id": track_id, "sha256": track["sha256"], "relative_path": track["relative_path"]}
                 if body.kind in {'transcribe','align'} and 'generation' not in body.params:
@@ -537,7 +551,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def provider_status(request: Request):
         security.require_session(request, settings)
         providers=[{'id':x,'configured':settings.external_metadata,'capabilities':caps} for x,caps in [('musicbrainz',['metadata']),('lrclib',['lyrics']),('coverartarchive',['cover'])]]
-        providers += [{'id':'shazam','configured':settings.external_fingerprints,'capabilities':['fingerprint'],'unofficial':True},
+        providers += [{'id':'youtube','configured':settings.youtube_enabled,'capabilities':['video_provenance','video_search']},
+                      {'id':'shazam','configured':settings.external_fingerprints,'capabilities':['fingerprint'],'unofficial':True},
                       {'id':'theaudiodb','configured':settings.external_metadata and settings.theaudiodb_enabled,'capabilities':['release']+(['cover'] if settings.theaudiodb_artwork else [])},
                       {'id':'discogs','configured':bool(settings.external_metadata and settings.discogs_enabled and settings.discogs_token_file and settings.discogs_token_file.is_file()),'capabilities':['release']},
                       *[{'id':x,'configured':False,'state':'key_required'} for x in ['acoustid','audd','acrcloud']]]

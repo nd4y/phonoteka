@@ -15,8 +15,8 @@ from . import db, media
 
 POLICY_VERSION = 'public-v1'
 USER_AGENT = 'Phonoteka/0.2 (https://github.com/nd4y/phonoteka; personal music catalog)'
-HOSTS = {'beta.musicbrainz.org','musicbrainz.org','lrclib.net','coverartarchive.org','archive.org','api.acoustid.org','www.theaudiodb.com','r2.theaudiodb.com','api.discogs.com'}
-INTERVAL = {'musicbrainz':1.1,'lrclib':.5,'coverartarchive':1.1,'acoustid':.4,'shazam':10.0,'theaudiodb':2.1,'discogs':1.1}
+HOSTS = {'www.youtube.com','beta.musicbrainz.org','musicbrainz.org','lrclib.net','coverartarchive.org','archive.org','api.acoustid.org','www.theaudiodb.com','r2.theaudiodb.com','api.discogs.com'}
+INTERVAL = {'youtube':3.0,'musicbrainz':1.1,'lrclib':.5,'coverartarchive':1.1,'acoustid':.4,'shazam':10.0,'theaudiodb':2.1,'discogs':1.1}
 
 
 def normalized(value):
@@ -110,7 +110,7 @@ class Providers:
                         if response.status_code in (301,302,303,307,308):
                             target=str(response.url.join(response.headers.get('location','')))
                             continue
-                        if response.status_code==404: data=None;break
+                        if response.status_code==404 or (provider=='youtube' and response.status_code in {400,401,403,410}): data=None;break
                         if response.status_code in (401,403): raise ProviderError('provider_unauthorized',provider,'Источник отклонил доступ')
                         if response.status_code==429:
                             retry=response.headers.get('retry-after','60')

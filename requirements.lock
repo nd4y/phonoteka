@@ -39,5 +39,6 @@ numpy==2.5.4
 propcache==0.5.4
 pydub==0.25.1
 shazamio==0.8.1
+yt-dlp==2026.8.19
 shazamio-core==1.1.2
 yarl==1.25.1

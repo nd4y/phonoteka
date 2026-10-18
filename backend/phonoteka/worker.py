@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports
+from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube
 from .providers import Providers, ProviderError
 from .config import Settings
 
@@ -215,6 +215,8 @@ class Worker:
             if exc.code not in {'invalid_audio','unsupported_format'}: raise
             inspected = media.fallback_inventory(path, self.settings.roots, exc)
         meta = normalize_metadata(inspected)
+        if meta.get('format')!='cue' and not meta.get('input_error'):
+            meta['youtube']=youtube.merge(youtube.discover(path,self.settings,meta))
         after = path.stat()
         if (before.st_size,before.st_mtime_ns,before.st_ino) != (after.st_size,after.st_mtime_ns,after.st_ino):
             raise media.MediaError("file_changing", "File changed during inventory")
@@ -231,6 +233,10 @@ class Worker:
                     for key in ("audit", "publication", "cue_sheets", "cue_album_image", "derived_from", "cue_export", "audio_export"):
                         if key in old:
                             meta[key] = old[key]
+                    if 'youtube' in meta:
+                        if old.get('derived_from'):
+                            meta['youtube']=youtube.discover(path,self.settings,old)
+                        meta['youtube']=youtube.merge(meta['youtube'],old.get('youtube'))
                     status = current["status"] if current["status"] not in {"missing", "error"} else "indexed"
                     if meta.get("input_error"): status = "error"
                 else:
@@ -331,7 +337,7 @@ class Worker:
         with db.transaction(self.settings.db_path) as conn:
             current = conn.execute("SELECT * FROM tracks WHERE id=?", (track_id,)).fetchone()
             old = json.loads(current["metadata"])
-            for field in ('derived_from','cue_sheets','cue_album_image'):
+            for field in ('derived_from','cue_sheets','cue_album_image','youtube'):
                 if field in old: metadata[field]=old[field]
             if job["kind"] == "publish":
                 metadata = old
@@ -520,6 +526,47 @@ class Worker:
             retry.append(max(time.time()+10,due))
         return {'state':result['state'],'candidates':len(result['candidates']),'sources':result['sources'],**({'retry_at':max(retry)} if retry else {})}
 
+    async def process_youtube(self, job, item):
+        def authorized():
+            if db.setting(self.settings.db_path,'recovery_required','false')=='true' or self.cancelled(job['id']) or int(db.setting(self.settings.db_path,'auth_epoch','0'))!=job['auth_epoch']:
+                raise media.MediaError('authorization_revoked','Разрешение задания отозвано')
+        authorized()
+        row=await self.io(db.fetchone,self.settings.db_path,'SELECT metadata,sha256 FROM tracks WHERE id=? AND is_current=1',(item['track_id'],))
+        if not row or row['sha256']!=item['sha256']:raise media.MediaError('conflict','Версия файла изменилась')
+        meta=json.loads(row['metadata']);path=self.settings.work_root/item['relative_path']
+        await self.io(media._expect,path,item['sha256'])
+        data=youtube.merge(await self.io(youtube.discover,path,self.settings,meta),meta.get('youtube'))
+        params=json.loads(job['payload']).get('params',{});retry_at=0
+        if params.get('youtube_lookup'):
+            if self.providers is None:self.providers=Providers(self.settings)
+            analysis=await self.io(db.fetchone,self.settings.db_path,'SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256']))
+            try:
+                data=await youtube.enrich(self.providers,data,meta,item['relative_path'],json.loads(analysis['payload']) if analysis else {},params.get('youtube_search',False),authorized)
+                data['lookup_complete']=True;data.pop('lookup_error',None)
+            except ProviderError as exc:
+                data.update(lookup_complete=False,lookup_error=exc.code)
+                if exc.code=='provider_unavailable':await self.io(self.providers.unavailable,'youtube')
+                if exc.code in {'provider_unavailable','rate_limited','provider_cooldown','budget_exhausted'}:
+                    breaker=json.loads(db.setting(self.settings.db_path,'provider_breaker:youtube','{}'));retry_at=breaker.get('until',time.time()+60)
+                    if exc.code=='budget_exhausted':
+                        first=db.fetchone(self.settings.db_path,"SELECT MIN(at) AS at FROM provider_calls WHERE provider='youtube'")
+                        retry_at=(first['at'] if first and first['at'] else time.time())+86401
+                    retry_at=max(time.time()+10,retry_at)
+        await self.io(media._expect,path,item['sha256']);authorized()
+        with db.transaction(self.settings.db_path) as conn:
+            current=conn.execute('SELECT metadata,sha256 FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
+            if not current or current['sha256']!=item['sha256']:raise media.MediaError('conflict','Версия файла изменилась')
+            latest=json.loads(current['metadata']);owner=latest.get('youtube',{})
+            # Preserve a link/unlink submitted while the external request was running.
+            if owner!=meta.get('youtube',{}) and owner.get('state') in {'owner_confirmed','unlinked'}:
+                enriched=data;data=youtube.merge(data,owner)
+                for key in ('lookup_complete','lookup_error','query_source','search_state'):
+                    if key in enriched:data[key]=enriched[key]
+            latest['youtube']=data
+            conn.execute('UPDATE tracks SET metadata=?,updated_at=? WHERE id=?',(db.encode(latest),db.utcnow(),item['track_id']))
+            db.event(conn,'youtube_sources_updated',{'track_id':item['track_id'],'state':data['state'],'candidates':len(data['candidates'])})
+        return {'state':data['state'],'linked_id':data.get('linked_id'),'candidates':len(data['candidates']),**({'retry_at':retry_at} if retry_at else {})}
+
     def local_cover(self, path):
         for name in ('cover.jpg','folder.jpg','front.jpg','cover.png','folder.png'):
             candidates = [p for p in path.parent.iterdir() if p.name.casefold()==name and not p.is_symlink() and p.is_file()]
@@ -585,6 +632,7 @@ class Worker:
             try:
                 if job['kind'] in {'transcribe','align'}:
                     result = await inference_client.process(self,job,item)
+                elif job['kind']=='youtube':result=await self.process_youtube(job,item)
                 else:
                     result = await self.analyze_item(job, item) if job['kind'] in {'analyze','recognize'} else await self.io(self.process_item, job, item)
                 if result.get('retry_at'):

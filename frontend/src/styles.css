@@ -62,3 +62,5 @@
 label:has(>input[type="checkbox"]){flex-direction:row;align-items:center;gap:12px;min-height:44px;line-height:1.5;cursor:pointer}
 label>input[type="checkbox"]{width:20px;height:20px;min-height:20px;flex:0 0 20px;padding:0;margin:0;accent-color:var(--accent);border-radius:4px}
 .settings-panel>label{margin:14px 0}.settings-panel>.button{margin-top:10px}
+
+.youtube-panel{margin-bottom:18px}.youtube-panel>.button-row{margin:14px 0}.youtube-candidate{padding:16px;margin:12px 0;border:1px solid var(--line);border-radius:16px;overflow-wrap:anywhere}.youtube-candidate>a{font-weight:650;color:var(--accent)}

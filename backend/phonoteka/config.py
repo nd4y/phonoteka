@@ -31,6 +31,7 @@ class Settings:
     provider_daily_limit: int = 2500
     external_metadata: bool = False
     external_fingerprints: bool = False
+    youtube_enabled: bool = False
     theaudiodb_enabled: bool = False
     theaudiodb_artwork: bool = False
     discogs_enabled: bool = False
@@ -66,6 +67,7 @@ class Settings:
             inference_secret_file=path("INFERENCE_SECRET_FILE", "/run/secrets/inference_key"),
             external_metadata=boolean("EXTERNAL_METADATA", False),
             external_fingerprints=boolean("EXTERNAL_FINGERPRINTS", False),
+            youtube_enabled=boolean('YOUTUBE_ENABLED',False),
             theaudiodb_enabled=boolean('THEAUDIODB_ENABLED',False),
             theaudiodb_artwork=boolean('THEAUDIODB_ARTWORK',False),
             discogs_enabled=boolean('DISCOGS_ENABLED',False),

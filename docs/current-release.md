@@ -1,8 +1,10 @@
-# Current implementation: 0.4.1 alpha
+# Current implementation: 0.5.0 alpha
 
 The application is a single-owner service. Original audio is mounted read-only. Changes are proposed, reviewed, atomically written to the separate working copy, audited, and published to a separate Ready directory. The current image is not a claim that all specification acceptance criteria have passed.
 
 ## Available
+
+- YouTube provenance from embedded URLs, yt-dlp filenames and bounded sidecars, inherited source links for derivatives, owner confirmation/unlink, public video metadata and up to three search candidates using pinned yt-dlp without media downloads/cookies. Search does not establish the exact original upload. See [YouTube provenance](youtube.md).
 
 - Async bounded file workers, durable jobs, idempotency, restart recovery, revisions, file history and rollback.
 - Native read/write profiles tested with audio packet and unrelated metadata preservation: MP3 ID3v2.3/v2.4, FLAC, M4A/MP4, Ogg Vorbis, Opus, WAV and AIFF. No audio re-encoding for tag changes.
