@@ -56,7 +56,9 @@ def main():
         assert image and image['Config'].get('Labels',{}).get('io.phonoteka.source_sha256')==snapshot
         # Reuse only these generated fixtures between accepted image upgrades,
         # allowing the ordinary service-worker update flow to be exercised.
-        base=ROOT/'browser-review'/'fixtures'
+        # v2 stores real native tags/lyrics and a parseable multi-file CUE;
+        # preserve the original fixture tree for existing review sessions.
+        base=ROOT/'browser-review'/'fixtures-v2'
         base.mkdir(parents=True,exist_ok=True,mode=0o700)
         credential=base/'owner_password'
         if credential.exists():assert credential.read_text()==FIXTURE_PASSWORD

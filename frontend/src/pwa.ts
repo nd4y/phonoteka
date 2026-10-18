@@ -25,6 +25,9 @@ const subscribers = new Set<() => void>();
 let registration: ServiceWorkerRegistration | null = null;
 let installPrompt: InstallPrompt | null = null;
 let started = false;
+let watchingController = false;
+const watchedWorkers = new WeakSet<ServiceWorker>();
+const watchedRegistrations = new WeakSet<ServiceWorkerRegistration>();
 function publish(next: Partial<PwaState>) {
   state = { ...state, ...next };
   subscribers.forEach(callback => callback());
@@ -34,18 +37,53 @@ export function usePwa() {
 }
 export function dismissPwaError() { publish({ error: null }); }
 
+function syncWorkerState() {
+  const current = registration;
+  if (!current) return;
+  for (const worker of [current.installing, current.waiting, current.active]) {
+    if (!worker || watchedWorkers.has(worker)) continue;
+    watchedWorkers.add(worker);
+    worker.addEventListener('statechange', () => {
+      syncWorkerState();
+      // Registration slots can change in the same lifecycle turn.
+      queueMicrotask(syncWorkerState);
+      if (worker.state === 'redundant' && !state.offlineReady && !current.active) {
+        publish({ error: 'Не удалось сохранить интерфейс для запуска без сети. Повторите проверку обновлений.' });
+      }
+    });
+  }
+  const waiting = current.waiting;
+  // The first install briefly passes through "waiting" before activation.
+  // An update requires a distinct existing active worker/controller.
+  const updateReady = waiting?.state === 'installed' && waiting !== current.active
+    && Boolean(current.active || navigator.serviceWorker.controller);
+  publish({
+    updateReady,
+    offlineReady: state.offlineReady || current.active?.state === 'activated'
+      || navigator.serviceWorker.controller?.state === 'activated',
+  });
+}
+
 async function connectWorker() {
   registration = await navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' });
-  const updateState = () => publish({ updateReady: Boolean(registration?.waiting) });
-  updateState();
-  registration.addEventListener('updatefound', () => {
-    const worker = registration?.installing;
-    worker?.addEventListener('statechange', () => {
-      if (worker.state === 'installed') updateState();
-      if (worker.state === 'redundant' && !state.offlineReady) publish({ error: 'Не удалось сохранить интерфейс для запуска без сети. Повторите проверку обновлений.' });
+  if (!watchedRegistrations.has(registration)) {
+    watchedRegistrations.add(registration);
+    registration.addEventListener('updatefound', syncWorkerState);
+  }
+  if (!watchingController) {
+    watchingController = true;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      // A different tab can accept an update. Synchronize this tab's banner,
+      // but preserve its playback and drafts by never reloading here.
+      syncWorkerState();
+      queueMicrotask(syncWorkerState);
     });
+  }
+  syncWorkerState();
+  void navigator.serviceWorker.ready.then(() => {
+    syncWorkerState();
+    publish({ offlineReady: true });
   });
-  void navigator.serviceWorker.ready.then(() => publish({ offlineReady: true }));
 }
 
 export function registerPwa() {
@@ -97,14 +135,20 @@ export async function checkPwaUpdate() {
   try {
     if (registration) await registration.update();
     else if (state.supported && import.meta.env.PROD) await connectWorker();
+    syncWorkerState();
   } catch { publish({ error: 'Не удалось проверить обновление. Сервер должен быть доступен.' }); }
 }
 
 // Called only after the owner's explicit click and optional draft confirmation.
 // Other tabs may receive a new controller, but never reload automatically.
 export async function activatePwaUpdate(onBeforeReload?: () => void) {
+  if (state.updating) return false;
+  syncWorkerState();
   const waiting = registration?.waiting;
-  if (!waiting || state.updating) return;
+  if (!waiting || !state.updateReady) {
+    publish({ updateReady: false, error: 'Готового обновления больше нет. Проверьте обновления ещё раз.' });
+    return false;
+  }
   publish({ updating: true, error: null });
   try {
     await new Promise<void>((resolve, reject) => {
@@ -113,6 +157,7 @@ export async function activatePwaUpdate(onBeforeReload?: () => void) {
         reject(new Error('activation timeout'));
       }, 15000);
       const changed = () => {
+        if (navigator.serviceWorker.controller !== waiting) return;
         window.clearTimeout(timeout);
         navigator.serviceWorker.removeEventListener('controllerchange', changed);
         resolve();
@@ -122,5 +167,10 @@ export async function activatePwaUpdate(onBeforeReload?: () => void) {
     });
     onBeforeReload?.();
     window.location.reload();
-  } catch { publish({ updating: false, error: 'Обновление пока не применилось. Ваши данные остаются на экране. Повторите попытку.' }); }
+    return true;
+  } catch {
+    syncWorkerState();
+    publish({ updating: false, error: 'Обновление пока не применилось. Ваши данные остаются на экране. Повторите попытку.' });
+    return false;
+  }
 }
