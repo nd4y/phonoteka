@@ -1,0 +1,11 @@
+FROM python:3.13-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 INFERENCE_STATE=/inference WORK_ROOT=/work OMP_NUM_THREADS=2
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates libgomp1 && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY pyproject.toml README.md requirements.lock requirements-inference.lock ./
+COPY backend ./backend
+RUN pip install -c requirements.lock . && pip install -c requirements-inference.lock faster-whisper==1.2.1
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-small',revision='536b0662742c02347bc0e980a01041f333bce120',local_dir='/models/faster-whisper-small',allow_patterns=['config.json','model.bin','tokenizer.json','vocabulary.*','preprocessor_config.json'])"
+USER 10001:10001
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=3)" || exit 1
+CMD ["uvicorn","phonoteka.inference:app","--host","0.0.0.0","--port","8001","--no-proxy-headers"]

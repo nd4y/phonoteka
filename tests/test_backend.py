@@ -395,3 +395,34 @@ def test_cue_inventory_preview_and_write_protection(client, settings):
     assert client.get(endpoint).status_code == 200
     client.post('/api/auth/logout', headers=headers)
     assert client.get(endpoint).status_code == 401
+
+
+def test_analysis_is_read_only_select_requires_current_revision(client, settings, monkeypatch):
+    headers=authenticated(client,settings)
+    track_id,sha=seed(settings)
+    candidate={'id':'fake:1','kind':'metadata','provider':'fixture','tags':{'title':'Proposed'},'match':{'state':'needs_review','reasons':[]}}
+    with db.transaction(settings.db_path) as conn:
+        conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(track_id,sha,db.encode({'input_sha256':sha,'candidates':[candidate],'sources':[]}),db.utcnow()))
+    before=(settings.work_root/'a.mp3').read_bytes()
+    response=client.post(f'/api/tracks/{track_id}/analysis/select',json={'candidate_ids':['fake:1']},headers={**headers,'If-Match':'"'+sha+'"'})
+    assert response.status_code==201,response.text
+    assert (settings.work_root/'a.mp3').read_bytes()==before
+    assert client.get(f'/api/tracks/{track_id}').json()['proposal']['tags']['title']=='Proposed'
+    stale=client.post(f'/api/tracks/{track_id}/analysis/select',json={'candidate_ids':['fake:1']},headers={**headers,'If-Match':'"'+'0'*64+'"'})
+    assert stale.status_code==412
+    fabricated=client.post(f'/api/tracks/{track_id}/analysis/select',json={'candidate_ids':['evil']},headers={**headers,'If-Match':'"'+sha+'"'})
+    assert fabricated.status_code==422
+
+
+def test_bad_audio_is_catalogued_and_webm_readable(client,settings):
+    headers=authenticated(client,settings)
+    (settings.work_root/'broken.webm').write_bytes(b'x')
+    path=settings.work_root/'valid.webm'
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=2','-c:a','libopus',str(path)],check=True)
+    scan=job(client,headers,'scan');drain(settings)
+    rows=client.get('/api/tracks').json()['items']
+    bad=next(x for x in rows if x['filename']=='broken.webm')
+    good=next(x for x in rows if x['filename']=='valid.webm')
+    assert bad['status']=='error' and bad['input_error'] and not bad['can_write']
+    assert good['codec']=='opus' and good['duration']>0
+    assert client.get('/api/jobs/'+scan['id']).json()['failed']==1

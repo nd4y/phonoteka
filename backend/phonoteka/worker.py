@@ -18,11 +18,12 @@ import sys
 import time
 import uuid
 
-from . import db, media, cue
+from . import db, media, cue, inference_client
+from .providers import Providers, ProviderError
 from .config import Settings
 
 LOG = logging.getLogger("phonoteka.worker")
-AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".aiff", ".ape", ".wv", ".wma", ".webm", ".cue"}
+AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".aiff", ".ape", ".wv", ".wma", ".webm", ".cue", ".m4b", ".oga", ".aif", ".mp4", ".mka", ".mkv", ".dsf", ".dff", ".ac3", ".wave", ".bin"}
 EXCLUDED_DIRS = {"@eadir", "#recycle", ".trash", ".snapshot", ".phonoteka-staging", "@recycle"}
 
 
@@ -114,6 +115,8 @@ class Worker:
         self.pool = ThreadPoolExecutor(max_workers=settings.io_threads, thread_name_prefix="music-io")
         self.stopping = False
         self.state = "starting"
+        self.providers = None
+        self.inference_task = None
 
     async def io(self, fn, *args, **kwargs):
         loop = asyncio.get_running_loop()
@@ -131,7 +134,8 @@ class Worker:
 
     def claim_job(self):
         with db.transaction(self.settings.db_path) as conn:
-            row = conn.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY created_at,id LIMIT 1").fetchone()
+            busy = bool(self.inference_task and not self.inference_task.done())
+            row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND (?=0 OR kind NOT IN ('transcribe','align')) ORDER BY created_at,id LIMIT 1",(int(busy),)).fetchone()
             if not row:
                 return None
             conn.execute("UPDATE jobs SET state='running',stage=?,heartbeat=?,updated_at=? WHERE id=?", (row["kind"],time.time(),db.utcnow(),row["id"]))
@@ -189,7 +193,12 @@ class Worker:
     def scan_one(self, relative, scan_id):
         path = self.settings.work_root / relative
         before = path.stat()
-        meta = normalize_metadata(cue.inspect_cue(path, self.settings.work_root) if path.suffix.lower() == '.cue' else media.inspect_audio(path, self.settings.roots))
+        try:
+            inspected = cue.inspect_cue(path, self.settings.work_root) if path.suffix.lower() == '.cue' else media.inspect_audio(path, self.settings.roots)
+        except media.MediaError as exc:
+            if exc.code not in {'invalid_audio','unsupported_format'}: raise
+            inspected = media.fallback_inventory(path, self.settings.roots, exc)
+        meta = normalize_metadata(inspected)
         after = path.stat()
         if (before.st_size,before.st_mtime_ns,before.st_ino) != (after.st_size,after.st_mtime_ns,after.st_ino):
             raise media.MediaError("file_changing", "File changed during inventory")
@@ -207,6 +216,7 @@ class Worker:
                         if key in old:
                             meta[key] = old[key]
                     status = current["status"] if current["status"] not in {"missing", "error"} else "indexed"
+                    if meta.get("input_error"): status = "error"
                 else:
                     # An external path replacement is not proof of physical-copy
                     # identity. Keep old history on its old ID; do not transfer it
@@ -224,7 +234,9 @@ class Worker:
                 conn.execute("INSERT INTO tracks(id,relative_path,sha256,metadata,scan_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (identity,relative,meta["sha256"],db.encode(meta),scan_id,now,now))
                 if meta.get('cue', {}).get('errors'):
                     conn.execute("UPDATE tracks SET status='needs_review' WHERE id=?", (identity,))
-        return {"track_id": identity, "relative_path": relative}
+            if meta.get('input_error'):
+                conn.execute("UPDATE tracks SET status='error' WHERE id=?", (identity,))
+        return {"track_id": identity, "relative_path": relative, **({'input_error':meta['input_error']} if meta.get('input_error') else {})}
 
     def link_cue_sheets(self):
         """Mark album images explicitly; individual CUE songs never write their tags."""
@@ -269,7 +281,7 @@ class Worker:
                 return
             try:
                 result = await self.io(self.scan_one, relative, job["id"])
-                self.item_result(job["id"], relative, "succeeded", result)
+                self.item_result(job["id"], relative, "failed" if result.get("input_error") else "succeeded", result)
             except Exception as exc:
                 self.item_result(job["id"], relative, "failed", self.failure(exc))
         await self.bounded_items(paths, one)
@@ -324,7 +336,7 @@ class Worker:
         if not current or current["sha256"] != item["sha256"]:
             raise media.MediaError("conflict", "Input revision is no longer current")
         meta = json.loads(current['metadata'])
-        if meta.get('format') == 'cue' or (meta.get('cue_album_image') and job['kind'] != 'audit'):
+        if meta.get('format') == 'cue' or (meta.get('cue_album_image') and job['kind'] not in {'audit','analyze'}):
             raise media.MediaError('cue_read_only', 'CUE и альбомные образы открыты только для чтения')
         if job["kind"] == "audit":
             result = media.audit_audio(path, self.settings.roots)
@@ -377,6 +389,43 @@ class Worker:
         self.persist_mutation(job, item, result)
         return {key: val for key, val in result.items() if key not in {"backup_path", "journal_path"}}
 
+    async def analyze_item(self, job, item):
+        if not self.settings.external_metadata:
+            raise media.MediaError('provider_disabled', 'Внешние метаданные отключены')
+        row = await self.io(db.fetchone, self.settings.db_path, 'SELECT * FROM tracks WHERE id=? AND is_current=1', (item['track_id'],))
+        if not row or row['sha256'] != item['sha256']:
+            raise media.MediaError('conflict', 'File revision changed')
+        path = self.settings.work_root/item['relative_path']
+        await self.io(media._expect, path, item['sha256'])
+        meta = json.loads(row['metadata'])
+        if self.providers is None: self.providers = Providers(self.settings)
+        result = await self.providers.analyze(meta, item['relative_path'])
+        # Album artwork already next to the track is a local candidate, never an arbitrary path.
+        if not meta.get('has_art'):
+            local = await self.io(self.local_cover, path)
+            if local: result['candidates'].append(local)
+        await self.io(media._expect, path, item['sha256'])
+        if int(db.setting(self.settings.db_path, 'auth_epoch', '0')) != job['auth_epoch'] or self.cancelled(job['id']):
+            raise media.MediaError('authorization_revoked','Analysis authorization revoked')
+        with db.transaction(self.settings.db_path) as conn:
+            current = conn.execute('SELECT sha256 FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
+            if not current or current['sha256'] != item['sha256']: raise media.MediaError('conflict','File revision changed')
+            conn.execute('INSERT OR REPLACE INTO analyses VALUES(?,?,?,?)',(item['track_id'],item['sha256'],db.encode(result),db.utcnow()))
+            db.event(conn,'analysis_completed',{'track_id':item['track_id'],'state':result['state']})
+        return {'state':result['state'],'candidates':len(result['candidates']),'sources':result['sources']}
+
+    def local_cover(self, path):
+        for name in ('cover.jpg','folder.jpg','front.jpg','cover.png','folder.png'):
+            candidates = [p for p in path.parent.iterdir() if p.name.casefold()==name and not p.is_symlink() and p.is_file()]
+            if len(candidates)!=1: continue
+            image=media._validate(candidates[0],self.settings.roots)
+            if image.stat().st_size>5*1024**2: continue
+            raw=image.read_bytes()
+            try: mime,_,_=media._cover(raw)
+            except media.MediaError: continue
+            return {'id':'local:'+media.sha256_file(image),'provider':'local','kind':'cover','cover':'data:'+mime+';base64,'+base64.b64encode(raw).decode(),'source_path':str(image.relative_to(self.settings.work_root)),'match':{'state':'needs_review','reasons':['confirm_album_cover']}}
+        return None
+
     async def process(self, job):
         self.state = job["kind"]
         if job["kind"] == "scan":
@@ -388,7 +437,10 @@ class Worker:
             key = item["track_id"]
             self.item_result(job["id"], key, "running", {})
             try:
-                result = await self.io(self.process_item, job, item)
+                if job['kind'] in {'transcribe','align'}:
+                    result = await inference_client.process(self,job,item)
+                else:
+                    result = await self.analyze_item(job, item) if job['kind']=='analyze' else await self.io(self.process_item, job, item)
                 self.item_result(job["id"], key, "succeeded", result)
             except Exception as exc:
                 result = self.failure(exc)
@@ -444,6 +496,12 @@ class Worker:
             if totals["total"] and totals["total"] == totals["completed"]:
                 self.finish(job["id"], "succeeded", "recovered_after_restart")
 
+    async def background_inference(self, job):
+        try:
+            await self.process(job)
+        except Exception as exc:
+            self.finish(job['id'],'failed',self.failure(exc)['code'])
+
     async def run(self, once=False):
         self.settings.validate()
         db.initialize(self.settings.db_path)
@@ -460,6 +518,9 @@ class Worker:
                 while not self.stopping:
                     job = self.claim_job()
                     if job:
+                        if job['kind'] in {'transcribe','align'}:
+                            self.inference_task=asyncio.create_task(self.background_inference(job))
+                            continue
                         try:
                             await self.process(job)
                         except Exception as exc:
@@ -476,11 +537,17 @@ class Worker:
                                 self.stopping = True
                         self.state = "idle"
                     elif once:
+                        if self.inference_task and not self.inference_task.done():
+                            await self.inference_task
+                            continue
                         break
                     else:
                         await asyncio.sleep(0.5)
             finally:
                 self.stopping = True
+                if self.inference_task and not self.inference_task.done():
+                    try: await asyncio.wait_for(self.inference_task,timeout=20)
+                    except (asyncio.TimeoutError,asyncio.CancelledError): pass
                 heartbeat_task.cancel()
                 self.state = "stopped"
                 # This must precede every fallible database/logging operation.
@@ -488,6 +555,8 @@ class Worker:
                 # drain synchronously while both scheduler/storage guards remain
                 # held, with no await/cancellation point before completion.
                 self.pool.shutdown(wait=True, cancel_futures=True)
+                if self.providers is not None:
+                    await self.providers.close()
                 try:
                     self.heartbeat()
                 except Exception:

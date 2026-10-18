@@ -62,8 +62,36 @@ jobs:
             image-id.txt
             revision.txt
           retention-days: 7
+  inference:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Build pinned CPU inference image
+        run: |
+          docker build -f Dockerfile.inference --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" --label "org.opencontainers.image.revision=$GITHUB_SHA" -t phonoteka-inference:ci .
+      - name: Real ASR and job deduplication
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y espeak
+          python3 tests/inference_smoke.py
+      - name: Save tested inference image
+        run: |
+          docker save phonoteka-inference:ci | gzip > inference-image.tar.gz
+          sha256sum inference-image.tar.gz > inference-image.sha256
+          docker inspect phonoteka-inference:ci --format '{{.Id}}' > inference-image-id.txt
+          printf '%s\n' "$GITHUB_SHA" > inference-revision.txt
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: tested-inference-image
+          path: |
+            inference-image.tar.gz
+            inference-image.sha256
+            inference-image-id.txt
+            inference-revision.txt
+          retention-days: 7
   publish:
-    needs: verify
+    needs: [verify, inference]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10

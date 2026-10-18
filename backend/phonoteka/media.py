@@ -27,8 +27,9 @@ from typing import Any, Callable, Iterator, Mapping
 
 import mutagen
 from mutagen.flac import FLAC, Picture
-from mutagen.id3 import APIC, SYLT, TXXX, UFID, Frames
+from mutagen.id3 import ID3, ID3NoHeaderError, APIC, SYLT, TXXX, UFID, Frames
 from mutagen.mp3 import MP3
+from . import formats
 from PIL import Image, UnidentifiedImageError
 
 
@@ -249,15 +250,37 @@ def _expect(path: Path, expected: str) -> None:
 
 def _demuxer(path: Path) -> str:
     kind = path.suffix.lower().lstrip(".")
-    if kind not in {"mp3", "flac"}:
-        raise MediaError("unsupported_format", "Only MP3 and FLAC have a validated write profile")
-    return kind
+    demuxers = {'mp3':'mp3','flac':'flac','m4a':'mov','m4b':'mov','mp4':'mov','aac':'aac','ogg':'ogg','oga':'ogg','opus':'ogg','wav':'wav','wave':'wav','aif':'aiff','aiff':'aiff','ape':'ape','wv':'wv','wma':'asf','asf':'asf','webm':'matroska','mka':'matroska','mkv':'matroska','dsf':'dsf','dff':'iff','ac3':'ac3','aiff':'aiff'}
+    if kind not in demuxers:
+        raise MediaError('unsupported_format', 'No safe demuxer profile for this extension')
+    return demuxers[kind]
+
+
+def probe_audio(path: Path) -> dict:
+    result = _process(path, 'ffprobe', ['-show_entries','format=duration,format_name:format_tags:stream=codec_type,codec_name,sample_rate,channels,duration','-of','json'], timeout=30)
+    doc = json.loads(result.stdout)
+    streams = [x for x in doc.get('streams', []) if x.get('codec_type') == 'audio']
+    if not streams:
+        raise MediaError('no_audio_stream', 'File contains no audio stream')
+    return {'duration': float(doc.get('format', {}).get('duration') or streams[0].get('duration') or 0), 'codec': streams[0].get('codec_name'), 'container':doc.get('format', {}).get('format_name'), 'tags': {k.lower():[str(v)] for k,v in doc.get('format', {}).get('tags', {}).items() if k.lower() in _TEXT_FRAMES}}
+
+
+def fallback_inventory(path, roots, error):
+    path = _validate(path, roots)
+    info = path.stat()
+    result = {'sha256':sha256_file(path),'size':info.st_size,'mtime_ns':info.st_mtime_ns,'format':path.suffix.lower().lstrip('.') or 'unknown','tags':{},'has_art':False,'lyrics':'','lrc':'','write_supported':False,'write_block_reason':error.code}
+    try:
+        result.update(probe_audio(path))
+        result['warnings'] = [{'code':error.code,'message':'Метаданные прочитаны резервным декодером; нативная запись недоступна'}]
+    except (MediaError, ValueError, KeyError) as exc:
+        result['input_error'] = {'code':getattr(exc,'code','invalid_audio'),'message':getattr(exc,'message','Audio could not be decoded')}
+    return result
 
 
 def _process(path: Path, executable: str, arguments: list[str], *, timeout: int = 300) -> subprocess.CompletedProcess:
     with _file(path) as stream:
         input_path = f"/proc/self/fd/{stream.fileno()}" if sys.platform == "linux" else str(path)
-        command = [executable, "-v", "error", "-protocol_whitelist", "file,pipe", "-f", _demuxer(path), "-i", input_path, *arguments]
+        command = [executable, "-v", "error", "-protocol_whitelist", "file,pipe", "-format_whitelist", "mp3,flac,mov,aac,ogg,wav,aiff,ape,wv,asf,matroska,dsf,iff,ac3", "-i", input_path, *arguments]
         try:
             # Spool child output and enforce a bound while it runs: a malformed or
             # very long file must not consume unbounded Python heap or scratch space.
@@ -326,7 +349,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
         stream.seek(0)
         try:
-            audio = mutagen.File(stream)
+            audio = _load_audio(stream)
         except (mutagen.MutagenError, ValueError, OSError) as exc:
             raise MediaError("invalid_audio", "Audio metadata could not be read") from exc
         if audio is None:
@@ -340,6 +363,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(audio, MP3):
             existing = audio.tags
             for field, frame in _TEXT_FRAMES.items():
+                if field=='date' and existing and existing.version[1]==3: frame='TYER'
                 if existing and existing.getall(frame):
                     tags[field] = [str(value) for value in existing.getall(frame)[0].text]
             if existing:
@@ -356,8 +380,8 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                 if millis:
                     lrc = serialize_lrc([{"text": words, "start_ms": timestamp} for words, timestamp in millis[0].text])
             version = existing.version if existing else (2, 4, 0)
-            write_supported = version[1] == 4
-            reason = None if write_supported else "id3v23_requires_preservation_profile"
+            write_supported = version[1] in {3,4}
+            reason = None if write_supported else "id3_version_not_supported"
         elif isinstance(audio, FLAC):
             tags = {key: list(audio.get(key, [])) for key in (*_TEXT_FRAMES, *_MB_FIELDS) if audio.get(key)}
             has_art = any(picture.type == 3 for picture in audio.pictures)
@@ -377,6 +401,17 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                 except MediaError as exc:
                     lyrics_warning = exc.code
             write_supported, reason = True, None
+        elif isinstance(audio, formats.PROFILES):
+            tags, raw, has_art = formats.inspect(audio, (*_TEXT_FRAMES, *_MB_FIELDS))
+            lyrics = raw
+            if raw and _LRC_TIME.search(raw):
+                try:
+                    document = parse_lrc(raw)
+                    if document['complete'] and all(x['start_ms'] <= int(audio.info.length*1000)+1000 for x in document['lines']):
+                        lrc, lyrics = raw, None
+                    else: lyrics_warning = 'partial_or_out_of_range_lyrics'
+                except MediaError as exc: lyrics_warning = exc.code
+            write_supported, reason = True, None
         else:
             stream.seek(0)
             easy = mutagen.File(stream, easy=True)
@@ -389,14 +424,29 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                 "audio_identity": None, "poweramp_verified": False}
 
 
+def _load_audio(file):
+    audio = mutagen.File(file)
+    if isinstance(audio, MP3):
+        if hasattr(file, 'seek'): file.seek(0)
+        try: audio.tags = ID3(file, translate=False)
+        except ID3NoHeaderError: audio.tags = None
+    return audio
+
+
 def read_art(path: str | Path, roots: Mapping[str, Any]) -> tuple[bytes, str] | None:
     path = _validate(path, roots)
     with _file(path) as stream:
-        audio = mutagen.File(stream)
+        audio = _load_audio(stream)
         if isinstance(audio, MP3):
             pictures = audio.tags.getall("APIC") if audio.tags else []
         elif isinstance(audio, FLAC):
             pictures = audio.pictures
+        elif isinstance(audio, formats.PROFILES):
+            data = formats.front(audio)
+            if data:
+                mime, _, _ = _cover(data)
+                return data, mime
+            return None
         else:
             return None
         fronts = [picture for picture in pictures if picture.type == 3]
@@ -436,8 +486,8 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
         raise MediaError("invalid_tags", "An unsupported tag field was requested")
     parsed = parse_lrc(lrc) if lrc is not None else None
     normalized = serialize_lrc(parsed) if parsed else None
-    audio = mutagen.File(path)
-    if audio is None or not isinstance(audio, (MP3, FLAC)):
+    audio = _load_audio(path)
+    if audio is None or not isinstance(audio, (MP3, FLAC, *formats.PROFILES)):
         raise MediaError("unsupported_format", "Only MP3 and FLAC writes are supported")
     if parsed and any(line["start_ms"] > int(audio.info.length * 1000) + 1000 for line in parsed["lines"]):
         raise MediaError("invalid_lyrics", "A lyric timestamp exceeds audio duration")
@@ -445,8 +495,10 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
     if isinstance(audio, MP3):
         if audio.tags is None:
             audio.add_tags()
-        if audio.tags.version[1] != 4:
-            raise MediaError("unsupported_id3", "ID3v2.3 writes are disabled until the preservation profile is accepted")
+        version = audio.tags.version[1]
+        if version not in {3,4}:
+            raise MediaError('unsupported_id3','Unsupported ID3 version')
+        encoding = 1 if version==3 else 3
         for field, value in tags.items():
             values = _values(value)
             if field == "musicbrainz_trackid":
@@ -460,15 +512,17 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
                         raise MediaError("invalid_tags", "MusicBrainz identifiers must contain ASCII characters") from exc
                     audio.tags.add(UFID(owner="http://musicbrainz.org", data=data))
             elif field in _TEXT_FRAMES:
-                frame = _TEXT_FRAMES[field]
+                frame = 'TYER' if field=='date' and version==3 else _TEXT_FRAMES[field]
+                if version==3 and field=='date' and any(not re.fullmatch(r'\d{4}',v) for v in values):
+                    raise MediaError('invalid_tags','ID3v2.3 date profile accepts a four-digit year')
                 audio.tags.delall(frame)
                 if values:
-                    audio.tags.add(Frames[frame](encoding=3, text=values))
+                    audio.tags.add(Frames[frame](encoding=encoding, text=values))
             else:
                 description = _MB_DESCRIPTIONS[field]
                 audio.tags.delall(f"TXXX:{description}")
                 if values:
-                    audio.tags.add(TXXX(encoding=3, desc=description, text=values))
+                    audio.tags.add(TXXX(encoding=encoding, desc=description, text=values))
         if parsed is not None:
             # Multiple languages/descriptions are a manual conflict; preserve foreign slots.
             slots = audio.tags.getall("SYLT")
@@ -478,7 +532,7 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
             if slots:
                 audio.tags.delall(slots[0].HashKey)
             if parsed["lines"]:
-                audio.tags.add(SYLT(encoding=3, lang=lang, format=2, type=1, desc=desc,
+                audio.tags.add(SYLT(encoding=encoding, lang=lang, format=2, type=1, desc=desc,
                                     text=[(line["text"], line["start_ms"]) for line in parsed["lines"]]))
         if cover is not None:
             fronts = [frame for frame in audio.tags.getall("APIC") if frame.type == 3]
@@ -489,8 +543,13 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
                 raise MediaError("cover_conflict", "A different picture already owns the cover description")
             if fronts:
                 audio.tags.delall(fronts[0].HashKey)
-            audio.tags.add(APIC(encoding=3, mime=cover_info[0], type=3, desc=desc, data=cover))
-        audio.save(v2_version=4, v1=1)
+            audio.tags.add(APIC(encoding=encoding, mime=cover_info[0], type=3, desc=desc, data=cover))
+        audio.save(v2_version=version, v1=1, v23_sep=None)
+    elif isinstance(audio, formats.PROFILES):
+        try:
+            formats.edit(audio, tags, normalized, cover, cover_info, _values)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise MediaError('invalid_metadata', 'Invalid metadata or conflicting cover slots') from exc
     else:
         for field, value in tags.items():
             values = _values(value)
@@ -519,9 +578,9 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
 def _untouched_signature(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | None) -> dict[str, Any]:
     """Verify untouched metadata as well as codec packets before replacing target."""
     with _file(path) as stream:
-        audio = mutagen.File(stream)
+        audio = _load_audio(stream)
         if isinstance(audio, MP3):
-            excluded = {_TEXT_FRAMES[key] for key in tags if key in _TEXT_FRAMES}
+            excluded = {('TYER' if key=='date' and audio.tags and audio.tags.version[1]==3 else _TEXT_FRAMES[key]) for key in tags if key in _TEXT_FRAMES}
             excluded.update(f"TXXX:{_MB_DESCRIPTIONS[key]}" for key in tags if key in _MB_FIELDS and key != "musicbrainz_trackid")
             if "musicbrainz_trackid" in tags:
                 excluded.add("UFID:http://musicbrainz.org")
@@ -531,6 +590,8 @@ def _untouched_signature(path: Path, tags: Mapping[str, Any], lrc: str | None, c
                       if key not in excluded and not (lrc is not None and key.startswith("SYLT:"))
                       and not (cover is not None and key.startswith("APIC:") and frame.type == 3)}
             return {"frames": frames, "unknown": [hashlib.sha256(raw).hexdigest() for raw in audio.tags.unknown_frames]}
+        if isinstance(audio, formats.PROFILES):
+            return formats.untouched(audio, tags, lrc, cover)
         if isinstance(audio, FLAC):
             excluded = {key.lower() for key in tags}
             if lrc is not None:

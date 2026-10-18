@@ -39,3 +39,19 @@
 .cue-links { margin-bottom: 16px; }
 .cue-links button { white-space: normal; text-align: left; }
 @media (max-width: 600px) { .cue-panel { padding: 16px; } .cue-panel .track-detail-heading { gap: 8px; flex-wrap: wrap; } .cue-track { gap: 8px; grid-template-columns: 22px minmax(0,1fr) auto 16px; } }
+
+.analysis-panel { padding:24px; margin-bottom:18px; min-width:0; }
+.analysis-panel .panel-heading { padding:0 0 16px; gap:12px; }
+.analysis-sources { display:flex; flex-wrap:wrap; gap:6px; margin:16px 0; }
+.analysis-candidates { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr)); gap:12px; margin:16px 0; }
+.analysis-candidate { border:1px solid var(--line); border-radius:14px; padding:15px; min-width:0; overflow-wrap:anywhere; }
+.analysis-candidate.selected { border-color:var(--accent); background:var(--accent-soft); }
+.analysis-candidate label { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:10px; }
+.analysis-candidate input { width:18px; min-height:18px; }
+.analysis-candidate pre { white-space:pre-wrap; max-height:250px; overflow:auto; font-size:12px; }
+.analysis-candidate details, .analysis-candidate a { display:block; margin-top:12px; font-size:12px; }
+.candidate-cover { width:140px; max-width:100%; border-radius:10px; margin-top:12px; }
+.library-tools { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+@media(max-width:600px){.analysis-panel{padding:16px}.analysis-panel .button-row{flex-wrap:wrap}.analysis-panel .button{white-space:normal}}
+
+.asr-tools { margin-top:12px; flex-wrap:wrap; }.asr-result { margin-top:18px; }.asr-result pre { white-space:pre-wrap; max-height:300px; overflow:auto; font-size:12px; }

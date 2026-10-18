@@ -104,6 +104,15 @@ def initialize(path: Path) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, payload TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS analyses (
+            track_id TEXT PRIMARY KEY REFERENCES tracks(id), input_sha256 TEXT NOT NULL,
+            payload TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS provider_cache (
+            key TEXT PRIMARY KEY, provider TEXT NOT NULL, payload TEXT NOT NULL, expires REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS provider_calls (id INTEGER PRIMARY KEY, provider TEXT NOT NULL, at REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS provider_calls_time ON provider_calls(provider,at);
         PRAGMA user_version=1;
         COMMIT;
         """)

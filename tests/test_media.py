@@ -191,15 +191,21 @@ def test_original_and_links_are_never_writable(make_audio, roots, backup_dir):
 
 @LINUX
 @TOOLS
-def test_id3v23_is_read_only(make_audio, roots, backup_dir):
+def test_id3v23_preserves_version_and_unknown_metadata(make_audio, roots, backup_dir):
     path = make_audio()
     audio = MP3(path)
     audio.save(v2_version=3)
     before = path.read_bytes()
-    assert not media.inspect_audio(path, roots)["write_supported"]
-    with pytest.raises(media.MediaError):
-        media.apply_changes(path, {"title": "unsupported"}, None, media.sha256_file(path), backup_dir, roots)
-    assert path.read_bytes() == before
+    assert media.inspect_audio(path, roots)['write_supported']
+    old_identity=media.audio_identity(path)
+    private=repr(MP3(path).tags['TXXX:PRIVATE_USER_TAG'])
+    result=media.apply_changes(path, {'title':'Новое название'}, '[00:01.00]Строка', media.sha256_file(path), backup_dir, roots)
+    after=MP3(path)
+    assert after.tags.version[1]==3
+    assert str(after.tags['TIT2'])=='Новое название'
+    assert repr(after.tags['TXXX:PRIVATE_USER_TAG'])==private
+    assert media.audio_identity(path)==old_identity
+    assert Path(result['backup_path']).read_bytes()==before
 
 
 @LINUX
@@ -504,3 +510,24 @@ def test_invalid_flac_lyrics_are_not_reported_as_synced(make_audio, roots, raw, 
     assert metadata["lyrics"] == raw
     assert metadata["lyrics_warning"] == warning
     assert path.read_bytes() == before
+
+
+@LINUX
+@TOOLS
+@pytest.mark.parametrize('ext,codec',[('m4a','aac'),('ogg','libvorbis'),('opus','libopus')])
+def test_extended_formats_preserve_packets_and_tags(roots,backup_dir,ext,codec):
+    import mutagen
+    target=roots['work']/('test.'+ext)
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=3','-c:a',codec,'-metadata','title=Before',str(target)],check=True)
+    audio=mutagen.File(target)
+    private='----:com.apple.iTunes:PRIVATE_USER_TAG' if ext=='m4a' else 'PRIVATE_USER_TAG'
+    audio[private]=[b'keep'] if ext=='m4a' else ['keep'];audio.save()
+    before=media.inspect_audio(target,roots)
+    assert before['write_supported']
+    identity=media.audio_identity(target)
+    cover=io.BytesIO();Image.new('RGB',(32,32),'red').save(cover,'JPEG')
+    result=media.apply_changes(target,{'title':'Название'},'[00:01.00]Строка',before['sha256'],backup_dir,roots,cover=cover.getvalue())
+    after=media.inspect_audio(target,roots)
+    assert after['tags']['title']==['Название'] and after['has_art'] and after['lrc']
+    assert media.audio_identity(target)==identity
+    assert mutagen.File(target)[private]==([b'keep'] if ext=='m4a' else ['keep'])

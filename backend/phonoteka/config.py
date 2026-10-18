@@ -28,6 +28,10 @@ class Settings:
     file_workers: int = 2
     io_threads: int = 2
     session_hours: int = 12
+    provider_daily_limit: int = 2500
+    external_metadata: bool = False
+    inference_url: str = ""
+    inference_secret_file: Path | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -48,6 +52,10 @@ class Settings:
             instance_id=os.environ.get("INSTANCE_ID", ""),
             allow_insecure_localhost=boolean("ALLOW_INSECURE_LOCALHOST"),
             file_workers=max(1, min(int(os.environ.get("FILE_WORKERS", "2")), 8)),
+            inference_url=os.environ.get("INFERENCE_URL", "").rstrip("/"),
+            inference_secret_file=path("INFERENCE_SECRET_FILE", "/run/secrets/inference_key"),
+            external_metadata=boolean("EXTERNAL_METADATA", False),
+            provider_daily_limit=max(1,min(int(os.environ.get("PROVIDER_DAILY_LIMIT","2500")),10000)),
             io_threads=max(1, min(int(os.environ.get("IO_THREADS", "2")), 8)),
         )
 
