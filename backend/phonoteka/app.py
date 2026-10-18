@@ -20,9 +20,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
-from . import __version__, db, security, cue, reports, intake, youtube
+from . import __version__, db, security, cue, reports, intake, youtube, job_activity, field_policy, media, provider_policy, comparison, lyrics_review
+from . import lyrics_document
+from .lyrics_document import DocumentEdit as LyricsDocumentEdit
 from .telemetry import log
+from . import webhooks,provider_attempts
 from .config import Settings
+from . import publication
+from . import retention, export_leases
 
 
 class LoginInput(BaseModel):
@@ -37,11 +42,12 @@ class ProposalInput(BaseModel):
     lrc: str | None = Field(default=None, max_length=2 * 1024 * 1024)
     cover: str | None = Field(default=None, max_length=14 * 1024 * 1024)
     base_proposal_id: str | None = Field(default=None, min_length=1, max_length=36)
+    lyrics_document: LyricsDocumentEdit | None = None
 
 
 class JobInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["scan", "audit", "apply", "rollback", "publish", "analyze", "recognize", "transcribe", "align", "extract_cue", "replaygain", "replaygain_album", "export_ready", "normalize_audio", "youtube"]
+    kind: Literal["scan", "audit", "apply", "rollback", "publish", "rollback_ready", "publish_sidecars", "analyze", "recognize", "transcribe", "align", "extract_cue", "replaygain", "replaygain_album", "export_ready", "normalize_audio", "youtube", "release_audit"]
     track_ids: list[str] = Field(default_factory=list, max_length=10000)
     params: dict = Field(default_factory=dict)
 
@@ -80,9 +86,10 @@ def _public_proposal(row):
     return {"id": row["id"], "track_id": row["track_id"], "input_sha256": row["input_sha256"], "created_at": row["created_at"], **payload}
 
 
-def public_track(settings: Settings, row: dict, detail=False):
+def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, load_proposal=True):
     meta = json.loads(row["metadata"])
-    proposal = db.fetchone(settings.db_path, "SELECT * FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", (row["id"],))
+    if load_proposal:
+        proposal = db.fetchone(settings.db_path, "SELECT * FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", (row["id"],))
     result = {
         **meta, "id": row["id"], "relative_path": row["relative_path"],
         "filename": Path(row["relative_path"]).name,
@@ -94,15 +101,21 @@ def public_track(settings: Settings, row: dict, detail=False):
         "proposal": _public_proposal(proposal), "updated_at": row["updated_at"],
     }
     if detail:
+        result['lyrics_document'] = lyrics_document.public_document(settings, row)
         analysis = db.fetchone(settings.db_path,'SELECT * FROM analyses WHERE track_id=?',(row['id'],))
-        result['analysis'] = {**json.loads(analysis['payload']), 'updated_at':analysis['updated_at'], 'stale':analysis['input_sha256']!=row['sha256']} if analysis else None
+        result['analysis'] = {**provider_policy.public_analysis(settings,json.loads(analysis['payload'])), 'updated_at':analysis['updated_at'], 'stale':analysis['input_sha256']!=row['sha256']} if analysis else None
+        result['analysis'] = lyrics_document.analysis_view(row, result['analysis'], result['lyrics_document'])
         rows = db.fetchall(settings.db_path, "SELECT * FROM history WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 100", (row["id"],))
         result["history"] = [public_history(item) for item in rows]
     return result
 
 
 def public_history(row):
+    # Retention marks pruned versions; missing backups are never advertised.
     details = json.loads(row["details"])
+    backup = Path(details['backup_path']) if details.get('backup_path') else None
+    if details.get('backup_pruned') or (backup and (not backup.is_file() or backup.is_symlink())):
+        details['backup_path'] = None
     # Paths of backups/journals are internal worker handles, never user input.
     safe = {key: val for key, val in details.items() if key not in {"backup_path", "journal_path", "target", "source", "destination"}}
     return {key: row[key] for key in ("id", "track_id", "job_id", "kind", "before_sha256", "after_sha256", "created_at")} | {
@@ -110,13 +123,14 @@ def public_history(row):
     }
 
 
-def public_job(settings: Settings, row: dict, detail=False):
+def public_job(settings: Settings, row: dict, detail=False, activity=None):
     total = row["total"]
     result = {key: row[key] for key in ("id", "kind", "state", "stage", "total", "completed", "failed", "cancel_requested", "created_at", "updated_at", "error")}
     result["progress"] = round(100 * (row["completed"] + row["failed"]) / total) if total else 0
     result["cancel_requested"] = bool(row["cancel_requested"])
-    result['retry_at']=json.loads(row['payload']).get('retry_at') if row['stage']=='waiting_provider' else None
+    result['retry_at']=json.loads(row['payload']).get('retry_at') if row['stage'] in {'waiting_provider','waiting_storage'} else None
     result['pause_requested']=bool(json.loads(row['payload']).get('pause_requested'))
+    result.update(activity if activity is not None else job_activity.summaries(settings, [row])[row['id']])
     if detail:
         items = db.fetchall(settings.db_path, "SELECT item_key,state,result FROM job_items WHERE job_id=? ORDER BY item_key LIMIT 10000", (row["id"],))
         result["results"] = [{"track_id": item["item_key"], "state": item["state"], **json.loads(item["result"])} for item in items]
@@ -145,22 +159,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         settings.validate()
-        await asyncio.to_thread(db.initialize, settings.db_path)
+        await asyncio.to_thread(db.initialize, settings.db_path, settings=settings)
         await asyncio.to_thread(security.bootstrap, settings)
+        await asyncio.to_thread(webhooks.configure,settings)
+        stop=asyncio.Event()
+        notifier=asyncio.create_task(webhooks.Sender(settings).run(stop))
         log('service_ready')
-        yield
-        log('service_stopping')
+        try:yield
+        finally:
+            stop.set()
+            try:await asyncio.wait_for(notifier,timeout=12)
+            except asyncio.TimeoutError:notifier.cancel()
+            log('service_stopping')
 
     app = FastAPI(title="Фонотека API", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
     from . import automation,scheduling,exports,operations,observability
     observability.install(app,settings)
+    webhooks.install(app,settings)
+    provider_attempts.install(app,settings)
     automation.install(app,settings)
     scheduling.install(app,settings)
     exports.install(app,settings)
+    comparison.install(app,settings)
+    provider_policy.install(app,settings)
     operations.install(app,settings)
     youtube.install(app,settings)
+    field_policy.install(app,settings)
+    from . import release_review
+    release_review.install(app,settings)
+    from . import album_batch
+    album_batch.install(app,settings)
+    lyrics_review.install(app,settings)
+    lyrics_document.install(app,settings)
+    publication.install(app,settings)
+    from . import publication_sidecars
+    publication_sidecars.install(app,settings)
+    from . import automatic_quality
+    automatic_quality.install(app,settings)
+    retention.install(app,settings)
+    export_leases.install(app,settings)
     @app.get('/api/openapi.json',include_in_schema=False)
     def schema(request:Request):
         security.require_session(request,settings)
@@ -221,27 +260,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.delete_cookie(security.cookie_name(settings), path="/", secure=settings.secure_cookie, httponly=True, samesite="strict")
         return {"authenticated": False, "csrf_token": None, "username": None}
 
+    @app.post("/api/auth/logout-all")
+    def auth_logout_all(request: Request, response: Response):
+        security.require_session(request, settings, True)
+        with db.transaction(settings.db_path) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+            conn.execute("DELETE FROM sessions")
+            db.event(conn, "owner_sessions_revoked", payload={"sessions": count})
+        response.delete_cookie(security.cookie_name(settings), path="/", secure=settings.secure_cookie, httponly=True, samesite="strict")
+        return {"authenticated": False, "csrf_token": None, "username": None}
+
     @app.get("/api/summary")
     def summary(request: Request):
         security.require_session(request, settings)
-        rows = db.fetchall(settings.db_path, "SELECT metadata,status,sha256 FROM tracks WHERE is_current=1")
-        count = {"total": len(rows), "missing_tags": 0, "missing_art": 0, "missing_lyrics": 0, "needs_review": 0, "published": 0, "cue_sheets": 0, "cue_tracks": 0}
-        formats = {}
-        for row in rows:
-            meta = json.loads(row["metadata"])
-            fmt = meta.get("format", "unknown")
-            formats[fmt] = formats.get(fmt, 0) + 1
-            if fmt == 'cue':
-                count['cue_sheets'] += 1
-                count['cue_tracks'] += len(meta.get('cue', {}).get('tracks', []))
-                count['needs_review'] += bool(meta.get('cue', {}).get('errors')) or row['status'] == 'missing'
-                continue
-            count["missing_tags"] += not (meta.get("tags", {}).get("title") and meta.get("tags", {}).get("artist"))
-            count["missing_art"] += not meta.get("has_art", False)
-            count["missing_lyrics"] += not meta.get("lrc", "")
-            count["needs_review"] += row["status"] in {"needs_review", "conflict", "error", "missing"}
-            count["published"] += meta.get("publication", {}).get("sha256") == row["sha256"]
-        active = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs WHERE state IN ('queued','running','waiting','interrupted')")["n"]
+        # Aggregate in SQLite rather than decoding all 10k documents under the
+        # Python GIL on every four-second status poll.
+        count = db.fetchone(settings.db_path, """WITH catalog AS (
+            SELECT *,COALESCE(json_extract(metadata,'$.format'),'unknown') AS fmt FROM tracks WHERE is_current=1
+        ) SELECT COUNT(*) AS total,
+          COALESCE(SUM(fmt='cue'),0) AS cue_sheets,
+          COALESCE(SUM(CASE WHEN fmt='cue' THEN COALESCE(json_array_length(metadata,'$.cue.tracks'),0) ELSE 0 END),0) AS cue_tracks,
+          COALESCE(SUM(CASE WHEN fmt='cue' THEN COALESCE(json_array_length(metadata,'$.cue.errors'),0)>0 OR status='missing'
+            ELSE status IN ('needs_review','conflict','error','missing') END),0) AS needs_review,
+          COALESCE(SUM(fmt<>'cue' AND (COALESCE(json_extract(metadata,'$.tags.title'),'') IN ('','[]') OR COALESCE(json_extract(metadata,'$.tags.artist'),'') IN ('','[]'))),0) AS missing_tags,
+          COALESCE(SUM(fmt<>'cue' AND NOT COALESCE(json_extract(metadata,'$.has_art'),0)),0) AS missing_art,
+          COALESCE(SUM(fmt<>'cue' AND COALESCE(json_extract(metadata,'$.lrc'),'')=''),0) AS missing_lyrics,
+          COALESCE(SUM(fmt<>'cue' AND COALESCE(json_extract(metadata,'$.publication.sha256')=sha256,0)),0) AS published
+          FROM catalog""")
+        formats = {row['format']:row['n'] for row in db.fetchall(settings.db_path,"SELECT COALESCE(json_extract(metadata,'$.format'),'unknown') AS format,COUNT(*) AS n FROM tracks WHERE is_current=1 GROUP BY format")}
+        active = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs WHERE state IN ('queued','running','paused','waiting','waiting_provider','deferred','interrupted')")["n"]
         heartbeat = json.loads(db.setting(settings.db_path, "worker_heartbeat", "{}"))
         recovery=db.setting(settings.db_path,'recovery_required','false')=='true';writable=settings.writable and not recovery
         return {**count, "formats": formats, "active_jobs": active, "read_only": not writable,'recovery_required':recovery,
@@ -249,16 +296,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "capabilities": {"edit": True, "apply": writable, "publish": writable, "audit": True, "youtube": settings.youtube_enabled and not recovery, "metadata_search": settings.external_metadata and not recovery, "recognition": settings.external_fingerprints and not recovery, "cue_export": writable, "replaygain": not recovery, "asr": bool(settings.inference_url) and not recovery},
                 "roots": {"work": str(settings.work_root)}, "version": __version__}
 
-    @app.get("/api/tracks")
-    def tracks(request: Request, search: str = Query("", max_length=200), page: int = Query(1, ge=1),
-               page_size: int = Query(50, ge=1, le=200), filter: str = Query("all")):
-        security.require_session(request, settings)
+    def track_selection(search, filter):
         clauses = ["t.is_current=1"]
         args = []
         if search:
-            clauses.append("(casefold(t.relative_path) LIKE casefold(?) ESCAPE '\\' OR EXISTS (SELECT 1 FROM json_tree(t.metadata,'$.tags') v WHERE v.type='text' AND casefold(v.atom) LIKE casefold(?) ESCAPE '\\') OR EXISTS (SELECT 1 FROM json_tree(t.metadata,'$.cue.tracks') v WHERE v.type='text' AND casefold(v.atom) LIKE casefold(?) ESCAPE '\\'))")
-            term = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            args += [term, term, term]
+            clauses.append("t.id IN (SELECT track_id FROM tracks_search WHERE document LIKE ? ESCAPE '\\')")
+            term = "%" + search.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            args.append(term)
         filters = {
             "all": "1=1",
             "cue": "json_extract(t.metadata,'$.format')='cue'",
@@ -270,10 +314,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if filter not in filters:
             raise security.error(422, "invalid_filter", "Неизвестный фильтр")
         clauses.append(filters[filter])
-        where = " AND ".join(clauses)
-        total = db.fetchone(settings.db_path, f"SELECT COUNT(*) AS n FROM tracks t WHERE {where}", args)["n"]
-        rows = db.fetchall(settings.db_path, f"SELECT t.* FROM tracks t WHERE {where} ORDER BY t.relative_path,t.id LIMIT ? OFFSET ?", (*args, page_size, (page-1)*page_size))
-        return {"items": [public_track(settings, row) for row in rows], "total": total, "page": page, "page_size": page_size}
+        return " AND ".join(clauses), args
+
+    @app.get("/api/tracks")
+    def tracks(request: Request, search: str = Query("", max_length=200), page: int = Query(1, ge=1),
+               page_size: int = Query(50, ge=1, le=200), filter: str = Query("all")):
+        security.require_session(request, settings)
+        where, args = track_selection(search, filter)
+        with db.connect(settings.db_path) as conn:
+            conn.execute('BEGIN')
+            total = conn.execute(f"SELECT COUNT(*) AS n FROM tracks t WHERE {where}", args).fetchone()["n"]
+            rows = conn.execute(f"SELECT t.* FROM tracks t WHERE {where} ORDER BY t.relative_path,t.id LIMIT ? OFFSET ?", (*args, page_size, (page-1)*page_size)).fetchall()
+            ids=[row['id'] for row in rows]
+            proposals={row['track_id']:row for row in conn.execute(
+                "SELECT p.* FROM proposals p WHERE p.track_id IN (%s) AND p.id=(SELECT latest.id FROM proposals latest WHERE latest.track_id=p.track_id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)" % ','.join('?' for _ in ids),ids)} if ids else {}
+        return {"items": [public_track(settings, row, proposal=proposals.get(row['id']),load_proposal=False) for row in rows], "total": total, "page": page, "page_size": page_size}
+
+    @app.get("/api/tracks/{track_id}/neighbors")
+    def track_neighbors(request: Request, track_id: str, search: str = Query("", max_length=200), filter: str = Query("all")):
+        security.require_session(request, settings)
+        _track_row(settings, track_id)
+        where, args = track_selection(search, filter)
+        # The same stable catalog ordering, across every page. Broken/missing files and
+        # CUE documents are not playable neighbors; CUE children are navigated in UI.
+        row = db.fetchone(settings.db_path, f"""WITH catalog AS (
+            SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.relative_path,t.id) AS catalog_position
+            FROM tracks t WHERE {where}
+        ), ordered AS (
+            SELECT t.id, t.catalog_position, ROW_NUMBER() OVER w AS position, COUNT(*) OVER () AS total,
+                LAG(t.id) OVER w AS previous_id, LEAD(t.id) OVER w AS next_id
+            FROM catalog t WHERE json_extract(t.metadata,'$.format')<>'cue'
+                AND json_extract(t.metadata,'$.input_error') IS NULL AND t.status<>'missing'
+            WINDOW w AS (ORDER BY t.relative_path,t.id)
+        ) SELECT * FROM ordered WHERE id=?""", (*args, track_id))
+        return dict(row) if row else {"id": track_id, "position": None, "catalog_position": None, "total": 0, "previous_id": None, "next_id": None}
 
     @app.get("/api/tracks/{track_id}")
     def track(request: Request, response: Response, track_id: str):
@@ -288,7 +362,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         match = request.headers.get("if-match")
         if not match:
             raise security.error(428, "precondition_required", "Передайте текущую ревизию If-Match")
-        if set(body.tags) - {"title", "artist", "album", "date", "tracknumber"}:
+        if set(body.tags) - (set(field_policy.FIELDS) - {'cover', 'lrc'}):
             raise security.error(422, "unsupported_tag", "Поле тега не поддерживается")
         if any(len(value) > 4096 or "\x00" in value for value in body.tags.values()):
             raise security.error(422, "invalid_tag", "Недопустимое значение тега")
@@ -302,9 +376,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if len(data) > 10 * 1024 * 1024:
                 raise security.error(413, "cover_too_large", "Обложка превышает 10 МиБ")
         now, identity = db.utcnow(), str(uuid.uuid4())
-        payload = body.model_dump(exclude_unset=True, exclude={"base_proposal_id"})
+        payload = body.model_dump(exclude_unset=True, exclude={"base_proposal_id", "lyrics_document"})
         with db.transaction(settings.db_path) as conn:
-            row = conn.execute("SELECT sha256,metadata FROM tracks WHERE id=? AND is_current=1", (track_id,)).fetchone()
+            row = conn.execute("SELECT * FROM tracks WHERE id=? AND is_current=1", (track_id,)).fetchone()
             if not row:
                 raise security.error(404, "track_not_found", "Трек не найден")
             meta = json.loads(row['metadata'])
@@ -320,6 +394,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 previous = json.loads(base["payload"])
                 merged_tags = {**previous.get("tags", {}), **payload.get("tags", {})}
                 payload = {**previous, **payload, "tags": merged_tags}
+            if 'lrc' in body.model_fields_set and body.lyrics_document is None:
+                payload.pop('lyrics_document', None)
+            try:
+                payload = lyrics_document.propose(conn, row, payload, body.lyrics_document)
+            except media.MediaError as exc:
+                raise security.error(412 if exc.code == 'lyrics_document_conflict' else 409, exc.code, exc.message) from exc
+            payload = field_policy.require_payload(settings, conn, row, payload)
+            payload = provider_policy.api_payload(conn,row,payload,'cache')
             conn.execute("INSERT INTO proposals VALUES(?,?,?,?,?)", (identity,track_id,row["sha256"],db.encode(payload),now))
             conn.execute("UPDATE tracks SET status='needs_review',updated_at=? WHERE id=?", (now,track_id))
             db.event(conn, "proposal_created", {"track_id": track_id, "proposal_id": identity})
@@ -368,7 +450,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         security.require_session(request, settings)
         rows = db.fetchall(settings.db_path, "SELECT * FROM jobs ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", (page_size,(page-1)*page_size))
         total = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs")["n"]
-        return {"items": [public_job(settings, row) for row in rows], "total": total, "page": page, "page_size": page_size}
+        activity = job_activity.summaries(settings, rows)
+        return {"items": [public_job(settings, row, activity=activity[row['id']]) for row in rows], "total": total, "page": page, "page_size": page_size}
 
     @app.get("/api/jobs/{job_id}")
     def get_job(request: Request, job_id: str):
@@ -378,19 +461,77 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise security.error(404, "job_not_found", "Задание не найдено")
         return public_job(settings, row, True)
 
+    @app.get("/api/jobs/{job_id}/activity")
+    def get_job_activity(request: Request, job_id: str, limit: int = Query(80, ge=1, le=200), after: int = Query(0, ge=0)):
+        security.require_session(request, settings)
+        row = db.fetchone(settings.db_path, "SELECT * FROM jobs WHERE id=?", (job_id,))
+        if not row:
+            raise security.error(404, "job_not_found", "Задание не найдено")
+        activity = job_activity.snapshot(settings, row, limit, after)
+        return {"job": public_job(settings, row, activity=activity.pop("summary")), **activity}
+
+    @app.get("/api/jobs/{job_id}/events")
+    async def job_events(request: Request, job_id: str, after: int = Query(0, ge=0)):
+        await asyncio.to_thread(security.require_session, request, settings)
+        if not await asyncio.to_thread(db.fetchone, settings.db_path, "SELECT id FROM jobs WHERE id=?", (job_id,)):
+            raise security.error(404, "job_not_found", "Задание не найдено")
+        # Native EventSource sends Last-Event-ID on reconnect. The query cursor
+        # permits an initial snapshot + stream without replaying the entire log.
+        try:
+            cursor = max(after, int(request.headers.get("last-event-id", "0")))
+            if cursor < 0:
+                raise ValueError
+        except ValueError:
+            raise security.error(422, "invalid_event_id", "Неверный идентификатор события")
+        async def stream():
+            nonlocal cursor
+            heartbeat = time.monotonic()
+            yield "retry: 2000\n: connected\n\n"
+            while not await request.is_disconnected():
+                try:
+                    await asyncio.to_thread(security.require_session, request, settings)
+                except HTTPException:
+                    break
+                row = await asyncio.to_thread(db.fetchone, settings.db_path, "SELECT * FROM jobs WHERE id=?", (job_id,))
+                if not row:
+                    break
+                activity = await asyncio.to_thread(job_activity.snapshot, settings, row, 100, cursor)
+                if activity["resync_required"]:
+                    yield f"id: {activity['cursor']}\nevent: resync_required\ndata: {{}}\n\n"
+                for event in activity["events"]:
+                    yield f"id: {event['id']}\nevent: job_activity\ndata: {db.encode(event)}\n\n"
+                cursor = activity["cursor"]
+                if not activity["events"] and time.monotonic() - heartbeat >= 15:
+                    yield f"id: {cursor}\n: keepalive\n\n"
+                    heartbeat = time.monotonic()
+                await asyncio.sleep(0.1 if activity["has_more"] else 2)
+        return StreamingResponse(stream(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no", "Cache-Control": "private, no-store"})
+
     @app.post("/api/jobs", status_code=202)
     def create_job(request: Request, body: JobInput):
-        active = security.require_session(request, settings, True)
+        active = security.require_session(request, settings, True, owner_only=body.kind in {'rollback_ready', 'publish_sidecars'})
         automation.check_job(active,body.kind)
         if db.setting(settings.db_path,'recovery_required','false')=='true' and body.kind not in {'scan','audit'}:
             raise security.error(409,'recovery_required','После восстановления доступны только сканирование и аудит до сверки администратором')
         key = request.headers.get("idempotency-key", "")
         if not key or len(key) > 128:
             raise security.error(428, "idempotency_key_required", "Передайте Idempotency-Key длиной до 128 символов")
-        if body.kind in {"apply", "rollback", "publish", "extract_cue", "normalize_audio"} and not settings.writable:
+        if body.kind in {"apply", "rollback", "publish", "rollback_ready", "publish_sidecars", "extract_cue", "normalize_audio"} and not settings.writable:
             raise security.error(409, "read_only", "Запись отключена до проверки конфигурации хранилища")
-        if set(body.params) - {"proposal_id", "history_id", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search"}:
+        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
+        if 'acceptance_mode' in body.params and (body.kind != 'apply' or not isinstance(body.params['acceptance_mode'], str) or body.params['acceptance_mode'] not in {'manual', 'automatic'}):
+            raise security.error(422, 'invalid_acceptance_mode', 'Режим manual/automatic применяется только к записи предложения')
+        if body.kind == 'publish_sidecars':
+            if set(body.params) != {'plan_id'} or not isinstance(body.params['plan_id'], str) or not re.fullmatch('[a-f0-9-]{36}', body.params['plan_id']):
+                raise security.error(422, 'sidecar_plan_required', 'Выберите сохраненный план sidecar')
+        elif 'plan_id' in body.params:
+            raise security.error(422, 'invalid_params', 'План sidecar относится только к publish_sidecars')
+        if body.kind == 'rollback_ready':
+            if len(body.track_ids) != 1 or not isinstance(body.params.get('history_id'), str) or not 1 <= len(body.params['history_id']) <= 36 or not re.fullmatch('[a-f0-9]{64}', str(body.params.get('expected_ready_sha256', ''))):
+                raise security.error(422, 'ready_revision_required', 'Выберите одну версию Ready и её ожидаемый SHA-256')
+        elif 'expected_ready_sha256' in body.params:
+            raise security.error(422, 'invalid_params', 'Ревизия Ready относится только к отдельному откату публикации')
         for name in ('youtube_lookup','youtube_search'):
             if name in body.params and (body.kind!='youtube' or type(body.params[name]) is not bool):
                 raise security.error(422,'invalid_params','Параметры YouTube должны быть логическими значениями задания YouTube')
@@ -407,6 +548,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body.kind in {'transcribe','align'} and not settings.inference_url:
             raise security.error(409,'inference_disabled','ASR не настроен')
         ids = list(dict.fromkeys(body.track_ids))
+        if 'release_id' in body.params and body.kind != 'release_audit':
+            raise security.error(422, 'invalid_params', 'Выбор релиза относится к заданию сверки альбома')
+        if body.kind == 'release_audit':
+            if not settings.external_metadata:
+                raise security.error(409, 'provider_disabled', 'Внешние метаданные отключены; комплектность релиза неизвестна')
+            try:
+                release_review.validate_request(body.params, ids)
+            except media.MediaError as exc:
+                raise security.error(422, exc.code, exc.message) from exc
         if body.kind=='replaygain_album' and not 1<=len(ids)<=200:
             raise security.error(422,'invalid_album','Выберите 1-200 файлов одной группы альбома')
         if body.params.get('scope'):
@@ -439,9 +589,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body.kind not in {"scan","export_ready"} and not ids:
             raise security.error(422, "tracks_required", "Выберите конкретные треки")
         request_hash = hashlib.sha256(db.encode(body.model_dump()).encode()).hexdigest()
+        scope = 'token:' + active['api_token_id'] + ':jobs' if active.get('api_token_id') else 'owner:jobs'
         now, identity = db.utcnow(), str(uuid.uuid4())
         with db.transaction(settings.db_path) as conn:
-            previous = conn.execute("SELECT * FROM idempotency WHERE scope='owner:jobs' AND key=?", (key,)).fetchone()
+            previous = conn.execute("SELECT * FROM idempotency WHERE scope=? AND key=?", (scope,key)).fetchone()
             if previous:
                 if previous["request_hash"] != request_hash:
                     raise security.error(409, "idempotency_conflict", "Этот ключ уже использован для другого запроса")
@@ -461,6 +612,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 elif meta.get('format') == 'cue' or (meta.get('cue_album_image') and body.kind not in {'audit','analyze','transcribe','align','youtube'}):
                     raise security.error(409, 'cue_read_only', 'CUE и альбомные образы не изменяются заданиями записи')
                 item = {"track_id": track_id, "sha256": track["sha256"], "relative_path": track["relative_path"]}
+                if body.kind == 'publish':
+                    item['publication_review'] = lyrics_review.freeze_publication(settings, track, conn=conn)
+                if body.kind == 'rollback_ready':
+                    try:
+                        item.update(publication.rollback_selection(conn, track, body.params['history_id'], body.params['expected_ready_sha256']))
+                    except media.MediaError as exc:
+                        raise security.error(409, exc.code, exc.message) from exc
                 if body.kind in {'transcribe','align'} and 'generation' not in body.params:
                     last=conn.execute("SELECT j.payload,j.state,i.value AS item,ji.state AS item_state FROM jobs j,json_each(j.payload,'$.items') i LEFT JOIN job_items ji ON ji.job_id=j.id AND ji.item_key=? WHERE j.kind=? AND json_extract(i.value,'$.track_id')=? AND json_extract(i.value,'$.sha256')=? ORDER BY j.created_at DESC,j.rowid DESC LIMIT 1",(track_id,body.kind,track_id,track['sha256'])).fetchone()
                     generation=0
@@ -474,6 +632,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     text=(json.loads(proposal['payload']).get('lrc') if proposal else '') or meta.get('lrc') or meta.get('lyrics')
                     if not text or len(text)>100000: raise security.error(422,'lyrics_required','Нужен текст длиной до 100000 символов')
                     item['reference_text']=text
+                    document=lyrics_document.effective(conn,dict(track))
+                    item['reference_text'],item['lyrics_reference']=lyrics_document.alignment_reference(document,text)
+                    reference_payload=json.loads(proposal['payload']) if proposal and json.loads(proposal['payload']).get('lrc') else {'lrc':text,'field_sources':meta.get('usage_provenance',{})}
+                    reference_payload=provider_policy.api_payload(conn,track,reference_payload,'derived_analysis')
+                    item['reference_sources']=reference_payload.get('field_sources',{})
                 if body.kind == "apply":
                     if body.params.get("proposal_id"):
                         prop = conn.execute("SELECT * FROM proposals WHERE id=? AND track_id=?", (body.params["proposal_id"],track_id)).fetchone()
@@ -483,6 +646,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         raise security.error(409, "proposal_stale", "Создайте актуальное предложение", file_id=track_id)
                     item["proposal_id"] = prop["id"]
                     item["proposal"] = json.loads(prop["payload"])
+                    field_policy.require_payload(settings, conn, track, item['proposal'], 'apply')
+                    item['proposal']=provider_policy.api_payload(conn,track,item['proposal'],'embed')
+                    item['acceptance_mode'] = body.params.get('acceptance_mode', 'manual')
+                    if item['acceptance_mode'] == 'automatic':
+                        try:
+                            item['automatic_quality'] = automatic_quality.freeze(settings, conn, track, prop, active, applied_payload=item['proposal'])
+                        except media.MediaError as exc:
+                            raise security.error(409, exc.code, exc.message, file_id=track_id) from exc
                 if body.kind == "rollback":
                     if body.params.get("history_id"):
                         history = conn.execute("SELECT * FROM history WHERE id=? AND track_id=?", (body.params["history_id"],track_id)).fetchone()
@@ -492,13 +663,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         raise security.error(409, "rollback_conflict", "Нет доступной резервной версии для текущего файла", file_id=track_id)
                     item["history_id"] = history["id"]
                 items.append(item)
+            if body.kind == 'publish_sidecars':
+                try:
+                    publication_sidecars.validate_enqueue(conn, body.params['plan_id'], ids, identity)
+                except media.MediaError as exc:
+                    raise security.error(409, exc.code, exc.message) from exc
             payload = {"items": items, "params": body.params}
             if active.get('api_token_id'):payload['auth_token_id']=active['api_token_id']
             conn.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch) VALUES(?,?,'queued','pending',?,?,?,?,?)", (identity,body.kind,db.encode(payload),len(items),now,now,active["auth_epoch"]))
-            conn.execute("INSERT INTO idempotency VALUES('owner:jobs',?,?,?,?)", (key,request_hash,identity,now))
+            conn.execute("INSERT INTO idempotency VALUES(?,?,?,?,?)", (scope,key,request_hash,identity,now))
             db.event(conn, "job_created", {"job_id": identity, "kind": body.kind})
             row = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (identity,)).fetchone())
         return public_job(settings, row)
+
+    @app.post('/api/jobs/{job_id}/retry-storage')
+    def retry_storage(request:Request,job_id:str):
+        active = security.require_session(request,settings,True)
+        with db.transaction(settings.db_path) as conn:
+            row=conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+            if not row:raise security.error(404,'job_missing','Задача не найдена')
+            automation.check_job(active,row['kind'])
+            if row['state']!='queued' or row['stage']!='waiting_storage' or row['cancel_requested']:
+                raise security.error(409,'job_not_waiting_storage','Задача не ожидает свободного места')
+            if row['auth_epoch']!=int(db.setting(settings.db_path,'auth_epoch','0')):
+                raise security.error(409,'authorization_revoked','Авторизация исходной задачи отозвана; создайте новую задачу')
+            payload=json.loads(row['payload']);payload['retry_at']=0
+            conn.execute("UPDATE jobs SET stage='pending',payload=?,updated_at=? WHERE id=?",(db.encode(payload),db.utcnow(),job_id))
+            db.event(conn,'job_resume',{'job_id':job_id,'reason':'storage_recheck'})
+        return public_job(settings,db.fetchone(settings.db_path,'SELECT * FROM jobs WHERE id=?',(job_id,)))
 
     @app.post('/api/jobs/{job_id}/pause')
     @app.post('/api/jobs/{job_id}/resume')
@@ -509,7 +701,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             row=conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
             if not row:raise security.error(404,'job_not_found','Задание не найдено')
             automation.check_job(active,row['kind'])
-            if row['kind'] in {'scan','export_ready','replaygain_album'}:raise security.error(409,'pause_unsupported','Этот этап выполняется одной согласованной операцией')
+            if row['kind'] in {'scan','export_ready','replaygain_album','release_audit','publish_sidecars'}:raise security.error(409,'pause_unsupported','Этот этап выполняется одной согласованной операцией')
             payload=json.loads(row['payload'])
             if action=='pause':
                 if row['state'] not in {'queued','running','paused'}:raise security.error(409,'job_not_active','Задание уже завершено')
@@ -521,7 +713,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if db.setting(settings.db_path,'recovery_required','false')=='true':raise security.error(409,'recovery_required','Сначала завершите восстановление')
                 payload['pause_requested']=False;payload.pop('auth_token_id',None)
                 if active.get('api_token_id'):payload['auth_token_id']=active['api_token_id']
-                state='queued';stage='waiting_provider' if payload.get('retry_at',0)>time.time() else 'pending'
+                state='queued';stage=('waiting_storage' if payload.get('wait_reason')=='storage' else 'waiting_provider') if payload.get('retry_at',0)>time.time() else 'pending'
             conn.execute('UPDATE jobs SET payload=?,state=?,stage=?,auth_epoch=?,updated_at=? WHERE id=?',(db.encode(payload),state,stage,active['auth_epoch'],db.utcnow(),job_id))
             db.event(conn,'job_'+action,{'job_id':job_id})
         return public_job(settings,db.fetchone(settings.db_path,'SELECT * FROM jobs WHERE id=?',(job_id,)))
@@ -535,7 +727,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise security.error(404, "job_not_found", "Задание не найдено")
             automation.check_job(active,row['kind'])
             if row["state"] in {"queued", "waiting", "paused"}:
-                conn.execute("UPDATE jobs SET state='cancelled',stage='cancelled',cancel_requested=1,updated_at=? WHERE id=?", (db.utcnow(),job_id))
+                state = 'cancelled_partial' if row['completed'] or row['failed'] else 'cancelled'
+                conn.execute("UPDATE jobs SET state=?,stage=?,cancel_requested=1,updated_at=? WHERE id=?", (state,state,db.utcnow(),job_id))
             elif row["state"] == "running":
                 conn.execute("UPDATE jobs SET cancel_requested=1,updated_at=? WHERE id=?", (db.utcnow(),job_id))
             db.event(conn, "job_cancel_requested", {"job_id": job_id})
@@ -590,12 +783,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             chosen=[x for x in candidates if x['id'] in ids]
             if len(chosen)!=len(set(ids)): raise security.error(422,'candidate_missing','Кандидат устарел')
             if len({x['kind'] for x in chosen})!=len(chosen): raise security.error(422,'candidate_conflict','Выберите один вариант каждого типа')
-            payload={'tags':{},'sources':[]}
-            for candidate in chosen:
-                payload['tags'].update(candidate.get('tags',{}))
-                if candidate.get('lrc') or candidate.get('plain_lyrics'): payload['lrc']=candidate.get('lrc') or candidate['plain_lyrics']
-                if candidate.get('cover'): payload['cover']=candidate['cover']
-                payload['sources'].append({k:candidate[k] for k in ('id','provider','source_url','source_path','identification','timing_verified') if k in candidate})
+            try:
+                payload=field_policy.selected_payload(settings,conn,row,chosen,analysis['updated_at'])
+                payload=provider_policy.require_payload(conn,row,payload,'cache')
+                payload=lyrics_document.propose(conn,row,payload)
+            except media.MediaError as exc:
+                raise security.error(409,exc.code,exc.message) from exc
             identity=str(uuid.uuid4());now=db.utcnow()
             conn.execute('INSERT INTO proposals VALUES(?,?,?,?,?)',(identity,track_id,row['sha256'],db.encode(payload),now))
             db.event(conn,'proposal_created',{'track_id':track_id,'proposal_id':identity})

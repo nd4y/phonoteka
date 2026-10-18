@@ -1,0 +1,59 @@
+import type { Job } from './types';
+
+export type LiveJob = Job & {
+  processed?: number; remaining?: number; current_action?: string; active_count?: number;
+  eta_seconds?: number | null; eta_reason?: string; recent_rate?: number | null;
+};
+export type ActivityEvent = {
+  id: number; kind: string; created_at: string; message: string; track_id?: string;
+  filename?: string; state?: string; completed?: number; failed?: number; retry_at?: number; code?: string;
+};
+export type JobActivity = {
+  job: LiveJob; active_items: Array<{ track_id: string | null; filename: string; action: string; started_at?: string | null }>;
+  active_items_truncated: boolean; events: ActivityEvent[]; cursor: number; resync_required: boolean; has_more: boolean;
+};
+export const jobNames: Record<string, string> = {
+  publish_sidecars: 'Публикация LRC и обложек', release_audit: 'Сверка релиза', rollback_ready: 'Откат опубликованной версии',
+  youtube: 'Связи с YouTube', normalize_audio: 'Подготовка редактируемой копии', replaygain_album: 'Громкость альбома',
+  export_ready: 'Экспорт готовой коллекции', extract_cue: 'Извлечение CUE', replaygain: 'Измерение ReplayGain',
+  recognize: 'Распознавание аудиоотпечатков', transcribe: 'Проверка содержимого ASR', align: 'Сопоставление текста с аудио',
+  analyze: 'Поиск метаданных и текстов', scan: 'Сканирование', audit: 'Проверка аудио', apply: 'Запись изменений',
+  rollback: 'Откат изменений', publish: 'Публикация',
+};
+export const jobStates: Record<string, string> = {
+  waiting_storage: 'Ожидание места',
+  paused: 'Приостановлено', waiting_provider: 'Ожидание сервиса', deferred: 'Ожидает повтора', queued: 'В очереди',
+  running: 'В работе', completed: 'Завершено', completed_with_errors: 'Завершено с ошибками', succeeded: 'Завершено',
+  failed: 'Ошибка', canceled: 'Отменено', cancelled: 'Отменено', cancelled_partial: 'Отменено частично',
+  interrupted: 'Прервано', needs_review: 'Нужно решение', pending: 'Ожидание', conflict: 'Конфликт версий',
+};
+export const isActiveJob = (job: Job) => ['queued', 'running', 'pending', 'paused', 'waiting_provider', 'waiting_storage', 'deferred'].includes(job.state);
+export function jobTone(job: Job): 'success' | 'cancelled' | 'error' | 'active' | 'waiting' | 'paused' {
+  if (['canceled', 'cancelled', 'cancelled_partial'].includes(job.state) || job.cancel_requested && isActiveJob(job)) return 'cancelled';
+  if (['failed', 'interrupted', 'completed_with_errors', 'needs_review', 'conflict'].includes(job.state)) return 'error';
+  if (['succeeded', 'completed'].includes(job.state)) return job.failed ? 'error' : 'success';
+  if (job.state === 'paused' || job.pause_requested) return 'paused';
+  if (['waiting_provider','waiting_storage'].includes(job.stage) || ['queued', 'waiting_provider', 'deferred', 'pending'].includes(job.state)) return 'waiting';
+  if (job.state === 'running') return 'active';
+  if (job.failed) return 'error';
+  return 'success';
+}
+export function etaText(job: LiveJob): string {
+  const seconds = job.eta_seconds;
+  if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0) {
+    const duration = seconds < 60 ? `${Math.ceil(seconds)} с` : seconds < 3600 ? `${Math.ceil(seconds / 60)} мин`
+      : `${Math.floor(seconds / 3600)} ч ${Math.ceil(seconds % 3600 / 60)} мин`;
+    return `Осталось около ${duration}`;
+  }
+  return ({ queued: 'ETA после запуска', paused: 'ETA на паузе', waiting_storage: 'ETA после освобождения места', waiting_provider: 'ETA после ответа сервиса',
+    cancelling: 'Завершаем текущие операции', unknown_total: 'ETA после определения объема', finalizing: 'Завершающие действия',
+    no_recent_progress: 'ETA уточняется: нет свежего прогресса', finished: 'Обработка завершена',
+    insufficient_samples: 'Собираем данные для ETA' } as Record<string, string>)[job.eta_reason || 'insufficient_samples'] || 'ETA пока не определено';
+}
+export function mergeActivityEvents(previous: ActivityEvent[], incoming: ActivityEvent[], limit = 200): ActivityEvent[] {
+  const events = new Map<number, ActivityEvent>();
+  for (const event of [...previous, ...incoming]) {
+    if (Number.isSafeInteger(event.id) && event.id > 0 && typeof event.message === 'string') events.set(event.id, event);
+  }
+  return [...events.values()].sort((a, b) => a.id - b.id).slice(-Math.max(1, limit));
+}

@@ -33,7 +33,13 @@ def install(app,settings):
         with db.transaction(settings.db_path) as conn:
             conn.execute("INSERT INTO settings VALUES('schedule',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(db.encode(state),))
             if not body.enabled:
-                conn.execute("UPDATE jobs SET cancel_requested=1,state=CASE WHEN state='queued' THEN 'cancelled' ELSE state END WHERE json_extract(payload,'$.trigger')='schedule' AND state IN ('queued','running')")
+                jobs=conn.execute("SELECT id,state,completed FROM jobs WHERE json_extract(payload,'$.trigger')='schedule' AND state IN ('queued','running','paused')").fetchall()
+                for job in jobs:
+                    terminal=job['state'] in {'queued','paused'}
+                    outcome=('cancelled_partial' if job['completed'] else 'cancelled') if terminal else job['state']
+                    conn.execute('UPDATE jobs SET cancel_requested=1,state=?,stage=CASE WHEN ? THEN ? ELSE stage END,error=CASE WHEN ? THEN ? ELSE error END,updated_at=? WHERE id=?',
+                                 (outcome,terminal,outcome,terminal,'schedule_disabled',db.utcnow(),job['id']))
+                    db.event(conn,'job_cancel_requested',{'job_id':job['id'],'code':'schedule_disabled'})
             db.event(conn,'schedule_updated',{'enabled':body.enabled,'steps':body.steps,'interval_minutes':body.interval_minutes})
         return state
 
@@ -64,6 +70,13 @@ def tick(settings,now=None):
                 if any(sources.get(row['id'],{}).get(p) not in {'candidates','candidate','fingerprint_match','no_match'} for p in wanted):
                     items.append({'track_id':row['id'],'relative_path':row['relative_path'],'sha256':row['sha256']})
         if enabled and (items or kind=='scan'):
+            from .webhooks import can_accept
+            if not can_accept(conn):
+                state['remaining'].insert(0,kind)
+                state['waiting_reason']='webhook_queue_full'
+                conn.execute("UPDATE settings SET value=? WHERE key='schedule'",(db.encode(state),))
+                return
+            state.pop('waiting_reason',None)
             identity=str(uuid.uuid4());stamp=db.utcnow()
             payload={'items':items,'params':{},'trigger':'schedule'}
             conn.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch) VALUES(?,?,'queued','pending',?,?,?,?,?)",(identity,kind,db.encode(payload),len(items),stamp,stamp,epoch))

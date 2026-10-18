@@ -10,10 +10,12 @@ import pytest
 from fastapi.testclient import TestClient
 from prometheus_client.parser import text_string_to_metric_families
 from phonoteka import db
+from phonoteka import media,provider_policy
 from phonoteka.app import create_app
 from phonoteka.metrics import DatabaseCollector
 from phonoteka.providers import Providers, ProviderError
 from phonoteka.telemetry import Metrics, JsonFormatter, context, worker_server
+from phonoteka.telemetry import policy_denied
 from phonoteka.worker import Worker
 from test_backend import settings, authenticated, seed, job
 
@@ -104,6 +106,7 @@ def test_queue_and_provider_snapshots_are_gauges_and_survive_new_registry(settin
 
 def test_provider_success_cache_and_rate_limit_are_instrumented(settings):
     db.initialize(settings.db_path)
+    db.set_setting(settings.db_path,'provider_usage:lrclib:lyrics',db.encode({'allow_cache':True,'cache_ttl':3600,'basis':'Explicit cache permission for metrics fixture'}))
     async def run():
         async with httpx.AsyncClient():
             provider=Providers(settings,transport=httpx.MockTransport(lambda r:httpx.Response(200,json={'safe':True})))
@@ -154,3 +157,57 @@ def test_inference_metrics_token_is_separate_from_asr_key(settings,monkeypatch):
         assert client.get('/metrics',headers={'Authorization':'Bearer different-asr-key'}).status_code==401
         assert client.get('/metrics',headers={'Authorization':'Bearer '+TOKEN}).status_code==200
         assert client.get('/jobs/not-a-job',headers={'Authorization':'Bearer '+TOKEN}).status_code==401
+
+
+def test_storage_wait_and_webhook_gauges_have_only_bounded_labels(settings):
+    cfg=configured(settings)
+    with TestClient(create_app(cfg),base_url=cfg.app_url):
+        now=__import__('time').time()
+        with db.transaction(cfg.db_path) as conn:
+            for identity,kind,stage,delay in [('private-storage-id','apply','waiting_storage',60),('private-provider-id','recognize','waiting_provider',120)]:
+                conn.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,completed,created_at,updated_at) VALUES(?,?,'queued',?,?,4,1,?,?)",(identity,kind,stage,db.encode({'retry_at':now+delay,'private_path':'/private/music'}),db.utcnow(),db.utcnow()))
+            conn.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at) VALUES('cancelled-stale-wait','apply','cancelled','waiting_storage',?,9,?,?)",(db.encode({'retry_at':now+999}),db.utcnow(),db.utcnow()))
+            for index,state in enumerate(('pending','in_flight','delivered','dead')):
+                conn.execute('INSERT INTO webhook_outbox(id,event_id,destination_id,job_id,payload,state,next_attempt,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                    (f'private-event-{index}',index+1,'private-destination',f'private-job-{index}',db.encode({'token':'private-signing-value'}),state,now+45,db.utcnow(),db.utcnow()))
+            conn.execute("INSERT INTO webhook_reservations VALUES('private-reserved-job','private-destination')")
+            conn.execute("UPDATE settings SET value=? WHERE key='webhook_runtime'",(db.encode({'enabled':False,'max_pending':42,'destination_id':'private-destination'}),))
+        registry=Metrics('app').registry;registry.register(DatabaseCollector(cfg))
+        from prometheus_client import generate_latest
+        body=generate_latest(registry).decode();values=samples(body)
+        assert values['phonoteka_storage_wait_jobs',(('kind','apply'),)]==1
+        assert values['phonoteka_storage_wait_items_remaining',(('kind','apply'),)]==3
+        assert 0<values['phonoteka_storage_retry_wait_seconds',(('kind','apply'),)]<=60
+        assert values['phonoteka_provider_retry_jobs',(('kind','recognize'),)]==1
+        assert values['phonoteka_webhook_outbox',(('state','dead'),)]==1
+        assert values['phonoteka_webhook_reserved_jobs',()]==1
+        assert values['phonoteka_webhook_queue_slots_used',()]==3
+        assert values['phonoteka_webhook_queue_capacity',()]==42
+        assert values['phonoteka_webhook_delivery_enabled',()]==0
+        assert values['phonoteka_webhook_other_destination_pending',()]==0
+        assert all(private not in body for private in ('private-event','private-destination','private-job','private-signing-value','private-storage-id','/private/music',TOKEN))
+
+
+def test_provider_policy_denials_counter_does_not_use_dynamic_or_private_labels(settings):
+    db.initialize(settings.db_path)
+    metrics=Metrics('app')
+    label=('phonoteka_provider_policy_denials_total',(('operation','embed'),('provider','lrclib')))
+    before=samples(metrics.render().decode())[label]
+    with db.connect(settings.db_path) as conn,pytest.raises(media.MediaError):
+        provider_policy.require_sources(conn,[{'origin':'provider_acquired','provider':'lrclib','data_type':'lyrics'}],'embed')
+    assert samples(metrics.render().decode())[label]==before+1
+    policy_denied('private-provider-input','private-operation-input')
+    body=metrics.render().decode();values=samples(body)
+    assert values['phonoteka_provider_policy_denials_total',(('operation','other'),('provider','other'))]>=1
+    assert 'private-provider-input' not in body and 'private-operation-input' not in body
+
+
+def test_item_action_stdout_uses_only_public_phase_codes():
+    formatter = JsonFormatter('worker')
+    record = logging.LogRecord('phonoteka', logging.INFO, '', 0, 'ignored', (), None)
+    record.event = 'item_action'
+    record.fields = {'action':'metadata_lookup'}
+    assert json.loads(formatter.format(record))['action'] == 'metadata_lookup'
+    record.fields = {'action':'/private/music/secret-title.flac'}
+    rendered = formatter.format(record)
+    assert json.loads(rendered)['action'] == 'other' and 'secret-title' not in rendered

@@ -12,6 +12,7 @@ import errno
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -268,7 +269,7 @@ def probe_audio(path: Path) -> dict:
     streams = [x for x in doc.get('streams', []) if x.get('codec_type') == 'audio']
     if not streams:
         raise MediaError('no_audio_stream', 'File contains no audio stream')
-    return {'duration': float(doc.get('format', {}).get('duration') or streams[0].get('duration') or 0), 'codec': streams[0].get('codec_name'), 'container':doc.get('format', {}).get('format_name'), 'tags': {k.lower():[str(v)] for k,v in doc.get('format', {}).get('tags', {}).items() if k.lower() in _TEXT_FRAMES}}
+    return {'duration': float(doc.get('format', {}).get('duration') or streams[0].get('duration') or 0), 'codec': streams[0].get('codec_name'), 'channels':int(streams[0].get('channels') or 0), 'sample_rate':int(streams[0].get('sample_rate') or 0), 'container':doc.get('format', {}).get('format_name'), 'tags': {k.lower():[str(v)] for k,v in doc.get('format', {}).get('tags', {}).items() if k.lower() in _TEXT_FRAMES}}
 
 
 def fallback_inventory(path, roots, error):
@@ -341,11 +342,69 @@ def audit_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
     try:
         identity = audio_identity(path)
         _process(path, "ffmpeg", ["-nostdin", "-xerror", "-map", "0:a:0", "-f", "null", "-"], timeout=1800)
+        # Diagnostics are a separate, bounded pass. A missing filter or an
+        # unparseable diagnostic must not turn successful decoding into damage.
+        try:
+            signal, warnings = _audit_signal(path)
+        except (MediaError, ValueError, OverflowError):
+            signal = {"state": "unavailable", "method": "ffmpeg_signal_v1"}
+            warnings = [{"code": "signal_measurements_unavailable", "message": "Измерения сигнала недоступны; проверка декодирования выполнена"}]
         _expect(path, digest)
-        return {"state": "passed", "sha256": digest, "audio_identity": identity, "error": None, "warnings": []}
+        return {"state": "passed", "sha256": digest, "audio_identity": identity, "error": None, "warnings": warnings, "signal": signal}
     except MediaError as exc:
         return {"state": "unsupported" if exc.code == "unsupported_format" else "failed", "sha256": digest,
                 "error": exc.code, "warnings": [], "message": exc.message}
+
+
+def _audit_signal(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Measure symptoms, never assert corruption or a file's lossless origin.
+
+    FFmpeg streams the original sample rate/channels. Only bounded stderr is
+    read; no decoded PCM is held in Python and no output media is created.
+    Peak_count counts extrema occurrences, not samples that were clipped.
+    """
+    result = _process(path, "ffmpeg", ["-nostdin", "-v", "info", "-nostats", "-map", "0:a:0", "-vn", "-sn", "-dn",
+        "-af", "silencedetect=noise=-60dB:d=5,astats=metadata=0:reset=0:measure_perchannel=none:measure_overall=Peak_level+Peak_count+Number_of_samples",
+        "-f", "null", "-"], timeout=1800)
+    log = result.stderr.decode("utf-8", errors="replace")
+    overall = re.split(r"(?m)^.*\]\s+Overall\s*$", log)
+    if len(overall) < 2:
+        raise ValueError("Missing overall signal measurements")
+    values = dict(re.findall(r"\]\s+(Peak level dB|Peak count|Number of samples):\s*([^\s]+)", overall[-1]))
+    if not {"Peak level dB", "Peak count", "Number of samples"} <= values.keys():
+        raise ValueError("Incomplete signal measurements")
+    peak = float(values["Peak level dB"])
+    extrema, samples = float(values["Peak count"]), float(values["Number of samples"])
+    if (not math.isfinite(peak) and peak != -math.inf) or not math.isfinite(extrema) or extrema < 0 or not math.isfinite(samples) or samples <= 0:
+        raise ValueError("Invalid signal measurements")
+    silence = []
+    pending = None
+    interval_count = 0
+    for match in re.finditer(r"silence_(start|end):\s*([+-]?[\d.eE]+)(?:\s*\|\s*silence_duration:\s*([\d.eE+-]+))?", log):
+        value = float(match[2])
+        if not math.isfinite(value) or value < 0:
+            continue
+        if match[1] == "start":
+            pending = value
+        elif pending is not None and value >= pending:
+            duration = value - pending
+            if duration >= 4.99:
+                interval_count += 1
+                if len(silence) < 100:
+                    silence.append({"start_seconds": round(pending, 3), "end_seconds": round(value, 3), "duration_seconds": round(duration, 3)})
+            pending = None
+    warnings = []
+    if interval_count:
+        warnings.append({"code": "long_silence", "message": "Есть участки тише -60 dBFS длительностью от 5 секунд; это может быть частью записи", "intervals": interval_count})
+    if math.isfinite(peak) and peak >= -0.1:
+        warnings.append({"code": "high_sample_peak", "message": "Пик близок к 0 dBFS; это диагностический признак, а не доказательство повреждения", "sample_peak_dbfs": round(peak, 6)})
+    if math.isfinite(peak) and peak >= -0.001 and extrema >= 3:
+        warnings.append({"code": "possible_clipping", "message": "Повторяющиеся предельные пики: возможен clipping; подтвердите прослушиванием"})
+    return {"state": "measured", "method": "ffmpeg_signal_v1", "sample_peak_dbfs": round(peak, 6) if math.isfinite(peak) else None,
+        "digital_silence": peak == -math.inf, "extrema_occurrences": extrema, "samples_per_channel": int(samples),
+        "silence_threshold_dbfs": -60, "silence_minimum_seconds": 5, "silence_intervals": silence,
+        "silence_interval_count": interval_count, "silence_intervals_truncated": interval_count > len(silence),
+        "quality_verdict": "not_determined", "lossless_origin": "unknown"}, warnings
 
 
 def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
@@ -429,6 +488,8 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
             duration=float(probe_audio(path).get('duration',0));duration_source='ffprobe_fallback'
         return {"sha256": digest, "size": info.st_size, "mtime_ns": info.st_mtime_ns,
                 **intake.describe(path,audio), "duration": duration,'duration_source':duration_source,
+                "sample_rate": getattr(audio.info, 'sample_rate', None), "channels": getattr(audio.info, 'channels', None),
+                "bitrate": getattr(audio.info, 'bitrate', None), "bits_per_sample": getattr(audio.info, 'bits_per_sample', None),
                 "tags": tags, "has_art": has_art, "lyrics": lyrics, "lrc": lrc, "lyrics_warning": lyrics_warning,
                 "write_supported": write_supported, "write_block_reason": reason,
                 "audio_identity": None, "poweramp_verified": False}
@@ -957,6 +1018,46 @@ def publish(source: str | Path, destination: str | Path, expected_source_sha256:
     with _reserve_filesystem_space(requests):
         return _publish_impl(source, destination, expected_source_sha256, roots, publication_root,
                              expected_destination_sha256, backup_dir=backup_dir, authorize=authorize)
+
+
+def publish_bytes(data: bytes, destination: str | Path, expected_sha256: str | None,
+                  roots: Mapping[str, Any], publication_root: str | Path, backup_dir: str | Path,
+                  *, authorize: Callable[[], None] | None = None, access_source: str | Path | None = None) -> dict[str, Any]:
+    """One bounded sidecar, with the same staging/CAS/journal as an audio file.
+
+    Callers own group validation and the registry. This is never a multi-file
+    transaction. A failed fsync keeps its journal for explicit reconciliation.
+    """
+    _mutation_supported()
+    if not isinstance(data, bytes) or not 0 < len(data) <= 20 * 1024**2:
+        raise MediaError('invalid_sidecar', 'Sidecar must contain 1 byte to 20 MiB')
+    target = _absolute(destination)
+    publication = _absolute(publication_root)
+    if publication != _absolute(roots['publication']) or not _within(target, publication / 'Ready') or target == publication / 'Ready':
+        raise MediaError('unsafe_path', 'Sidecar target must be within publication/Ready')
+    _validate(target, roots, write=True, missing=expected_sha256 is None)
+    if expected_sha256 is not None:
+        _expect(target, expected_sha256)
+    elif target.exists():
+        raise MediaError('conflict', 'Unregistered sidecar destination already exists')
+    previous_size = target.stat().st_size if expected_sha256 is not None else 0
+    with _reserve_filesystem_space([(publication, len(data) + 1024**2), (_absolute(backup_dir), previous_size + 1024**2)]):
+        _make_directory(target.parent)
+        directory = publication / '.staging'
+        _make_directory(directory)
+        staged = directory / (uuid.uuid4().hex + target.suffix)
+        with _directory(directory) as parent:
+            fd = os.open(staged.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+            with os.fdopen(fd, 'wb') as output:
+                output.write(data)
+                output.flush()
+                os.fsync(output.fileno())
+        if expected_sha256:
+            _preserve_access(target, staged)
+        elif access_source is not None:
+            _preserve_access(_validate(access_source, roots), staged)
+        return _transaction(target, staged, before=expected_sha256, backup_dir=_absolute(backup_dir),
+                            roots=roots, authorize=authorize, action='publish_sidecar')
 
 
 def recover(journal_path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:

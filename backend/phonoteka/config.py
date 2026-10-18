@@ -40,6 +40,12 @@ class Settings:
     inference_url: str = ""
     inference_secret_file: Path | None = None
     metrics_token_file: Path | None = None
+    webhook_enabled: bool = False
+    webhook_url: str = ""
+    webhook_allowed_hosts: tuple[str, ...] = ()
+    webhook_secret_file: Path | None = None
+    webhook_allow_private: bool = False
+    webhook_max_pending: int = 10000
 
     def __post_init__(self):
         if self.musicbrainz_host not in {"musicbrainz.org", "beta.musicbrainz.org"}:
@@ -70,6 +76,12 @@ class Settings:
             external_fingerprints=boolean("EXTERNAL_FINGERPRINTS", False),
             youtube_enabled=boolean('YOUTUBE_ENABLED',False),
             metrics_token_file=Path(os.environ['METRICS_TOKEN_FILE']) if os.environ.get('METRICS_TOKEN_FILE') else None,
+            webhook_enabled=boolean('WEBHOOK_ENABLED',False),
+            webhook_url=os.environ.get('WEBHOOK_URL',''),
+            webhook_allowed_hosts=tuple(value.strip().lower() for value in os.environ.get('WEBHOOK_ALLOWED_HOSTS','').split(',') if value.strip()),
+            webhook_secret_file=Path(os.environ['WEBHOOK_SECRET_FILE']) if os.environ.get('WEBHOOK_SECRET_FILE') else None,
+            webhook_allow_private=boolean('WEBHOOK_ALLOW_PRIVATE',False),
+            webhook_max_pending=max(10,min(100000,int(os.environ.get('WEBHOOK_MAX_PENDING','10000')))),
             theaudiodb_enabled=boolean('THEAUDIODB_ENABLED',False),
             theaudiodb_artwork=boolean('THEAUDIODB_ARTWORK',False),
             discogs_enabled=boolean('DISCOGS_ENABLED',False),

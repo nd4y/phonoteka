@@ -10,7 +10,8 @@ import shutil
 import sqlite3
 import tempfile
 import time
-from . import __version__,db,media
+import uuid
+from . import __version__,db,media,provider_policy
 from .config import Settings
 from .worker import scheduler_guard
 
@@ -36,7 +37,7 @@ def verify(directory):
     for item in manifest['files']:
         relative=Path(item['path'])
         if relative.is_absolute() or '..' in relative.parts or str(relative) in seen:raise ValueError('Invalid backup path')
-        if relative.parts[0] not in {'phonoteka.sqlite3','backups','exports'}:raise ValueError('Unexpected backup artifact')
+        if relative.parts[0] not in {'phonoteka.sqlite3','backups','exports','retention'}:raise ValueError('Unexpected backup artifact')
         seen.add(str(relative));path=root/relative;media._no_links(path)
         if path.stat().st_size!=item['size'] or digest(path)!=item['sha256']:raise ValueError('Backup artifact hash mismatch')
     if 'phonoteka.sqlite3' not in seen:raise ValueError('Database missing')
@@ -50,17 +51,21 @@ def backup(settings,destination):
     with scheduler_guard(settings.state_dir),media.writer_guard(settings.storage_guard_dir,settings.instance_id):
         active=db.fetchone(settings.db_path,"SELECT COUNT(*) AS n FROM jobs WHERE state IN ('running','interrupted')")['n']
         if active:raise ValueError('Reconcile running jobs before backup')
+        provider_policy.require_backup(settings)
         with tempfile.TemporaryDirectory(prefix='.phonoteka-backup-',dir=dest.parent) as folder:
             stage=Path(folder)/'snapshot';stage.mkdir(mode=0o700)
             with db.connect(settings.db_path) as src,closing(sqlite3.connect(stage/'phonoteka.sqlite3')) as dst:
                 src.backup(dst)
+                db.configure_connection(dst)
                 # Caches and active credentials are not portable backup artifacts.
                 dst.execute('DELETE FROM provider_cache');dst.execute('DELETE FROM sessions');dst.execute('DELETE FROM api_tokens');dst.commit()
+                dst.row_factory=sqlite3.Row
+                provider_policy.sanitize_backup(dst);dst.commit()
                 dst.execute('PRAGMA wal_checkpoint(TRUNCATE)');dst.execute('PRAGMA journal_mode=DELETE')
                 # DELETE alone leaves cached/private rows in SQLite free pages.
                 # Compact the copy so excluded rows are absent from backup bytes.
                 dst.execute('VACUUM')
-            for name in ('backups','exports'):
+            for name in ('backups','exports','retention'):
                 source=settings.state_dir/name
                 if not source.exists():continue
                 for path in source.rglob('*'):
@@ -91,10 +96,15 @@ def restore(directory,destination):
             if digest(target)!=entry['sha256']:raise ValueError('Backup changed during restore')
         with db.transaction(stage/'phonoteka.sqlite3') as conn:
             conn.execute('DELETE FROM sessions');conn.execute('DELETE FROM api_tokens')
+            conn.execute("DELETE FROM settings WHERE key LIKE 'export_lease:%'")
             conn.execute("UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='auth_epoch'")
             conn.execute("INSERT OR REPLACE INTO settings VALUES('recovery_required','true')")
             conn.execute("INSERT OR REPLACE INTO settings VALUES('schedule',?)",(db.encode({'enabled':False,'remaining':[]}),))
-            conn.execute("UPDATE jobs SET state='cancelled',stage='cancelled',cancel_requested=1 WHERE state IN ('running','queued','paused','interrupted')")
+            conn.execute("INSERT OR REPLACE INTO settings VALUES('webhook_paused','true')")
+            conn.execute("INSERT OR REPLACE INTO settings VALUES('webhook_event_epoch',?)",(str(uuid.uuid4()),))
+            cancelled=[row['id'] for row in conn.execute("SELECT id FROM jobs WHERE state IN ('running','queued','paused','interrupted')")]
+            conn.execute("UPDATE jobs SET state='cancelled',stage='cancelled',cancel_requested=1,error='state_restored' WHERE state IN ('running','queued','paused','interrupted')")
+            for identity in cancelled:db.event(conn,'job_finished',{'job_id':identity,'state':'cancelled','reason':'state_restored'})
             db.event(conn,'state_restored',{'version':manifest['version'],'music_restored':False,'recovery_required':True})
         media._sync_directory(stage);media._replace(stage,dest,no_replace=True);media._sync_directory(dest.parent)
     return {'path':str(dest),'recovery_required':True,'music_restored':False,'credentials_revoked':True}

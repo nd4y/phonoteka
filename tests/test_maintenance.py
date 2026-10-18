@@ -2,7 +2,7 @@ import json
 from dataclasses import replace
 import pytest
 from fastapi.testclient import TestClient
-from phonoteka import db,maintenance,media
+from phonoteka import db,maintenance,media,retention
 from phonoteka.app import create_app
 from phonoteka.worker import scheduler_guard
 from test_backend import settings,authenticated,synthetic,job,drain
@@ -41,6 +41,31 @@ def test_backup_requires_scheduler_stop_and_disjoint_new_destination(settings,tm
             with pytest.raises(RuntimeError):maintenance.backup(settings,tmp_path/'snapshot')
         with pytest.raises(ValueError,match='overlap'):maintenance.backup(settings,settings.work_root/'snapshot')
         with pytest.raises(ValueError,match='exist'):maintenance.backup(settings,settings.work_root)
+
+
+def test_retention_journal_is_verified_and_restored_with_state(settings,tmp_path):
+    cfg=replace(settings,read_only=False,storage_verified=True)
+    with TestClient(create_app(cfg),base_url=cfg.app_url):
+        # Exercise the real maintenance journal without deleting an artifact.
+        plan=retention.preview(cfg,verify_files=True)
+        retention.apply(cfg,plan,plan['plan_id'])
+        relative='retention/'+plan['plan_id']+'.json'
+        original=(cfg.state_dir/relative).read_bytes()
+        assert json.loads(original)['state']=='committed'
+        snapshot=tmp_path/'retention-snapshot'
+        assert maintenance.backup(cfg,snapshot)['verified']
+        manifest=maintenance.verify(snapshot)
+        assert any(item['path']==relative for item in manifest['files'])
+        restored=tmp_path/'retention-restored'
+        maintenance.restore(snapshot,restored)
+        assert (restored/relative).read_bytes()==original
+        assert db.setting(restored/'phonoteka.sqlite3','recovery_required')=='true'
+        (snapshot/relative).write_bytes(original+b'changed')
+        with pytest.raises(ValueError,match='hash'):
+            maintenance.verify(snapshot)
+        with pytest.raises(ValueError,match='hash'):
+            maintenance.restore(snapshot,tmp_path/'damaged-retention-restore')
+        assert not (tmp_path/'damaged-retention-restore').exists()
 
 
 def test_pause_resume_preserves_job_and_cancel_route(settings):

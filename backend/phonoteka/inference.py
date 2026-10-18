@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from . import cue, media
 from .telemetry import Metrics, ObserveHTTP, metrics_authorized, CONTENT_TYPE_LATEST, log
 from .metrics import DatabaseCollector
+from .inference_budget import ModelProcess, BudgetError, PROFILE, MAX_DURATION, MAX_PCM_BYTES, MAX_SAMPLES, MAX_INPUT_CHANNELS, MAX_INPUT_RATE, profile
 
 ROOT=Path(os.environ.get('WORK_ROOT','/work'))
 STATE=Path(os.environ.get('INFERENCE_STATE','/inference'))
@@ -49,29 +50,37 @@ class Input(BaseModel):
     reference_text:str|None=Field(default=None,max_length=100000)
 
 
-def identity(body): return hashlib.sha256(json.dumps([body,MODEL,MODEL_REVISION,'transcribe-v2'],sort_keys=True).encode()).hexdigest()
+def identity(body): return hashlib.sha256(json.dumps([body,MODEL,MODEL_REVISION,PROFILE,'transcribe-v3'],sort_keys=True).encode()).hexdigest()
 
 
-def execute(body):
+def execute(body, on_model_loaded=None):
     global MODEL_INSTANCE
     source=cue.safe_path(ROOT,body['relative_path'])
     media._expect(source,body['sha256'])
     info=media.probe_audio(source)
-    if not 0<info['duration']<=1800: raise ValueError('ASR profile supports audio up to 30 minutes')
+    if not 0<info['duration']<=MAX_DURATION: raise BudgetError('inference_duration_budget','ASR profile supports audio up to 30 minutes')
+    if not 0 < info.get('channels', 0) <= MAX_INPUT_CHANNELS or not 0 < info.get('sample_rate', 0) <= MAX_INPUT_RATE:
+        raise BudgetError('inference_input_audio_budget','Source channel count or sample rate exceeds the CPU profile')
     if MODEL_INSTANCE is None:
         from faster_whisper import WhisperModel
         MODEL_INSTANCE=WhisperModel('/models/faster-whisper-small',device='cpu',compute_type='int8',cpu_threads=2,num_workers=1,local_files_only=True)
         METRICS.model_loaded.set(1)
         log('inference_model_loaded')
+    if on_model_loaded:
+        on_model_loaded()
     # Decode in a bounded, network-disabled ffmpeg process. Input timestamps remain unchanged.
-    with tempfile.TemporaryDirectory(dir=STATE) as directory:
+    with tempfile.TemporaryDirectory(dir=body.get('_scratch_root', STATE)) as directory:
         pcm=Path(directory)/'analysis.wav'
-        media._process(source,'ffmpeg',['-nostdin','-map','0:a:0','-t','1800','-ac','1','-ar','16000','-c:a','pcm_s16le','-fs',str(60*1024**2),str(pcm)],timeout=600)
+        media._process(source,'ffmpeg',['-nostdin','-map','0:a:0','-t',str(MAX_DURATION),'-ac','1','-ar','16000','-c:a','pcm_s16le','-fs',str(MAX_PCM_BYTES),str(pcm)],timeout=600)
         # Consume our validated PCM directly; do not decode twice through PyAV.
         import numpy as np
         with wave.open(str(pcm), 'rb') as audio:
             if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16000):
                 raise ValueError('Unexpected analysis PCM profile')
+            if not 0 < audio.getnframes() <= MAX_SAMPLES or pcm.stat().st_size > MAX_PCM_BYTES:
+                raise BudgetError('inference_pcm_budget','Analysis PCM exceeds the selected resource profile')
+            if abs(audio.getnframes()/16000 - info['duration']) > max(.5,info['duration']*.001):
+                raise BudgetError('inference_duration_mismatch','Decoded timeline disagrees with the input duration')
             samples=np.frombuffer(audio.readframes(audio.getnframes()),dtype='<i2').astype(np.float32)/32768.0
         segments,info_asr=MODEL_INSTANCE.transcribe(samples,language=body.get('language'),beam_size=5,word_timestamps=True,vad_filter=False,condition_on_previous_text=False)
         words=[];lines=[]
@@ -88,6 +97,15 @@ def execute(body):
     return {'alignment':alignment,'state':'draft','engine':'faster-whisper','engine_version':'1.2.1','model':MODEL,'model_revision':MODEL_REVISION,'language':info_asr.language,'duration':info['duration'],'input_sha256':body['sha256'],'words':words,'segments':lines,'text':'\n'.join(x['text'].strip() for x in lines),'automatic_acceptance':False,'timeline':'original_audio_seconds'}
 
 
+def model_rss(current, peak):
+    METRICS.model_rss.set(current)
+    METRICS.model_peak.set(peak)
+
+
+MODEL_WORKER = ModelProcess(on_residency=lambda loaded: METRICS.model_loaded.set(int(loaded)),
+                           on_rss=model_rss, on_start=METRICS.model_starts.inc, scratch_root=STATE)
+
+
 async def worker():
     while True:
         with connect() as conn:
@@ -98,7 +116,7 @@ async def worker():
         started=time.perf_counter()
         log('inference_started',job_id=row['id'])
         try:
-            result=await asyncio.to_thread(execute,json.loads(row['input']))
+            result=await asyncio.to_thread(MODEL_WORKER.run,json.loads(row['input']))
             state='succeeded'
         except Exception as exc:
             LOG.exception('Inference job failed',extra={'event':'inference_failed','fields':{'job_id':row['id']}})
@@ -120,9 +138,20 @@ async def lifespan(app):
         conn.execute("UPDATE jobs SET state='interrupted' WHERE state='running'")
     task=asyncio.create_task(worker())
     log('service_ready')
-    yield
-    log('service_stopping')
-    task.cancel()
+    try:
+        yield
+    finally:
+        log('service_stopping')
+        MODEL_WORKER.request_stop()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Cancelling to_thread does not stop its OS thread. The lifecycle
+            # lock drains that owner before handles and scratch are released.
+            await asyncio.to_thread(MODEL_WORKER.close)
 
 
 app=FastAPI(lifespan=lifespan)
@@ -134,7 +163,7 @@ def metrics(request:Request):
     return Response(METRICS.render(),media_type=CONTENT_TYPE_LATEST,headers={'Cache-Control':'no-store'})
 
 @app.get('/health')
-def health(): return {'status':'ok','model':MODEL,'model_revision':MODEL_REVISION,'capabilities':['transcribe','align'],'contract':'transcribe-v2','parallelism':1}
+def health(): return {'status':'ok','model':MODEL,'model_revision':MODEL_REVISION,'profile_revision':PROFILE,'resource_profile':profile(),'capabilities':['transcribe','align'],'contract':'transcribe-v3','parallelism':1}
 
 @app.post('/jobs',status_code=202)
 def submit(body:Input,request:Request):

@@ -12,6 +12,8 @@ App и worker используют один образ. ASR работает в 
 
 ## Разработка
 
+Сборка, тесты и демо выполняются на общем `build-01`, чтобы не нагружать ноутбук: [порядок работы и доступ](docs/build-01.md). Команда `python dev/build01.py run` передает текущие исходники и выполняет тяжелые операции по SSH. Следующие команды оставлены для CI и отдельно выбранного локального окружения.
+
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -c requirements.lock '.[test]'
@@ -26,6 +28,8 @@ npm run build
 
 ## Проектные материалы
 
+- [Исходное ТЗ и журнал согласованных изменений](docs/requirements-register.md): единый реестр для итоговой сверки, полные архивы v1.1..v1.4, последующие требования CHG и журнал проверок CHECK. Новые правки и подтверждения дописываются в этот файл, прежние записи сохраняются.
+- [Варианты подключения файлов](docs/file-sources.md): mounted folders, облачные диски, S3, сетевые протоколы и папка устройства. Только проектная проработка; адаптеры и аккаунты не подключены.
 - [Техническое задание](docs/specification.md): версия 1.4, один owner/login/API-токены, Docker, async/потоки, ACRCloud/AudD, MusicBrainz/AcoustID/CAA/LRCLIB, TheAudioDB/Discogs, ASR/выравнивание, аудит/сравнение дублей/комплектность альбомов/ReplayGain, безопасная запись, Music_Ready/телефон и 84 критерия приемки.
 - [Ревью и предложения](docs/review-v1.4.md): исправленные риски, обоснования, проверка форматов/Poweramp до полной реализации и отдельные предложения на следующие этапы.
 - [Матрица покрытия обсуждения](docs/discussion-coverage.md): где зафиксированы все согласованные функции и какие интеграции опциональны либо отложены.
@@ -46,5 +50,7 @@ npm run build
 
 
 Обслуживание: [проверенный backup/restore и режим восстановления](docs/maintenance.md).
+
+Обновление существующей схемы 1: [offline migration/checkpoint и защита от старого worker](docs/schema-migrations.md).
 
 Metrics, JSON stdout and Grafana: [observability](docs/observability.md). Import [dashboard JSON](monitoring/phonoteka-dashboard.json); regenerate with `python monitoring/build_dashboard.py`.

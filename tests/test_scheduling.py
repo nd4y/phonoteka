@@ -2,9 +2,9 @@ from dataclasses import replace
 import json
 import time
 from fastapi.testclient import TestClient
-from phonoteka import db,scheduling
+from phonoteka import db,scheduling,webhooks
 from phonoteka.app import create_app
-from test_backend import settings,authenticated,synthetic,drain
+from test_backend import settings,client,authenticated,synthetic,drain
 
 
 def test_schedule_resolves_new_files_after_scan_and_deduplicates(settings):
@@ -35,3 +35,28 @@ def test_schedule_disables_after_owner_auth_epoch_change(settings):
         scheduling.tick(settings,now=state['next_run']+1)
         stored=json.loads(db.setting(settings.db_path,'schedule'))
         assert stored['enabled'] is False and stored['disabled_reason']=='authorization_changed'
+
+
+def test_disable_schedule_cancels_waiting_jobs_with_durable_notifications(client,settings):
+    headers=authenticated(client,settings)
+    key=settings.state_dir/'synthetic-webhook-key';key.write_bytes(b'synthetic-notification-signing-key-123456')
+    cfg=replace(settings,webhook_enabled=True,webhook_url='https://receiver.example/hook',
+                webhook_allowed_hosts=('receiver.example',),webhook_secret_file=key)
+    webhooks.configure(cfg)  # App sender uses original disabled settings.
+    with db.transaction(settings.db_path) as conn:
+        for identity,state,completed in [('queued-schedule','queued',0),('paused-schedule','paused',1),('running-schedule','running',0)]:
+            stamp=db.utcnow()
+            conn.execute('INSERT INTO jobs(id,kind,state,stage,payload,total,completed,created_at,updated_at) VALUES(?,?,?,?,?,2,?,?,?)',
+                         (identity,'scan',state,state,db.encode({'trigger':'schedule'}),completed,stamp,stamp))
+            db.event(conn,'job_created',{'job_id':identity,'kind':'scan'})
+    response=client.put('/api/schedule',json={'enabled':False,'steps':['scan']},headers=headers)
+    assert response.status_code==200
+    assert client.get('/api/jobs/queued-schedule').json()['state']=='cancelled'
+    assert client.get('/api/jobs/paused-schedule').json()['state']=='cancelled_partial'
+    assert client.get('/api/jobs/running-schedule').json()['cancel_requested']
+    status=webhooks.status(cfg)
+    assert status['reserved_jobs']==1 and status['counts']['pending']==2
+    with db.connect(settings.db_path) as conn:
+        notices=[json.loads(row['payload']) for row in conn.execute('SELECT payload FROM webhook_outbox')]
+        events=conn.execute("SELECT COUNT(*) FROM events WHERE kind='job_cancel_requested'").fetchone()[0]
+    assert events==3 and all(item['job']['code']=='schedule_disabled' for item in notices)

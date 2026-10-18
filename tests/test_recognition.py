@@ -8,13 +8,14 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from phonoteka import db, media, recognition
+from phonoteka import db, media, recognition,provider_attempts
 from phonoteka.providers import Providers, ProviderError
 from test_providers import settings
 
 
 def test_real_fingerprint_contains_no_audio_or_private_metadata(tmp_path):
     cfg=settings(tmp_path)
+    db.set_setting(cfg.db_path,'provider_usage:shazam:metadata',db.encode({'allow_cache':True,'cache_ttl':3600,'basis':'Explicit cache permission for fingerprint transport fixture'}))
     for root in cfg.roots.values():root.mkdir()
     path=cfg.work_root/'private name.wav'
     subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=440:duration=15',str(path)],check=True)
@@ -96,3 +97,24 @@ def test_bad_duration_and_undecodable_tail_use_real_start(tmp_path):
     wrong,offset=recognition.sample(path,cfg.roots,124)
     assert offset==0
     with wave.open(io.BytesIO(wrong)) as wav:assert wav.getnframes()==192000
+
+
+def test_real_shazamio_unknown_send_does_not_restore_library_hidden_retries(tmp_path):
+    import array,math
+    cfg=settings(tmp_path);calls=[]
+    pcm=array.array('h',(int(10000*math.sin(2*math.pi*440*index/16000)) for index in range(192000)))
+    output=io.BytesIO()
+    with wave.open(output,'wb') as wav:
+        wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(16000);wav.writeframes(pcm.tobytes())
+    def timeout(request):calls.append(request);raise httpx.ReadTimeout('synthetic unknown response')
+    async def run():
+        p=Providers(cfg,httpx.MockTransport(timeout))
+        try:
+            with pytest.raises(ProviderError) as exc:await recognition.recognize(p,output.getvalue(),0,input_revision='a'*64)
+            assert exc.value.code=='unknown_outcome'
+        finally:await p.close()
+    asyncio.run(run())
+    assert len(calls)==1
+    report=provider_attempts.report(cfg)
+    assert report['total']==1 and report['items'][0]['state']=='unknown_outcome'
+    assert report['items'][0]['input_sha256']=='a'*64 and report['items'][0]['input_kind']=='file_sha256'

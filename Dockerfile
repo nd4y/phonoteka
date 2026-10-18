@@ -5,6 +5,9 @@ RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
 
+FROM frontend AS frontend-test
+RUN npm test
+
 FROM python:3.13-slim-bookworm AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
     STATE_DIR=/state WORK_ROOT=/work SOURCE_ROOT=/original \

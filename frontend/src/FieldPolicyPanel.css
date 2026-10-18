@@ -1,0 +1,13 @@
+.field-policy-panel{border-top:1px solid var(--line);padding-top:24px;margin-top:24px}
+.field-policy-panel h3{display:flex;align-items:center;gap:8px}
+.field-policy-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:8px;margin:16px 0}
+.field-policy-choice{display:flex!important;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--line);border-radius:14px;min-width:0;transition:background-color .18s ease,border-color .18s ease}
+.field-policy-choice.is-locked{background:var(--surface-2)}
+.field-policy-choice input{width:18px;height:18px;flex:0 0 18px;margin:2px 0 0}
+.field-policy-choice>span{display:grid;gap:4px;min-width:0}
+.field-policy-choice strong{font-size:13px}
+.field-policy-choice .small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.source-priority-list{list-style:none;margin:16px 0;padding:0;display:grid;gap:6px}
+.source-priority-list li{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--line);border-radius:14px}
+.source-priority-list li>span{display:grid;gap:3px}
+@media(prefers-reduced-motion:reduce){.field-policy-choice{transition:none}}

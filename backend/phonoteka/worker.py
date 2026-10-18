@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube
+from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy
 from .providers import Providers, ProviderError
 from .config import Settings
 from .telemetry import Metrics, configure_logging, context, log, opaque_id, bounded, KINDS, worker_server
@@ -194,6 +194,11 @@ class Worker:
                 duration_seconds=round(duration,6) if duration is not None else None,
                 code=bounded(result.get('code'),{'conflict','revision_conflict','needs_review','invalid_lyrics','unsupported_format','authorization_revoked','provider_unavailable','rate_limited','budget_exhausted','cancelled','storage_unavailable','decode_failed','internal_error'}) if result.get('code') else None)
 
+    def item_action(self,job,item,action):
+        with db.transaction(self.settings.db_path) as conn:
+            db.event(conn,'job_action',{'job_id':job['id'],'track_id':item['track_id'],'action':action})
+        log('item_action',job_id=job['id'],track_id=opaque_id(item['track_id']),kind=job['kind'],action=action)
+
     def finish(self, job_id, state, error=None):
         with db.transaction(self.settings.db_path) as conn:
             conn.execute("UPDATE jobs SET state=?,stage=?,error=?,updated_at=? WHERE id=?", (state,state,error,db.utcnow(),job_id))
@@ -247,7 +252,7 @@ class Worker:
                     if key in old:
                         meta[key] = old[key]
                 if current["sha256"] == meta["sha256"]:
-                    for key in ("audit", "publication", "cue_sheets", "cue_album_image", "derived_from", "cue_export", "audio_export"):
+                    for key in ("audit", "publication", "cue_sheets", "cue_album_image", "derived_from", "cue_export", "audio_export", "usage_provenance"):
                         if key in old:
                             meta[key] = old[key]
                     if 'youtube' in meta:
@@ -346,6 +351,9 @@ class Worker:
         return {"code": "internal_error", "message": "Ошибка обработки файла", "retryable": False}
 
     def persist_mutation(self, job, item, result, metadata=None):
+        if job['kind'] in {'publish', 'rollback_ready'}:
+            from . import publication
+            return publication.persist(self.settings, job, item, result)
         track_id = item["track_id"]
         path = self.settings.work_root / item["relative_path"]
         metadata = normalize_metadata(metadata or media.inspect_audio(path, self.settings.roots))
@@ -354,31 +362,42 @@ class Worker:
         with db.transaction(self.settings.db_path) as conn:
             current = conn.execute("SELECT * FROM tracks WHERE id=?", (track_id,)).fetchone()
             old = json.loads(current["metadata"])
+            provenance=old.get('usage_provenance',{})
+            if job['kind']=='apply':provenance={**provenance,**item['proposal'].get('field_sources',{})}
+            elif job['kind']=='rollback':
+                previous_history=conn.execute('SELECT details FROM history WHERE id=? AND track_id=?',(item['history_id'],track_id)).fetchone()
+                if previous_history:provenance=json.loads(previous_history['details']).get('usage_before',provenance)
+            if provenance:metadata['usage_provenance']=provenance
+            result['usage_before']=old.get('usage_provenance',{})
+            result['usage_after']=provenance
             for field in ('derived_from','cue_sheets','cue_album_image','youtube'):
                 if field in old: metadata[field]=old[field]
-            if job["kind"] == "publish":
-                metadata = old
-                metadata["publication"] = {"sha256": item["sha256"], "relative_path": intake.publication_relative(item["relative_path"],metadata), "published_at": db.utcnow(), "job_id": job["id"],
-                                           "exception": json.loads(job["payload"]).get("params", {}).get("exception_reason")}
-                status = current["status"]
-            else:
-                if old.get("publication"):
-                    metadata["publication"] = old["publication"]
-                if result.get("audio_identity") and old.get("audit", {}).get("audio_identity") == result["audio_identity"]:
-                    metadata["audit"] = {**old["audit"], "sha256": metadata["sha256"], "reused_by_audio_identity": True}
-                status = "accepted" if job["kind"] == "apply" else "indexed"
+            if old.get("publication"):
+                metadata["publication"] = old["publication"]
+            if result.get("audio_identity") and old.get("audit", {}).get("audio_identity") == result["audio_identity"]:
+                metadata["audit"] = {**old["audit"], "sha256": metadata["sha256"], "reused_by_audio_identity": True}
+            status = "accepted" if job["kind"] == "apply" else "indexed"
+            from . import lyrics_document
+            lyrics_document.committed(conn, current, metadata, item.get('proposal', {}) if job['kind'] == 'apply' else {})
             conn.execute("UPDATE tracks SET sha256=?,metadata=?,status=?,updated_at=? WHERE id=?", (metadata["sha256"],db.encode(metadata),status,db.utcnow(),track_id))
             effect_id = result.get("operation_id", str(uuid.uuid4()))
             conn.execute("INSERT OR IGNORE INTO history VALUES(?,?,?,?,?,?,?,?)", (effect_id,track_id,job["id"],job["kind"],result.get("before_sha256"),result.get("after_sha256"),db.encode(result),db.utcnow()))
             db.event(conn, "file_committed", {"track_id": track_id, "job_id": job["id"], "kind": job["kind"]})
 
     def process_item(self, job, item):
+        self.item_action(job,item,'preflight')
         path = self.settings.work_root / item["relative_path"]
         current = db.fetchone(self.settings.db_path, "SELECT * FROM tracks WHERE id=? AND is_current=1", (item["track_id"],))
         if not current or current["sha256"] != item["sha256"]:
             raise media.MediaError("conflict", "Input revision is no longer current")
         meta = json.loads(current['metadata'])
+        if job['kind'] == 'rollback_ready':
+            from . import publication
+            return publication.rollback(self.settings, job, item, lambda: self.authorize(job))
+        if job['kind'] in {'publish','extract_cue','normalize_audio'}:
+            provider_policy.require_track(self.settings,current,'export')
         if job['kind'] in {'extract_cue','normalize_audio'}:
+            self.item_action(job,item,'cue_extract' if job['kind']=='extract_cue' else 'normalize')
             self.authorize(job)
             from . import derivatives
             exporter=cue_export if job['kind']=='extract_cue' else derivatives
@@ -399,7 +418,11 @@ class Worker:
             return {'state':'succeeded','derived_track_ids':derived,'reused':result.get('reused',False),'identity':result['identity']}
         if meta.get('format') == 'cue' or (meta.get('cue_album_image') and job['kind'] not in {'audit','analyze'}):
             raise media.MediaError('cue_read_only', 'CUE и альбомные образы открыты только для чтения')
+        if job['kind'] == 'publish':
+            from . import lyrics_review
+            lyrics_review.assert_publication_frozen(self.settings, current, item.get('publication_review'))
         if job["kind"] == "audit":
+            self.item_action(job,item,'decode')
             result = media.audit_audio(path, self.settings.roots)
             if result.get("sha256") != item["sha256"]:
                 raise media.MediaError("conflict", "File changed before audit")
@@ -427,39 +450,72 @@ class Worker:
                 db.event(conn,'loudness_measured',{'track_id':item['track_id'],'sha256':item['sha256']})
             return {'state':'needs_review','tags':candidate['tags'],'audio_unchanged':True}
         self.authorize(job)
+        provider_policy.require_track(self.settings,current,'cache')
         backup_dir = self.settings.state_dir / "backups" / item["track_id"] / job["id"]
-        authorize = lambda: self.authorize(job)
+        commit_announced=False
+        def authorize():
+            nonlocal commit_announced
+            self.authorize(job)
+            provider_policy.require_track(self.settings,current,'cache')
+            if job['kind']=='apply':
+                from . import automatic_quality
+                automatic_quality.assert_frozen(self.settings, current, item, job)
+                with db.connect(self.settings.db_path) as connection:
+                    field_policy.assert_apply(self.settings,current,item['proposal'],conn=connection)
+                    provider_policy.require_payload(connection,current,item['proposal'],'embed')
+            elif job['kind']=='publish':
+                from . import comparison, lyrics_review
+                fresh = db.fetchone(self.settings.db_path, 'SELECT * FROM tracks WHERE id=? AND is_current=1', (item['track_id'],))
+                if not fresh or fresh['sha256'] != item['sha256']:
+                    raise media.MediaError('conflict', 'Publication input revision changed before commit')
+                provider_policy.require_track(self.settings,fresh,'export')
+                comparison.assert_publish_allowed(self.settings,item['track_id'])
+                lyrics_review.assert_publish_allowed(self.settings,fresh,audit=audit,frozen=item.get('publication_review'))
+            if not commit_announced:
+                self.item_action(job,item,'commit');commit_announced=True
         if job["kind"] == "apply":
+            from . import automatic_quality
+            automatic_quality.assert_frozen(self.settings, current, item, job)
+            self.item_action(job,item,'write_tags')
             proposal = item["proposal"]
+            field_policy.assert_apply(self.settings, current, proposal)
+            with db.connect(self.settings.db_path) as connection:
+                provider_policy.require_payload(connection,current,proposal,'embed')
             cover = base64.b64decode(proposal["cover"].split(",", 1)[1], validate=True) if proposal.get("cover") else None
             result = media.apply_changes(path, proposal.get("tags", {}), proposal.get("lrc"), item["sha256"], backup_dir, self.settings.roots, cover, authorize=authorize)
+            mode = item.get('acceptance_mode', 'manual')
+            result.update(acceptance_mode=mode, automatic_acceptance=mode == 'automatic')
+            if mode == 'automatic':
+                result['automatic_quality'] = {**item['automatic_quality'], 'state': 'passed'}
         elif job["kind"] == "rollback":
+            self.item_action(job,item,'rollback')
             history = db.fetchone(self.settings.db_path, "SELECT * FROM history WHERE id=? AND track_id=?", (item["history_id"],item["track_id"]))
             if not history:
                 raise media.MediaError("rollback_unavailable", "Rollback history is unavailable")
             previous = json.loads(history["details"])
+            with db.connect(self.settings.db_path) as connection:
+                provider_policy.require_sources(connection,provider_policy.references({'field_sources':previous.get('usage_before',{})}),'embed')
             result = media.rollback(path, previous["backup_path"], item["sha256"], self.settings.roots,
                                     backup_sha256=history["before_sha256"], backup_dir=backup_dir, authorize=authorize)
         elif job["kind"] == "publish":
+            self.item_action(job,item,'publication')
+            from . import comparison, lyrics_review
+            comparison.assert_publish_allowed(self.settings, item['track_id'])
             meta = json.loads(current["metadata"])
-            params = json.loads(job["payload"]).get("params", {})
-            missing = [name for name in ("title", "artist", "album") if not meta.get("tags", {}).get(name)]
-            if not meta.get("has_art"):
-                missing.append("cover")
-            if not meta.get("lrc"):
-                missing.append("synced_lyrics")
-            if missing and not params.get("allow_incomplete"):
-                raise media.MediaError("needs_review", "Publication profile requires: " + ", ".join(missing))
             audit = media.audit_audio(path, self.settings.roots)
             if audit.get("state") != "passed" or audit.get("sha256") != item["sha256"]:
                 raise media.MediaError("audit_failed", "Publication requires a current successful audio audit")
+            gate = lyrics_review.assert_publish_allowed(self.settings, current, audit=audit, frozen=item.get('publication_review'))
             previous_pub = meta.get("publication", {})
             destination = self.settings.publication_root / "Ready" / intake.publication_relative(item["relative_path"],meta)
-            if previous_pub.get("sha256") == item["sha256"] and destination.is_file() and media.sha256_file(destination) == item["sha256"]:
-                return {"skipped": True, "reason": "already_published", "sha256": item["sha256"]}
+            if previous_pub.get("sha256") == item["sha256"] and previous_pub.get('profile') == gate['profile'] and previous_pub.get('review_version') == gate['review_version'] and destination.is_file() and media.sha256_file(destination) == item["sha256"]:
+                return {"skipped": True, "reason": "already_published", "sha256": item["sha256"], 'publication_gate': gate}
+            from . import publication
+            publication.publish_intent(self.settings, job, item, current, gate, audit)
             result = media.publish(path, destination, item["sha256"], self.settings.roots, self.settings.publication_root,
                                    expected_destination_sha256=previous_pub.get("sha256"), backup_dir=backup_dir, authorize=authorize)
             result["audit"] = audit
+            result['publication_gate'] = gate
         else:
             raise media.MediaError("unsupported_job", "Unsupported job")
         self.persist_mutation(job, item, result)
@@ -485,21 +541,24 @@ class Worker:
         authorized()
         identified=None; recognition_source=None
         if fingerprint:
+            await self.io(self.item_action,job,item,'fingerprint_sample')
             audio, offset=await self.io(recognition.sample,path,self.settings.roots,float(meta.get('duration',0)))
             try:
-                identified=await recognition.recognize(self.providers,audio,offset,authorized)
+                await self.io(self.item_action,job,item,'fingerprint_lookup')
+                identified=await recognition.recognize(self.providers,audio,offset,authorized,input_revision=item['sha256'])
                 alternate=min(max(0,float(meta.get('duration',0))-12),float(meta.get('duration',0))*.65)
                 if not identified and abs(alternate-offset)>=5:
                     audio,offset=await self.io(recognition.sample,path,self.settings.roots,float(meta.get('duration',0)),alternate)
-                    identified=await recognition.recognize(self.providers,audio,offset,authorized)
+                    identified=await recognition.recognize(self.providers,audio,offset,authorized,input_revision=item['sha256'])
                 recognition_source={'provider':'shazam','state':'fingerprint_match' if identified else 'no_match'}
             except ProviderError as exc:
                 recognition_source={'provider':'shazam','state':exc.code,'message':str(exc)}
         else:
             previous=await self.io(db.fetchone,self.settings.db_path,'SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256']))
             if previous:
-                identified=next((c for c in json.loads(previous['payload']).get('candidates',[]) if c.get('provider')=='shazam'),None)
+                identified=next((c for c in json.loads(previous['payload']).get('candidates',[]) if c.get('provider')=='shazam' and c.get('tags')),None)
         if self.settings.external_metadata:
+            await self.io(self.item_action,job,item,'metadata_lookup')
             result = await self.providers.analyze(meta, item['relative_path'],identified,authorized)
         else:
             result={'input_sha256':item['sha256'],'query_source':'audio_fingerprint','candidates':[],'sources':[],
@@ -529,6 +588,7 @@ class Worker:
                 if not fingerprint:
                     result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider')=='shazam')
                     result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider')=='shazam')
+            result=provider_policy.prepare_analysis(conn,result)
             conn.execute('INSERT OR REPLACE INTO analyses VALUES(?,?,?,?)',(item['track_id'],item['sha256'],db.encode(result),db.utcnow()))
             db.event(conn,'analysis_completed',{'track_id':item['track_id'],'state':result['state']})
         retry=[]
@@ -600,6 +660,12 @@ class Worker:
         self.state = job["kind"]
         if job["kind"] == "scan":
             return await self.scan(job)
+        if job['kind'] == 'release_audit':
+            from . import release_review
+            return await release_review.process(self, job)
+        if job['kind'] == 'publish_sidecars':
+            from . import publication_sidecars
+            return await publication_sidecars.process(self, job)
         if job['kind']=='replaygain_album':
             from . import album_loudness
             items=json.loads(job['payload'])['items']
@@ -632,15 +698,23 @@ class Worker:
             with db.transaction(self.settings.db_path) as conn:conn.execute('UPDATE jobs SET total=1 WHERE id=?',(job['id'],))
             try:
                 result=await self.io(exports.generate,self.settings,authorized)
-                self.item_result(job['id'],'export','succeeded',result);self.finish(job['id'],'succeeded')
+                self.item_result(job['id'],'export','succeeded',result);self.finish(job['id'],'cancelled_partial' if self.cancelled(job['id']) else 'succeeded')
             except Exception as exc:
-                self.item_result(job['id'],'export','failed',self.failure(exc));self.finish(job['id'],'failed',self.failure(exc)['code'])
+                failure=self.failure(exc)
+                if failure['code']=='insufficient_space' and not self.cancelled(job['id']):
+                    retry_at=time.time()+60;payload=json.loads(job['payload']);payload.update(retry_at=retry_at,wait_reason='storage')
+                    self.item_result(job['id'],'export','deferred',{**failure,'retry_at':retry_at})
+                    with db.transaction(self.settings.db_path) as conn:
+                        conn.execute("UPDATE jobs SET state='queued',stage='waiting_storage',payload=?,updated_at=? WHERE id=?",(db.encode(payload),db.utcnow(),job['id']))
+                        db.event(conn,'job_waiting',{'job_id':job['id'],'retry_at':retry_at,'reason':'storage'})
+                else:
+                    self.item_result(job['id'],'export','failed',failure);self.finish(job['id'],'cancelled' if self.cancelled(job['id']) else 'failed',failure['code'])
             return
-        payload=json.loads(job['payload']);items=payload['items'];retry_at=0
+        payload=json.loads(job['payload']);items=payload['items'];retry_at=0;waiting_storage=False
         done={r['item_key'] for r in db.fetchall(self.settings.db_path,"SELECT item_key FROM job_items WHERE job_id=? AND state IN ('succeeded','failed','conflict','needs_review')",(job['id'],))}
         items=[i for i in items if i['track_id'] not in done]
         async def one_inner(item):
-            nonlocal retry_at
+            nonlocal retry_at,waiting_storage
             pause=json.loads(db.fetchone(self.settings.db_path,'SELECT payload FROM jobs WHERE id=?',(job['id'],))['payload']).get('pause_requested')
             if retry_at or pause or self.cancelled(job["id"]):
                 return
@@ -659,8 +733,14 @@ class Worker:
             except Exception as exc:
                 result = self.failure(exc)
                 journals = self.settings.state_dir / "backups" / key / job["id"]
-                has_intent = job["kind"] in {"apply", "rollback", "publish"} and journals.exists() and any(journals.glob("*.json"))
-                state = "interrupted" if has_intent else "conflict" if result["code"] in {"conflict", "revision_conflict"} else "needs_review" if result["code"] in {"needs_review", "invalid_lyrics", "unsupported_format", "authorization_revoked"} else "failed"
+                has_intent = job["kind"] in {"apply", "rollback", "publish", "rollback_ready"} and journals.exists() and any(journals.glob("*.json"))
+                if result['code']=='insufficient_space' and not has_intent:
+                    # Only a failed reservation before any journal/effect may
+                    # resume automatically. ENOSPC after intent stays recovery.
+                    waiting_storage=True;retry_at=max(retry_at,time.time()+60)
+                    self.item_result(job['id'],key,'deferred',{**result,'retry_at':retry_at,'wait_reason':'storage'})
+                    return
+                state = "interrupted" if has_intent else "conflict" if result["code"] in {"conflict", "revision_conflict"} else "needs_review" if result["code"] in {"needs_review", "invalid_lyrics", "unsupported_format", "authorization_revoked", "publication_snapshot_required", "publication_review_stale", "lyrics_document_stale", "lyrics_line_locked", "lyrics_document_conflict", "partial_lyrics"} else "failed"
                 if has_intent:
                     with db.transaction(self.settings.db_path) as conn:
                         conn.execute("UPDATE tracks SET status='needs_review' WHERE id=?", (key,))
@@ -678,11 +758,12 @@ class Worker:
             log('job_paused',job_id=job['id'],kind=job['kind'])
             return
         if retry_at and not self.cancelled(job['id']):
-            payload=json.loads(current['payload']);payload['retry_at']=retry_at
+            payload=json.loads(current['payload']);payload['retry_at']=retry_at;payload['wait_reason']='storage' if waiting_storage else 'provider'
+            stage='waiting_storage' if waiting_storage else 'waiting_provider'
             with db.transaction(self.settings.db_path) as conn:
-                conn.execute("UPDATE jobs SET state='queued',stage='waiting_provider',payload=?,updated_at=? WHERE id=?",(db.encode(payload),db.utcnow(),job['id']))
-                db.event(conn,'job_waiting',{'job_id':job['id'],'retry_at':retry_at})
-            log('job_waiting_provider',logging.WARNING,job_id=job['id'],kind=job['kind'],retry_at=retry_at)
+                conn.execute("UPDATE jobs SET state='queued',stage=?,payload=?,updated_at=? WHERE id=?",(stage,db.encode(payload),db.utcnow(),job['id']))
+                db.event(conn,'job_waiting',{'job_id':job['id'],'retry_at':retry_at,'reason':payload['wait_reason']})
+            log('job_'+stage,logging.WARNING,job_id=job['id'],kind=job['kind'],retry_at=retry_at)
             return
         stats = db.fetchone(self.settings.db_path, "SELECT * FROM jobs WHERE id=?", (job["id"],))
         interrupted = db.fetchone(self.settings.db_path, "SELECT COUNT(*) AS n FROM job_items WHERE job_id=? AND state='interrupted'", (job["id"],))["n"]
@@ -694,7 +775,11 @@ class Worker:
         elif self.cancelled(job["id"]):
             state = "cancelled_partial" if stats["completed"] else "cancelled"
         elif stats["failed"]:
-            state = "completed_with_errors" if stats["completed"] else "failed"
+            if stats['completed']:
+                state='completed_with_errors'
+            else:
+                failures={row['state'] for row in db.fetchall(self.settings.db_path,"SELECT DISTINCT state FROM job_items WHERE job_id=? AND state IN ('failed','conflict','needs_review')",(job['id'],))}
+                state=next(iter(failures)) if len(failures)==1 else 'failed'
         else:
             state = "succeeded"
         self.finish(job["id"], state)
@@ -704,7 +789,19 @@ class Worker:
         rows = db.fetchall(self.settings.db_path, "SELECT * FROM jobs WHERE state IN ('running','interrupted')")
         for job in rows:
             self.finish(job["id"], "interrupted", "worker_restarted")
-            if not self.settings.writable or job["kind"] not in {"apply", "publish", "rollback"}:
+            if job['kind'] == 'publish_sidecars' and self.settings.writable:
+                # The owner grants a fresh retry before any uncommitted effect.
+                # That retry reconciles existing per-object journals first.
+                from . import publication_sidecars
+                plan_id = json.loads(job['payload'])['params']['plan_id']
+                plan = publication_sidecars.load_plan(self.settings, plan_id)
+                if plan['state'] == 'complete':
+                    self.finish(job['id'], 'succeeded', 'sidecar_plan_already_committed')
+                else:
+                    publication_sidecars.update_plan(self.settings, plan_id, state='partial' if plan['results'] else 'interrupted', error='worker_restarted')
+                    self.finish(job['id'], 'needs_review', 'sidecar_recovery_required')
+                continue
+            if not self.settings.writable or job["kind"] not in {"apply", "publish", "rollback", "rollback_ready"}:
                 continue
             for item in json.loads(job["payload"]).get("items", []):
                 directory = self.settings.state_dir / "backups" / item["track_id"] / job["id"]
@@ -734,7 +831,7 @@ class Worker:
         try:
             await self.process(job)
         except Exception as exc:
-            state = 'interrupted' if job['kind'] in {'apply','rollback','publish'} else 'failed'
+            state = 'interrupted' if job['kind'] in {'apply','rollback','publish','rollback_ready','publish_sidecars'} else 'failed'
             self.finish(job['id'],state,self.failure(exc)['code'])
             if state=='interrupted': self.stopping=True
         finally:
@@ -744,7 +841,7 @@ class Worker:
 
     async def run(self, once=False):
         self.settings.validate()
-        db.initialize(self.settings.db_path)
+        db.initialize(self.settings.db_path, settings=self.settings)
         with ExitStack() as stack:
             stack.enter_context(scheduler_guard(self.settings.state_dir))
             verify_storage(self.settings)
@@ -758,6 +855,9 @@ class Worker:
             try:
                 while not self.stopping:
                     if time.monotonic()>=next_schedule:
+                        await self.io(provider_policy.cleanup_cache,self.settings)
+                        from . import provider_attempts
+                        await self.io(provider_attempts.recover_stale,self.settings)
                         await self.io(scheduling.tick,self.settings)
                         next_schedule=time.monotonic()+30
                     job = self.claim_job()

@@ -21,7 +21,7 @@ class TokenInput(BaseModel):
 
 def check_job(active,kind):
     if not active.get('api_token_id'):return
-    required='jobs:write' if kind in {'apply','rollback','publish','extract_cue','normalize_audio'} else 'jobs:analysis'
+    required='jobs:write' if kind in {'apply','rollback','publish','rollback_ready','publish_sidecars','extract_cue','normalize_audio'} else 'jobs:analysis'
     if required not in active['scopes']:raise security.error(403,'scope_denied','Токен не разрешает этот вид задания')
 
 
@@ -36,11 +36,14 @@ def bearer(request,settings):
     scopes=json.loads(row['scopes']);path=request.url.path.replace('/api/v1/','/api/',1)
     allowed=False
     if request.method=='GET':
-        allowed='read' in scopes and (path in {'/api/summary','/api/providers','/api/events','/api/openapi.json'} or path.startswith(('/api/tracks','/api/jobs','/api/reports','/api/exports')))
+        allowed='read' in scopes and (path in {'/api/summary','/api/providers','/api/events','/api/openapi.json'} or path.startswith(('/api/tracks','/api/jobs','/api/reports','/api/exports','/api/release-reviews')))
     elif request.method=='POST':
         if path=='/api/jobs' or re.fullmatch(r'/api/jobs/[^/]+/(cancel|pause|resume)',path):allowed=bool(set(scopes)&{'jobs:analysis','jobs:write'})
         elif re.fullmatch(r'/api/tracks/[^/]+/(proposal|analysis/select)',path):allowed='jobs:write' in scopes
         elif path=='/api/deliveries':allowed='jobs:write' in scopes
+        elif path=='/api/export-leases' or re.fullmatch(r'/api/export-leases/[^/]+/renew',path):allowed='jobs:write' in scopes
+    elif request.method=='DELETE' and re.fullmatch(r'/api/export-leases/[^/]+',path):
+        allowed='jobs:write' in scopes
     if not allowed:raise security.error(403,'scope_denied','Недостаточно прав API-токена')
     if request.headers.get('origin') not in (None,settings.app_url) or request.headers.get('sec-fetch-site')=='cross-site':
         raise security.error(403,'origin_denied','Межсайтовый запрос не разрешен')
@@ -73,6 +76,14 @@ def install(app,settings):
         with db.transaction(settings.db_path) as conn:
             if not conn.execute('SELECT id FROM api_tokens WHERE id=?',(token_id,)).fetchone():raise security.error(404,'token_not_found','Токен не найден')
             conn.execute('UPDATE api_tokens SET revoked=1 WHERE id=?',(token_id,))
-            conn.execute("UPDATE jobs SET cancel_requested=1,state=CASE WHEN state='queued' THEN 'cancelled' ELSE state END,updated_at=? WHERE json_extract(payload,'$.auth_token_id')=? AND state IN ('queued','running')",(db.utcnow(),token_id))
+            jobs=conn.execute("SELECT id,state,completed FROM jobs WHERE json_extract(payload,'$.auth_token_id')=? AND state IN ('queued','running','paused')",(token_id,)).fetchall()
+            for job in jobs:
+                terminal=job['state'] in {'queued','paused'}
+                state=('cancelled_partial' if job['completed'] else 'cancelled') if terminal else job['state']
+                conn.execute('UPDATE jobs SET cancel_requested=1,state=?,stage=CASE WHEN ? THEN ? ELSE stage END,error=CASE WHEN ? THEN ? ELSE error END,updated_at=? WHERE id=?',
+                             (state,terminal,state,terminal,'authorization_revoked',db.utcnow(),job['id']))
+                # The state transition and durable result notification consume
+                # the accepted job's outbox reservation in this transaction.
+                db.event(conn,'job_cancel_requested',{'job_id':job['id'],'code':'authorization_revoked'})
             db.event(conn,'api_token_revoked',{'id':token_id})
         return {'revoked':True}

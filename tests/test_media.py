@@ -66,6 +66,61 @@ def cover_bytes(color="red"):
     return buffer.getvalue()
 
 
+@TOOLS
+@pytest.mark.parametrize(("expression", "duration", "expected_warnings"), [
+    ("0.25*sin(2*PI*440*t)", 1, set()),
+    ("if(lt(t\\,6)\\,0\\,0.25*sin(2*PI*440*t))", 7, {"long_silence"}),
+    ("if(lt(mod(t\\,0.01)\\,0.005)\\,1\\,-1)", 1, {"high_sample_peak", "possible_clipping"}),
+    ("0", 6, {"long_silence"}),
+])
+def test_audit_signal_warns_without_rejecting_valid_audio(roots, expression, duration, expected_warnings):
+    path = roots["work"] / "signal.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i",
+                    f"aevalsrc={expression}:s=8000:d={duration}", "-c:a", "pcm_s16le", str(path)], check=True)
+    before = media.sha256_file(path)
+    result = media.audit_audio(path, roots)
+    assert result["state"] == "passed" and result["sha256"] == before
+    assert media.sha256_file(path) == before
+    assert {item["code"] for item in result["warnings"]} == expected_warnings
+    signal = result["signal"]
+    assert signal["state"] == "measured" and signal["samples_per_channel"] == duration * 8000
+    assert signal["quality_verdict"] == "not_determined" and signal["lossless_origin"] == "unknown"
+    if "long_silence" in expected_warnings:
+        assert signal["silence_intervals"][0]["start_seconds"] == 0
+        assert signal["silence_intervals"][0]["duration_seconds"] == pytest.approx(6, abs=.01)
+    if expression == "0":
+        assert signal["digital_silence"] and signal["sample_peak_dbfs"] is None
+    else:
+        assert not signal["digital_silence"]
+
+
+@TOOLS
+def test_unavailable_signal_measurement_keeps_decode_verdict(make_audio, roots, monkeypatch):
+    path = make_audio("flac")
+    original = media._process
+    def process(target, executable, arguments, **kwargs):
+        if "-af" in arguments:
+            return subprocess.CompletedProcess([], 0, b"", b"[astats] Overall\n[astats] Peak level dB: nan\n")
+        return original(target, executable, arguments, **kwargs)
+    monkeypatch.setattr(media, "_process", process)
+    result = media.audit_audio(path, roots)
+    assert result["state"] == "passed" and result["error"] is None
+    assert result["signal"]["state"] == "unavailable"
+    assert result["warnings"][0]["code"] == "signal_measurements_unavailable"
+
+
+@TOOLS
+def test_changed_audio_during_signal_measurement_still_fails_audit(make_audio, roots, monkeypatch):
+    path = make_audio("flac")
+    def measure(target):
+        with target.open("ab") as stream:
+            stream.write(b"changed externally")
+        return {"state": "measured"}, []
+    monkeypatch.setattr(media, "_audit_signal", measure)
+    result = media.audit_audio(path, roots)
+    assert result["state"] == "failed" and result["error"] == "conflict"
+
+
 def test_lrc_occurrences_offset_and_normalized_serialization():
     parsed = media.parse_lrc("\ufeff[offset:+500]\n[00:10][00:40]Припев\n[00:20.5]Куплет\n[01:01.010]")
     assert [line["start_ms"] for line in parsed["lines"]] == [9500, 20000, 39500, 60510]

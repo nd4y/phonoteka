@@ -12,20 +12,41 @@ from pathlib import Path
 import sys
 import time
 import traceback
+import threading
 import uuid
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, GCCollector, PlatformCollector, ProcessCollector, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client.core import CounterMetricFamily
 from . import __version__
 
 CONTEXT = ContextVar('telemetry_context', default={})
-FIELDS = {'request_id','job_id','track_id','kind','state','code','provider','operation','status','method','route','duration_seconds','count','completed','failed','total','retry_at','error_type','attempt','port'}
-KINDS = ('scan','audit','apply','rollback','publish','analyze','recognize','transcribe','align','extract_cue','replaygain','replaygain_album','export_ready','normalize_audio','youtube')
-STATES = ('queued','running','paused','succeeded','failed','completed_with_errors','interrupted','cancelled','cancelled_partial')
+FIELDS = {'request_id','job_id','track_id','event_id','kind','state','code','action','provider','operation','status','method','route','duration_seconds','count','completed','failed','total','retry_at','error_type','attempt','port'}
+ITEM_ACTIONS = {'preflight','fingerprint_sample','fingerprint_lookup','metadata_lookup','decode','write_tags','commit','rollback','publication','cue_extract','asr','align','normalize','sidecars'}
+KINDS = ('scan','audit','apply','rollback','publish','rollback_ready','analyze','recognize','transcribe','align','extract_cue','replaygain','replaygain_album','export_ready','normalize_audio','youtube','release_audit','publish_sidecars')
+STATES = ('queued','running','paused','succeeded','failed','completed_with_errors','interrupted','cancelled','cancelled_partial','conflict','needs_review')
 PROVIDERS = ('musicbrainz','lrclib','coverartarchive','shazam','youtube','acoustid','theaudiodb','discogs')
+POLICY_OPERATIONS = ('fetch','cache','embed','export','derived_analysis')
+_POLICY_DENIALS = {}
+_POLICY_LOCK = threading.Lock()
 
 
 def bounded(value, allowed):
     return value if value in allowed else 'other'
+
+
+def policy_denied(provider,operation):
+    provider=bounded(provider,PROVIDERS);operation=bounded(operation,POLICY_OPERATIONS)
+    with _POLICY_LOCK:_POLICY_DENIALS[provider,operation]=_POLICY_DENIALS.get((provider,operation),0)+1
+    log('provider_policy_denied',logging.WARNING,provider=provider,operation=operation,code='provider_policy_denied')
+
+
+class PolicyDenialsCollector:
+    def collect(self):
+        result=CounterMetricFamily('phonoteka_provider_policy_denials_total','Rejected provider usage operations since this process started',labels=['provider','operation'])
+        with _POLICY_LOCK:counts=dict(_POLICY_DENIALS)
+        for provider in (*PROVIDERS,'other'):
+            for operation in (*POLICY_OPERATIONS,'other'):result.add_metric([provider,operation],counts.get((provider,operation),0))
+        yield result
 
 
 def opaque_id(value):
@@ -45,6 +66,8 @@ class JsonFormatter(logging.Formatter):
                 'logger':record.name,'event':event or 'library_log'}
         for key, value in {**CONTEXT.get(), **getattr(record, 'fields', {})}.items():
             if key in FIELDS and isinstance(value, (str,int,float,bool,type(None))):
+                if key == 'action':
+                    value = value if value in ITEM_ACTIONS else 'other'
                 data[key] = value[:200] if isinstance(value,str) else value
         if record.exc_info and record.exc_info[0]:
             data['error_type'] = record.exc_info[0].__name__
@@ -88,6 +111,7 @@ class Metrics:
     def __init__(self, service):
         self.registry = CollectorRegistry()
         ProcessCollector(registry=self.registry); PlatformCollector(registry=self.registry); GCCollector(registry=self.registry)
+        self.registry.register(PolicyDenialsCollector())
         Gauge('phonoteka_build_info','Running component and version',['component','version'],registry=self.registry).labels(service,__version__).set(1)
         self.http = Counter('phonoteka_http_requests_total','HTTP requests',['method','route','status'],registry=self.registry)
         self.http_duration = Histogram('phonoteka_http_request_duration_seconds','Full HTTP response duration',['method','route'],buckets=(.005,.02,.1,.5,1,3,10,30,120),registry=self.registry)
@@ -101,6 +125,9 @@ class Metrics:
         self.inference_jobs = Counter('phonoteka_inference_attempts_total','Inference executions',['state'],registry=self.registry)
         self.inference_duration = Histogram('phonoteka_inference_duration_seconds','ASR execution duration',buckets=(1,5,15,30,60,120,300,900,1800,3600),registry=self.registry)
         self.model_loaded = Gauge('phonoteka_inference_model_loaded','ASR model loaded in memory',registry=self.registry)
+        self.model_rss = Gauge('phonoteka_inference_model_process_resident_bytes','Model process and decoder resident bytes',registry=self.registry)
+        self.model_peak = Gauge('phonoteka_inference_model_process_peak_bytes','Peak sampled resident model and decoder bytes',registry=self.registry)
+        self.model_starts = Counter('phonoteka_inference_model_process_starts_total','Supervised model process starts',registry=self.registry)
         for kind in KINDS:
             for state in ('succeeded','failed','needs_review','conflict','interrupted','deferred'): self.items.labels(kind,state)
         for state in ('succeeded','failed'): self.inference_jobs.labels(state)
