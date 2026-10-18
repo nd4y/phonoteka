@@ -159,14 +159,26 @@ class Worker:
             db.event(conn, "job_started", {"job_id": row["id"]})
             return dict(row)
 
-    def cancelled(self, job_id):
-        row = db.fetchone(self.settings.db_path, "SELECT cancel_requested,payload FROM jobs WHERE id=?", (job_id,))
+    def job_control(self, job_id):
+        # Do not transfer/decode the full immutable 10,000-item payload for
+        # every admission check. Only these mutable controls leave SQLite.
+        return db.fetchone(self.settings.db_path, """SELECT cancel_requested,auth_epoch,
+            json_extract(payload,'$.pause_requested') AS pause_requested,
+            json_extract(payload,'$.auth_token_id') AS auth_token_id
+            FROM jobs WHERE id=?""", (job_id,))
+
+    def control_cancelled(self, row):
         if self.stopping or not row or bool(row['cancel_requested']):return True
-        token_id=json.loads(row['payload']).get('auth_token_id')
+        epoch=int(db.setting(self.settings.db_path,'auth_epoch','0'))
+        if row['auth_epoch'] != epoch:return True
+        token_id=row['auth_token_id']
         if token_id:
             token=db.fetchone(self.settings.db_path,'SELECT revoked,expires,auth_epoch FROM api_tokens WHERE id=?',(token_id,))
-            return not token or token['revoked'] or token['expires']<=time.time() or token['auth_epoch']!=int(db.setting(self.settings.db_path,'auth_epoch','0'))
+            return not token or token['revoked'] or token['expires']<=time.time() or token['auth_epoch']!=epoch
         return False
+
+    def cancelled(self, job_id):
+        return self.stopping or self.control_cancelled(self.job_control(job_id))
 
     def authorize(self, job):
         if db.setting(self.settings.db_path,'recovery_required','false')=='true':
@@ -210,20 +222,29 @@ class Worker:
             db.event(conn, "job_finished", {"job_id": job_id, "state": state})
         log('job_finished',logging.ERROR if state in {'failed','interrupted'} else logging.INFO,job_id=job_id,state=state)
 
-    async def bounded_items(self, items, fn):
+    async def bounded_items(self, items, fn, *, should_stop=None):
         queue = asyncio.Queue(maxsize=self.settings.file_workers * 2)
+        def stopped():
+            return bool(should_stop and should_stop())
         async def consumer():
             while True:
                 item = await queue.get()
                 try:
                     if item is None:
                         return
-                    await fn(item)
+                    if not stopped():
+                        await fn(item)
                 finally:
                     queue.task_done()
         async def producer():
-            for item in items:
+            source=iter(items)
+            while not stopped():
+                try:item=next(source)
+                except StopIteration:break
                 await queue.put(item)
+            # Control requests stop admission and discard only the bounded
+            # pending queue. Already started fn calls finish normally; never
+            # cancel their asyncio futures or the executor's file operations.
             for _ in range(self.settings.file_workers):
                 await queue.put(None)
         # TaskGroup cancels the producer if any consumer fails, preventing a full
@@ -332,15 +353,20 @@ class Worker:
         paths, errors = await self.io(enumerate_audio, self.settings.work_root)
         with db.transaction(self.settings.db_path) as conn:
             conn.execute("UPDATE jobs SET total=? WHERE id=?", (len(paths),job["id"]))
+        halted=False
+        def stop_admission():
+            nonlocal halted
+            halted=halted or self.cancelled(job['id'])
+            return halted
         async def one(relative):
-            if self.cancelled(job["id"]):
+            if stop_admission():
                 return
             try:
                 result = await self.io(self.scan_one, relative, job["id"])
                 self.item_result(job["id"], relative, "failed" if result.get("input_error") else "succeeded", result)
             except Exception as exc:
                 self.item_result(job["id"], relative, "failed", self.failure(exc))
-        await self.bounded_items(paths, one)
+        await self.bounded_items(paths, one, should_stop=stop_admission)
         stats = db.fetchone(self.settings.db_path, "SELECT * FROM jobs WHERE id=?", (job["id"],))
         final_identity = await self.io(root_identity, self.settings.work_root)
         complete = not errors and not stats["failed"] and not self.cancelled(job["id"]) and final_identity == identity
@@ -801,10 +827,19 @@ class Worker:
                 self.finish(job['id'],'conflict',result['code'])
                 return
         items=[i for i in items if i['track_id'] not in done]
+        halted=False
+        def stop_admission():
+            nonlocal halted
+            if not halted:
+                if retry_at:
+                    halted=True
+                else:
+                    control=self.job_control(job['id'])
+                    halted=self.control_cancelled(control) or bool(control and control['pause_requested'])
+            return halted
         async def one_inner(item):
             nonlocal retry_at,waiting_storage
-            pause=json.loads(db.fetchone(self.settings.db_path,'SELECT payload FROM jobs WHERE id=?',(job['id'],))['payload']).get('pause_requested')
-            if retry_at or pause or self.cancelled(job["id"]):
+            if stop_admission():
                 return
             key = item["track_id"]
             self.item_result(job["id"], key, "running", {})
@@ -836,7 +871,7 @@ class Worker:
                 self.item_result(job["id"], key, state, result)
         async def one(item):
             with context(track_id=opaque_id(item['track_id'])): await one_inner(item)
-        await self.bounded_items(items, one)
+        await self.bounded_items(items, one, should_stop=stop_admission)
         current=db.fetchone(self.settings.db_path,'SELECT * FROM jobs WHERE id=?',(job['id'],))
         paused=json.loads(current['payload']).get('pause_requested')
         if paused and current['completed']+current['failed']<current['total'] and not self.cancelled(job['id']):

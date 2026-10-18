@@ -29,4 +29,6 @@ body label:has(>input:is([type=checkbox], [type=radio])) {
 }
 @media(max-width:650px) {
   .lyric-line { grid-template-columns: 17px 82px 44px minmax(0,1fr); }
+  .lyrics-toolbar { flex-wrap: wrap; }
+  .lyrics-toolbar>.button-row { flex-basis: 100%; justify-content: flex-end; }
 }
