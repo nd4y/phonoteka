@@ -17,6 +17,13 @@ diagnostic code rather than including private paths or unbounded log text.
 The normal PCM mono/stereo message `Guessed Channel Layout for Input Stream`
 is retained as `decoder_channel_layout_inferred` in notes. Every other decoder
 message remains a warning; fatal decoding errors still fail the audit.
+The matching covers the observed FFmpeg 5 input-stream form and FFmpeg 6.1.1
+`[aist#.../codec @ 0x...] Guessed Channel Layout: mono/stereo` form. A single
+bounded Ubuntu 24.04 diagnostic generated the exact four signal-test WAVs;
+each decoded with exit 0 and only that informational note. Version, raw stderr,
+image digest and exact-container cleanup evidence are retained in the release
+acceptance output. Multichannel guesses and text containing additional error
+details are not classified as informational.
 
 Before external fingerprint recognition, Worker requires a server audit with
 `state=passed`, current full SHA-256, this all-stream profile and a valid audio

@@ -14,7 +14,7 @@ from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 from PIL import Image
 
-from . import db, lyrics_review, media, provider_policy, publication, publication_paths, security
+from . import db, lyrics_review, media, media_slots, metadata_slots, provider_policy, publication, publication_paths, security
 
 MAX_FILES = 200
 
@@ -55,10 +55,13 @@ def public_plan(value):
 def content(settings, member, kind):
     path = media._validate(settings.work_root / member['work_path'], settings.roots)
     media._expect(path, member['work_revision'])
+    sources = member.get('canonical_sources')
+    if not isinstance(sources, dict):
+        raise media.MediaError('sidecar_stale_owner', 'Создайте новый план с явными источниками native-слотов')
     if kind == 'cover':
-        raw, mime = media.read_art(path, settings.roots)
-        if not raw:
+        if not sources.get('cover'):
             raise media.MediaError('missing_cover', 'Для cover.jpg нужна встроенная front cover')
+        raw, mime = media.read_art(path, settings.roots, slot=sources['cover'])
         media._cover(raw)
         if mime == 'image/jpeg':
             data = raw
@@ -75,8 +78,10 @@ def content(settings, member, kind):
         if len(data) > 20 * 1024**2:
             raise media.MediaError('invalid_sidecar', 'JPEG sidecar превышает 20 МиБ')
     else:
-        metadata = media.inspect_audio(path, settings.roots)
-        raw = metadata.get('lrc') or ''
+        if not sources.get('lyrics'):
+            raise media.MediaError('missing_synced_lyrics', 'Для LRC sidecar нужен выбранный синхронизированный текст')
+        native = media._load_audio(path)
+        raw = metadata_slots.resolve(native, sources['lyrics'], 'lyrics').get('text', '')
         if not raw.strip():
             raise media.MediaError('missing_synced_lyrics', 'Для LRC sidecar нужен встроенный полный синхронизированный текст')
         data = (media.serialize_lrc(media.parse_lrc(raw)) + '\n').encode('utf-8')
@@ -86,7 +91,7 @@ def content(settings, member, kind):
     return data
 
 
-def current_member(settings, row, *, verify_files=True):
+def current_member(settings, row, *, verify_files=True, sources_hint=None):
     metadata = json.loads(row['metadata'])
     pub = metadata.get('publication') or {}
     if pub.get('sha256') != row['sha256']:
@@ -95,19 +100,20 @@ def current_member(settings, row, *, verify_files=True):
     if pub.get('review_version') != gate['review_version'] or pub.get('profile') != gate['profile'] or pub.get('document_revision') != gate['document_revision']:
         raise media.MediaError('publication_profile_stale', 'Принятие/профиль изменились после публикации аудио; сначала обновите Ready')
     provider_policy.require_track(settings, row, 'export')
+    canonical = media_slots.canonical_sources(settings, row, verify_files=verify_files, hint=sources_hint)
     publication_paths.key(pub['relative_path'])
     if verify_files:
         media._expect(publication.ready_target(settings, pub['relative_path']), pub['sha256'])
         media._expect(media._validate(settings.work_root / row['relative_path'], settings.roots), row['sha256'])
     return {'track_id': row['id'], 'work_path': row['relative_path'], 'work_revision': row['sha256'],
             'ready_path': pub['relative_path'], 'ready_revision': pub['sha256'], 'gate': gate,
-            'usage_provenance': metadata.get('usage_provenance', {})}
+            'usage_provenance': metadata.get('usage_provenance', {}), 'canonical_sources': canonical}
 
 
 def validate_members(settings, plan, *, verify_files=True):
     for frozen in plan['members']:
         row = db.fetchone(settings.db_path, 'SELECT * FROM tracks WHERE id=? AND is_current=1', (frozen['track_id'],))
-        if not row or current_member(settings, row, verify_files=verify_files) != frozen:
+        if not row or current_member(settings, row, verify_files=verify_files, sources_hint=frozen.get('canonical_sources')) != frozen:
             raise media.MediaError('conflict', 'Аудио, принятый профиль или происхождение изменились после создания плана')
 
 
@@ -161,7 +167,7 @@ def build(settings, ids, *, cover=False, lrc=False):
             provenance = {name: value for name, value in member['usage_provenance'].items() if name == ('cover' if kind == 'cover' else 'lrc')}
             if not provenance:
                 provenance = {('cover' if kind == 'cover' else 'lrc'): {'origin': 'preexisting', 'rights_status': 'unknown', 'license_verified': False}}
-            owner = {key: member[key] for key in ('work_revision', 'ready_revision', 'ready_path', 'gate')}
+            owner = {key: member[key] for key in ('work_revision', 'ready_revision', 'ready_path', 'gate', 'canonical_sources')}
             owner['usage_provenance'] = provenance
             if normalized in objects:
                 obj = objects[normalized]
@@ -387,6 +393,8 @@ def export_objects(settings, audio_entries):
                 if (not track or owner['work_revision'] != track['sha256'] or owner['ready_revision'] != entry['sha256'] or
                         owner['ready_path'] != entry['path'] or lyrics_review.publication_gate(settings, track, conn=conn) != owner['gate']):
                     raise media.MediaError('sidecar_stale_owner', 'Ready/профиль изменился: создайте новый план sidecar')
+                if owner.get('canonical_sources') != media_slots.canonical_sources(settings, track):
+                    raise media.MediaError('sidecar_stale_owner', 'Выбранные native-источники изменились после плана sidecar')
                 for field, source in owner.get('usage_provenance', {}).items():
                     provenance[identity + ':' + field] = source
             target = publication.ready_target(settings, obj['path'])

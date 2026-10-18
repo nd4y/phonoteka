@@ -6,6 +6,8 @@ import uuid
 
 from PIL import Image
 import pytest
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 from phonoteka import artwork, db, media, provider_policy
 from phonoteka.artwork_worker import transform
@@ -53,8 +55,22 @@ def test_image_validation_limits_actual_decode_and_subprocess_deadline(monkeypat
         assert kwargs['timeout'] == 10 and kwargs['stderr'] is subprocess.DEVNULL
         raise subprocess.TimeoutExpired(args[0], 10)
     monkeypatch.setattr(artwork.subprocess, 'run', timeout)
-    with pytest.raises(media.MediaError) as bounded: artwork.process(image_bytes((64, 32)))
+    with pytest.raises(media.MediaError) as bounded: artwork.process(image_bytes((67, 31), color='blue'))
     assert bounded.value.code == 'invalid_cover'
+
+
+def test_concurrent_validation_waits_for_one_decode_and_caches_only_small_sha_descriptions(monkeypatch):
+    raw = image_bytes((73, 37), color='green'); original = artwork.subprocess.run; calls = []
+    def slow(*args, **kwargs):
+        calls.append(True); time.sleep(.35); return original(*args, **kwargs)
+    monkeypatch.setattr(artwork.subprocess, 'run', slow)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: artwork.process(raw), range(30)))
+    assert len(calls) == 1 and all(result['source']['width'] == 73 for result in results)
+    with artwork.CACHE_LOCK:
+        assert len(artwork.VALIDATED) <= 512
+        assert all(isinstance(key, str) and len(key) == 64 for key in artwork.VALIDATED)
+        assert all(set(value) == {'sha256', 'bytes', 'width', 'height', 'mime'} for value in artwork.VALIDATED.values())
 
 
 @TOOLS

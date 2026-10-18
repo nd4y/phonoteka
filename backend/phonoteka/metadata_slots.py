@@ -31,6 +31,7 @@ def native(audio):
     result = []
     def add(kind, identity, content, **values):
         raw = content if isinstance(content, bytes) else str(content).encode('utf-8')
+        if kind == 'lyrics': values['text_sha256'] = digest(values.get('text', ''))
         result.append({'id': digest([kind, identity, digest(raw)]), 'kind': kind, 'native_identity': identity,
                        'sha256': digest(raw), 'size': len(raw), **values})
     if isinstance(audio, (MP3, WAVE, AIFF)):
@@ -155,6 +156,25 @@ def planned_targets(audio, chosen):
             identity = name + ':' + str(len(audio.get(name, [])))
         result[kind] = {'native_identity': identity}
     return result
+
+
+def reference(slot):
+    return {'slot_id': slot['id'], 'native_identity': slot['native_identity'], 'native_sha256': slot['sha256'],
+            'content_sha256': slot.get('data_sha256', digest(slot.get('text', ''))) if slot['kind'] == 'cover' else slot.get('text_sha256', digest(slot.get('text', '')))}
+
+
+def resolve(audio, expected, kind):
+    if not isinstance(expected, dict): fail('slot_conflict', 'A frozen native source selection is required')
+    matches = [slot for slot in native(audio) if slot['kind'] == kind and reference(slot) == expected]
+    if len(matches) != 1: fail('slot_conflict', 'Selected native source changed or disappeared')
+    return matches[0]
+
+
+def cover_data(audio, slot):
+    if slot.get('_frame'): return slot['_frame'].data
+    if slot.get('_picture'): return slot['_picture'].data
+    if slot.get('native_type') == 'MP4_COVR': return bytes(audio['covr'][slot['_index']])
+    fail('invalid_cover', 'Malformed native picture block')
 
 
 def verify(audio, chosen, normalized, cover):

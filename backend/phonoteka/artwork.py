@@ -1,5 +1,8 @@
 """Owner artwork transform previews; source images never persist as a cache."""
 import base64
+from collections import OrderedDict, deque
+from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -15,13 +18,49 @@ from . import db, media, media_slots, provider_policy, security
 
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
 SLOTS = threading.BoundedSemaphore(1)
+ADMISSION = threading.Condition()
+WAITERS = deque()
+VALIDATED = OrderedDict()
+CACHE_LOCK = threading.Lock()
 PREFIX = 'artwork_preview:'
+
+
+def acquire_slot():
+    ticket = object(); deadline = time.monotonic() + 10
+    with ADMISSION:
+        if len(WAITERS) >= 32: return False
+        WAITERS.append(ticket)
+        while WAITERS[0] is not ticket or not SLOTS.acquire(blocking=False):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                WAITERS.remove(ticket); ADMISSION.notify_all(); return False
+            ADMISSION.wait(remaining)
+        WAITERS.popleft()
+        return True
+
+
+def release_slot():
+    with ADMISSION:
+        SLOTS.release(); ADMISSION.notify_all()
+
+
+def cached_validation(sha):
+    with CACHE_LOCK:
+        found = VALIDATED.get(sha)
+        if found: VALIDATED.move_to_end(sha); return {'source': dict(found)}
 
 
 def process(raw, options=None):
     if not isinstance(raw, bytes) or len(raw) > MAX_SOURCE_BYTES: raise media.MediaError('invalid_cover', 'Обложка превышает 20 МиБ')
-    if not SLOTS.acquire(timeout=.25): raise media.MediaError('artwork_busy', 'Обработчик изображений занят; повторите предпросмотр')
+    sha = hashlib.sha256(raw).hexdigest()
+    if options is None:
+        cached = cached_validation(sha)
+        if cached: return cached
+    if not acquire_slot(): raise media.MediaError('artwork_busy', 'Очередь декодирования занята; повторите предпросмотр', retryable=True)
     try:
+        if options is None:
+            cached = cached_validation(sha)
+            if cached: return cached
         try:
             completed = subprocess.run([sys.executable, str(Path(__file__).with_name('artwork_worker.py'))],
                 input=json.dumps({'image_b64': base64.b64encode(raw).decode(), 'options': options}).encode(),
@@ -30,8 +69,12 @@ def process(raw, options=None):
         except (subprocess.TimeoutExpired, ValueError, OSError) as exc:
             raise media.MediaError('invalid_cover', 'Превышен предел времени или ресурсов декодирования изображения') from exc
         if not result or result.get('error'): raise media.MediaError('invalid_cover', 'Нужен корректный JPEG/PNG до 20 МиБ и 25 мегапикселей')
+        with CACHE_LOCK:
+            VALIDATED[sha] = {key: result['source'][key] for key in ('sha256', 'bytes', 'width', 'height', 'mime')}
+            VALIDATED.move_to_end(sha)
+            while len(VALIDATED) > 512: VALIDATED.popitem(last=False)
         return result
-    finally: SLOTS.release()
+    finally: release_slot()
 
 
 class ArtworkInput(BaseModel):
@@ -86,7 +129,7 @@ def install(app, settings):
                 # newly uploaded value itself. Preserve both constraint sets.
                 incoming_hash = provider_policy.digest(provider_policy.field_values({'cover': body.source})['cover'])
                 incoming = conn.execute('SELECT value FROM settings WHERE key=?', ('usage_value:cover:' + incoming_hash,)).fetchone()
-                usages = provider_policy.references(source) + (json.loads(incoming[0]).get('entries', []) if incoming else [])
+                usages = deepcopy(provider_policy.references(source)) + (json.loads(incoming[0]).get('entries', []) if incoming else [])
                 provider_policy.require_sources(conn, usages, 'derived_analysis')
                 provider_policy.require_sources(conn, usages, 'cache')
                 if usages: source['field_sources']['cover']['usage'] = usages

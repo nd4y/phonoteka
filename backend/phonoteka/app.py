@@ -466,7 +466,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def art(request: Request, track_id: str):
         security.require_session(request, settings)
         from .media import read_art
-        content = read_art(resolve_track_path(settings, _track_row(settings, track_id)), {"work": settings.work_root, "source": settings.source_root})
+        row = _track_row(settings, track_id)
+        try:
+            content = read_art(resolve_track_path(settings, row), {"work": settings.work_root, "source": settings.source_root}, slot=json.loads(row['metadata']).get('preferred_cover'))
+        except media.MediaError as exc:
+            raise security.error(409, exc.code, exc.message) from exc
         if not content:
             raise security.error(404, "art_not_found", "Обложка отсутствует")
         data, mime = content

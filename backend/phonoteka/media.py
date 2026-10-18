@@ -359,7 +359,9 @@ def _decoder_diagnostics(stderr):
         if not line:continue
         # FFmpeg emits this for normal PCM WAV with no channel mask. Mono and
         # stereo are unambiguous; unknown/multichannel guesses remain warnings.
-        if re.fullmatch(r'Guessed Channel Layout for Input Stream #\d+\.\d+\s*:\s*(?:mono|stereo)',line):
+        legacy_note=re.fullmatch(r'Guessed Channel Layout for Input Stream #\d+\.\d+\s*:\s*(?:mono|stereo)',line)
+        modern_note=re.fullmatch(r'\[aist#\d+:\d+/[A-Za-z0-9_]{1,64} @ 0x[0-9a-fA-F]{1,16}\]\s+Guessed Channel Layout:\s*(?:mono|stereo)',line)
+        if legacy_note or modern_note:
             layout_notes+=1
         else:other=True
     notes=[{'code':'decoder_channel_layout_inferred','count':layout_notes,
@@ -550,10 +552,14 @@ def _load_audio(file):
     return audio
 
 
-def read_art(path: str | Path, roots: Mapping[str, Any]) -> tuple[bytes, str] | None:
+def read_art(path: str | Path, roots: Mapping[str, Any], *, slot=None) -> tuple[bytes, str] | None:
     path = _validate(path, roots)
     with _file(path) as stream:
         audio = _load_audio(stream)
+        if slot is not None:
+            selected = metadata_slots.resolve(audio, slot, 'cover')
+            data = metadata_slots.cover_data(audio, selected)
+            return data, _cover(data)[0]
         if isinstance(audio, (MP3, WAVE, AIFF)):
             pictures = audio.tags.getall("APIC") if audio.tags else []
         elif isinstance(audio, FLAC):

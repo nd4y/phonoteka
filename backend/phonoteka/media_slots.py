@@ -54,7 +54,7 @@ def committed_metadata(old, metadata, payload, result):
         previous = old.get('usage_provenance', {}).get(field)
         existing = [slot for slot in old_slots if slot['kind'] == kind]
         compatible = [slot for slot in existing if slot.get('editable')]
-        canonical = old.get('preferred_lyrics_slot') if kind == 'lyrics' else None
+        canonical = old.get('preferred_lyrics_slot') if kind == 'lyrics' else old.get('preferred_cover', {}).get('native_identity')
         if kind == 'lyrics' and not old.get('lrc'):
             ordinary = [slot for slot in existing if slot.get('native_type') == 'USLT']
             canonical = canonical or (ordinary[0]['native_identity'] if ordinary else None)
@@ -68,9 +68,16 @@ def committed_metadata(old, metadata, payload, result):
         metadata['lyrics'] = ''
         if selected.get('lyrics') and metadata['lrc']: metadata['preferred_lyrics_slot'] = selected['lyrics']
         elif not metadata['lrc']: metadata.pop('preferred_lyrics_slot', None)
-    elif old.get('preferred_lyrics_slot'):
-        for field in ('preferred_lyrics_slot', 'lrc', 'lyrics'):
+        metadata['lyrics_selection_empty'] = not bool(metadata['lrc'])
+    elif old.get('preferred_lyrics_slot') or old.get('lyrics_selection_empty'):
+        for field in ('preferred_lyrics_slot', 'lyrics_selection_empty', 'lrc', 'lyrics'):
             if field in old: metadata[field] = old[field]
+    if payload.get('cover') and selected.get('cover'):
+        chosen = next((slot for slot in metadata.get('slot_inventory', {}).get('slots', []) if slot['kind'] == 'cover' and slot['native_identity'] == selected['cover']), None)
+        if not chosen: raise media.MediaError('slot_conflict', 'The committed cover target is absent from the reopened inventory')
+        metadata['preferred_cover'] = metadata_slots.reference(chosen)
+    elif old.get('preferred_cover'):
+        metadata['preferred_cover'] = old['preferred_cover']
     if payload.get('cover') and payload.get('artwork_transform'):
         metadata['artwork_transform'] = payload['artwork_transform']
     elif not payload.get('cover') and old.get('artwork_transform'):
@@ -80,13 +87,24 @@ def committed_metadata(old, metadata, payload, result):
 
 def canonical_snapshot(metadata):
     identity = metadata.get('preferred_lyrics_slot')
-    return {'native_identity': identity, 'text_sha256': metadata_slots.digest(metadata.get('lrc') or metadata.get('lyrics') or ''),
-            'synchronized': bool(metadata.get('lrc'))} if identity else {}
+    result = {'native_identity': identity, 'text_sha256': metadata_slots.digest(metadata.get('lrc') or metadata.get('lyrics') or ''),
+              'synchronized': bool(metadata.get('lrc'))} if identity else {}
+    if metadata.get('preferred_cover'): result['cover'] = metadata['preferred_cover']
+    if metadata.get('lyrics_selection_empty'): result['lyrics_selection_empty'] = True
+    return result
 
 
 def restore_canonical(path, metadata, snapshot):
     if not snapshot: return metadata
     audio = media._load_audio(path)
+    if snapshot.get('cover'):
+        metadata_slots.resolve(audio, snapshot['cover'], 'cover')
+        metadata['preferred_cover'] = snapshot['cover']
+    if snapshot.get('lyrics_selection_empty'):
+        metadata.update(lrc='', lyrics='', lyrics_selection_empty=True)
+        metadata.pop('preferred_lyrics_slot', None)
+        return metadata
+    if not snapshot.get('native_identity'): return metadata
     target = next((slot for slot in metadata_slots.native(audio) if slot['kind'] == 'lyrics'
                    and slot['native_identity'] == snapshot.get('native_identity')
                    and metadata_slots.digest(slot.get('text', '')) == snapshot.get('text_sha256')), None)
@@ -94,6 +112,35 @@ def restore_canonical(path, metadata, snapshot):
     metadata['preferred_lyrics_slot'] = target['native_identity']
     metadata['lrc'], metadata['lyrics'] = (target['text'], '') if snapshot.get('synchronized') else ('', target['text'])
     return metadata
+
+
+def canonical_sources(settings, row, *, verify_files=True, hint=None):
+    """Resolve current metadata against actual exact-revision native content."""
+    metadata = json.loads(row['metadata']); result = {'cover': None, 'lyrics': None}
+    audio = read(settings, row)[0] if verify_files else None
+    entries = metadata_slots.native(audio) if verify_files else metadata.get('slot_inventory', {}).get('slots', [])
+    if metadata.get('preferred_cover'):
+        if verify_files: result['cover'] = metadata_slots.reference(metadata_slots.resolve(audio, metadata['preferred_cover'], 'cover'))
+        else:
+            found = next((slot for slot in entries if slot['kind'] == 'cover' and metadata_slots.reference(slot) == metadata['preferred_cover']), None)
+            if not found: raise media.MediaError('slot_conflict', 'Stored canonical cover selection is stale')
+            result['cover'] = metadata['preferred_cover']
+    else:
+        cover = next((slot for slot in entries if slot['kind'] == 'cover' and slot.get('editable')), None)
+        if cover: result['cover'] = metadata_slots.reference(cover)
+    raw = metadata.get('lrc') or metadata.get('lyrics') or ''
+    if raw and not metadata.get('lyrics_selection_empty'):
+        target = metadata.get('preferred_lyrics_slot')
+        raw_hash = metadata_slots.digest(raw); previous = (hint or {}).get('lyrics') or {}
+        found = next((slot for slot in entries if slot['kind'] == 'lyrics' and
+                      (slot.get('text_sha256') == raw_hash or not verify_files and not slot.get('text_sha256') and
+                       slot['id'] == previous.get('slot_id') and raw_hash == previous.get('content_sha256'))
+                      and (target is None or slot['native_identity'] == target)), None)
+        if not found: raise media.MediaError('slot_conflict', 'The reviewed canonical lyric document is absent from current native slots')
+        result['lyrics'] = metadata_slots.reference({**found, 'text_sha256': raw_hash})
+    if verify_files:
+        media._expect(media._validate(settings.work_root / row['relative_path'], settings.roots), row['sha256'])
+    return result
 
 
 def install(app, settings):

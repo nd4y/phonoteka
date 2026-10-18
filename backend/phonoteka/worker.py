@@ -261,10 +261,10 @@ class Worker:
                     if key in old:
                         meta[key] = old[key]
                 if current["sha256"] == meta["sha256"]:
-                    for key in ("audit", "publication", "cue_sheets", "cue_album_image", "derived_from", "cue_export", "audio_export", "usage_provenance", "preferred_lyrics_slot", "artwork_transform"):
+                    for key in ("audit", "publication", "cue_sheets", "cue_album_image", "derived_from", "cue_export", "audio_export", "usage_provenance", "preferred_lyrics_slot", "lyrics_selection_empty", "preferred_cover", "artwork_transform"):
                         if key in old:
                             meta[key] = old[key]
-                    if old.get('preferred_lyrics_slot'):
+                    if old.get('preferred_lyrics_slot') or old.get('lyrics_selection_empty'):
                         meta['lrc'], meta['lyrics'] = old.get('lrc', ''), old.get('lyrics', '')
                     if 'youtube' in meta:
                         if old.get('derived_from'):

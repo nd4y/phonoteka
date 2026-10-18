@@ -65,6 +65,8 @@ def main():
                 current=media.inspect_audio(path,roots)
                 assert current['lrc']==LRC and current['has_art'] and media.audio_identity(path)==identity
                 assert current['tags']['title']==[title] and not current.get('poweramp_verified')
+                id3_version=list(MP3(path).tags.version) if extension=='mp3' else None
+                if extension=='mp3':assert id3_version==[2,3 if index<=5 else 4,0]
                 audit=media.audit_audio(path,roots)
                 assert audit['state']=='passed' and audit['sha256']==result['sha256']
                 relative=f'{extension.upper()}/{index:02} - Сигналы.{extension}'
@@ -73,7 +75,7 @@ def main():
                 manifest['files'].append({'path':relative,'sha256':media.sha256_file(target),
                     'bytes':target.stat().st_size,'audio_identity':identity,'format':extension,
                     'expected_tags':tags,'expected_lrc':LRC,'cover_sha256':__import__('hashlib').sha256(cover).hexdigest(),
-                    'id3_version':current.get('id3_version'),'verified_on_device':False})
+                    'id3_version':id3_version,'verified_on_device':False})
                 path.unlink()
     (destination/'Фонотека.m3u8').write_text('#EXTM3U\n'+'\n'.join(item['path'] for item in manifest['files'])+'\n',encoding='utf-8')
     (destination/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')

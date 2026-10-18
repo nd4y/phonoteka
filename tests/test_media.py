@@ -121,13 +121,21 @@ def test_changed_audio_during_signal_measurement_still_fails_audit(make_audio, r
     assert result["state"] == "failed" and result["error"] == "conflict"
 
 
-def test_decoder_layout_note_does_not_hide_additional_decode_warning():
-    # First line was captured from the supported FFmpeg on a generated WAV.
-    benign=b'Guessed Channel Layout for Input Stream #0.0 : mono\n'
+@pytest.mark.parametrize('benign',[
+    b'Guessed Channel Layout for Input Stream #0.0 : mono\n',
+    b'Guessed Channel Layout for Input Stream #0.0 : stereo\n',
+    b'[aist#0:0/pcm_s16le @ 0x563503dcd200] Guessed Channel Layout: mono\n',
+    b'[aist#0:0/pcm_s16le @ 0x55a34d00a880] Guessed Channel Layout: stereo\n',
+])
+def test_decoder_layout_note_does_not_hide_additional_decode_warning(benign):
+    # Mono forms were captured from FFmpeg 5 (Debian) and 6.1.1 (Ubuntu) on
+    # the exact generated WAV fixtures; stereo is the same unambiguous note.
     notes,warnings=media._decoder_diagnostics(benign)
     assert notes[0]['code']=='decoder_channel_layout_inferred' and not warnings
     for genuine in (b'[flac @ 0x123] invalid sync code\n',b'Unexpected end of input\n',
-                    b'Guessed Channel Layout for Input Stream #0.0 : 5.1\n'):
+                    b'Guessed Channel Layout for Input Stream #0.0 : 5.1\n',
+                    b'[aist#0:0/pcm_s16le @ 0x123] Guessed Channel Layout: 5.1\n',
+                    b'[aist#0:0/pcm_s16le @ 0x123] Guessed Channel Layout: mono; invalid sync code\n'):
         notes,warnings=media._decoder_diagnostics(benign+genuine)
         assert notes and warnings[0]['code']=='decoder_diagnostics'
         assert '0x123' not in json.dumps((notes,warnings))
