@@ -187,7 +187,9 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
           <progress max={100} value={job.total || !active ? percent : undefined} aria-label={`Прогресс: ${jobNames[job.kind] || job.kind}`} aria-valuetext={job.total ? `${percent}%, ${processed} из ${job.total} попыток` : 'Объем определяется'} />
           <div className="job-current-action"><Activity size={15} aria-hidden="true" /><span>{job.current_action || jobStates[job.stage] || jobStates[job.state] || 'Подготовка'}{job.active_count ? ` · файлов одновременно: ${job.active_count}` : ''}</span></div>
           {active && !!job.retry_at && <p className="muted small job-retry">Автоматический повтор после {dateOf(new Date(job.retry_at * 1000).toISOString())}. Выполненные попытки сохраняются.</p>}
-          {job.error && <ErrorNotice message={job.error} />}
+          {job.error && (job.error === 'partial_scan'
+            ? <p className="muted small job-retry">Сканирование завершилось не полностью. Обработанные записи сохранены.</p>
+            : <ErrorNotice message={job.error} />)}
           {job.cancel_requested && <p className="muted small job-retry">Уже выполненные изменения сохраняются. Текущая операция с файлом завершается безопасно.</p>}
           <button className="button subtle job-activity-toggle" aria-expanded={expanded} aria-controls={`job-activity-${job.id}`} onClick={() => setSelectedId(expanded ? '' : job.id)}><ChevronDown className={expanded ? 'is-expanded' : ''} size={17} />{expanded ? 'Скрыть действия и события' : 'Действия и события'}</button>
           {expanded && <div className="job-activity" id={`job-activity-${job.id}`}>
