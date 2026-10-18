@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { ArrowLeft, Disc3, RefreshCw, Play, CircleAlert } from 'lucide-react';
+import { AudioPlayer } from './AudioPlayer';
 import type { Track, CueTrack } from './types';
 
 const time = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
@@ -26,10 +27,7 @@ export function CueView({ track, onBack, onRefresh, onExtract, enabled, busy }: 
     <div className="cue-track-list" aria-label="Композиции CUE">{document.tracks.map(item => <button className={`cue-track ${selected?.number === item.number ? 'selected' : ''}`} key={item.number} disabled={!item.available || track.status === 'missing'} onClick={() => choose(item)} aria-label={`Слушать ${item.number}. ${item.title}`} aria-pressed={selected?.number === item.number}>
       <span className="mono">{String(item.number).padStart(2, '0')}</span><span className="cue-track-name"><strong>{item.title}</strong><small>{item.performer || document.performer}<br />{document.files[item.file_index]?.declared_name}</small></span><span className="cue-time">{item.available ? time(item.duration || 0) : 'Нет аудио'}<small>{time(item.start_seconds)}</small></span><Play size={17} />
     </button>)}</div>
-    {selected && <div className="audio-preview cue-player"><strong>{selected.number}. {selected.title}</strong><p className="small muted">{time(selected.start_seconds)} - {time(selected.end_seconds!)} · шкала исходного файла. Плеер останавливается у следующей композиции.</p>
-      <audio key={selected.number} ref={audio} controls preload="metadata" src={`/api/tracks/${encodeURIComponent(track.id)}/cue/${selected.number}/audio`} onLoadedMetadata={event => { event.currentTarget.currentTime = selected.start_seconds; void event.currentTarget.play().catch(() => setError('Нажмите воспроизведение в плеере.')); }} onTimeUpdate={event => { if (event.currentTarget.currentTime >= selected.end_seconds!) event.currentTarget.pause(); }} onSeeking={event => { const player = event.currentTarget; if (player.currentTime < selected.start_seconds) player.currentTime = selected.start_seconds; else if (player.currentTime > selected.end_seconds!) player.currentTime = selected.end_seconds!; }} onError={() => setError('Аудио недоступно или изменилось. Просканируйте коллекцию заново; проверьте поддержку формата браузером.')} />
-      {error && <p className="warning-text small" role="alert">{error}</p>}
-    </div>}
+    {selected && <><AudioPlayer key={`${track.id}:${track.sha256}:${selected.number}`} mediaRef={audio} src={`/api/tracks/${encodeURIComponent(track.id)}/cue/${selected.number}/audio`} title={`${selected.number}. ${selected.title}`} subtitle="Композиция CUE · время от начала композиции" start={selected.start_seconds} end={selected.end_seconds ?? undefined} autoPlay />{error && <p className="warning-text small" role="alert">{error}</p>}</>}
     <p className="quiet-note break-word">{track.relative_path}</p>
   </section>;
 }

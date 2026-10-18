@@ -4,6 +4,8 @@ The application is a single-owner service. Original audio is mounted read-only. 
 
 ## Available
 
+- Accessible audio preview controls shared by normal tracks and CUE: play/pause, stop, bounded seeking and 10-second jumps, exact time entry, volume/mute, 0.5x-2x speed and repeat. CUE controls show composition-relative time and remain within its boundaries. Lyrics editing uses the same media position. Volume, mute and speed are stored locally; keyboard shortcuts apply only inside the focused player and do not intercept editor inputs. Browser decoding support still determines playable formats.
+
 - Dedicated-token Prometheus metrics for API/worker/inference, aggregate SQLite queue/collection/provider gauges, process counters and duration histograms; JSON stdout logs with generated request IDs and no user file paths or secrets. A reproducible 47-panel Grafana dashboard includes metrics and VictoriaLogs. See [observability](observability.md).
 
 - YouTube provenance from embedded URLs, yt-dlp filenames and bounded sidecars, inherited source links for derivatives, owner confirmation/unlink, public video metadata and up to three search candidates using pinned yt-dlp without media downloads/cookies. Search does not establish the exact original upload. See [YouTube provenance](youtube.md).
