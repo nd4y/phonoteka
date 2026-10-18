@@ -115,6 +115,14 @@ async def recognize(providers, audio, offset, authorize=lambda: None,*,input_rev
         if cached:
             data = json.loads(cached['payload'])
         else:
+            # Cached evidence spends no HTTP allowance. A miss checks capacity
+            # before ShazamIO can return a local empty/no-query result, while
+            # reserve still performs atomic admission before every real send.
+            try:
+                await asyncio.to_thread(provider_attempts.require_recognition_capacity,providers.settings,
+                                        provider_attempts.RECOGNITION.get()[0])
+            except provider_attempts.UsageError as exc:
+                raise ProviderError(exc.code,'shazam','Бюджет распознавания этой аудиозаписи исчерпан или не подтверждена аудиоревизия') from exc
             breaker = json.loads(await asyncio.to_thread(db.setting, providers.settings.db_path, 'provider_breaker:shazam', '{}'))
             if breaker.get('until', 0) > time.time():
                 raise ProviderError('provider_cooldown', 'shazam', 'Shazam временно приостановлен')

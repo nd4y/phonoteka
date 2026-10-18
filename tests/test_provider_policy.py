@@ -39,9 +39,6 @@ def test_transient_provider_response_is_not_cached_and_fetch_denial_precedes_net
     calls = []
     async def run():
         providers = Providers(settings, httpx.MockTransport(lambda request: (calls.append(str(request.url)) or httpx.Response(200, json={'syncedLyrics': 'private words'}))))
-        async def throttle(_provider):
-            return None
-        providers.throttle = throttle
         assert await providers.get('lrclib', 'https://lrclib.net/api/get/123')
         assert await providers.get('lrclib', 'https://lrclib.net/api/get/123')
         assert len(calls) == 2 and db.fetchone(settings.db_path, 'SELECT COUNT(*) AS n FROM provider_cache')['n'] == 0
@@ -50,6 +47,12 @@ def test_transient_provider_response_is_not_cached_and_fetch_denial_precedes_net
         with pytest.raises(ProviderError) as denied:
             await providers.get('lrclib', 'https://lrclib.net/api/get/123')
         assert denied.value.code == 'provider_policy_denied' and len(calls) == 2
+        # Exercise real admission and its durable ledger. A fetch denial must
+        # happen before both the HTTP send and a new spent budget reservation.
+        assert db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM provider_calls WHERE provider='lrclib'")['n'] == 2
+        attempts = db.fetchall(settings.db_path, "SELECT value FROM settings WHERE key LIKE 'provider_attempt:%'")
+        assert len(attempts) == 2
+        assert all(json.loads(row['value'])['state'] == 'succeeded' for row in attempts)
         await providers.close()
     asyncio.run(run())
 

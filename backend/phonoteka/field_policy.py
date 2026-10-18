@@ -126,6 +126,8 @@ def selected_payload(settings, conn, row, chosen, retrieved_at):
     available = {}
     source_rows = []
     for candidate in chosen:
+        from . import album_gain_policy
+        album_gain_policy.candidate(settings, conn, row, candidate)
         source = {key: candidate[key] for key in ('id', 'provider', 'source_url', 'source_path', 'identification', 'timing_verified', 'usage') if key in candidate}
         source_rows.append(source)
         values = dict(candidate.get('tags', {}))
@@ -147,7 +149,7 @@ def selected_payload(settings, conn, row, chosen, retrieved_at):
         provenance = {'provider': candidate['provider'], 'candidate_id': candidate['id'], 'retrieved_at': retrieved_at,
             'response_sha256': value_hash(candidate), 'value_sha256': value_hash(normalized_value(field, value)),
             'reason': 'owner_selected_field_priority'}
-        for key in ('source_url', 'source_path', 'usage'):
+        for key in ('source_url', 'source_path', 'usage', 'album_gain_group'):
             if key in candidate:
                 provenance[key] = candidate[key]
         result['field_sources'][field] = provenance

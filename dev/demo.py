@@ -25,7 +25,7 @@ if not password.exists():
 settings = Settings(
     state_dir=base / 'state', work_root=base / 'work', source_root=base / 'original',
     publication_root=base / 'publication', storage_guard_dir=base / 'guard',
-    owner_password_file=password, app_url='http://127.0.0.1:8177',
+    owner_password_file=password, app_url=os.environ.get('DEMO_URL', 'http://127.0.0.1:8177'),
     allow_insecure_localhost=True, static_dir=Path('/app/frontend/dist'),
     read_only=False, storage_verified=True, instance_id='build01-synthetic-demo',
 )

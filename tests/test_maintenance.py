@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from dataclasses import replace
 import pytest
 from fastapi.testclient import TestClient
@@ -41,6 +42,41 @@ def test_backup_requires_scheduler_stop_and_disjoint_new_destination(settings,tm
             with pytest.raises(RuntimeError):maintenance.backup(settings,tmp_path/'snapshot')
         with pytest.raises(ValueError,match='overlap'):maintenance.backup(settings,settings.work_root/'snapshot')
         with pytest.raises(ValueError,match='exist'):maintenance.backup(settings,settings.work_root)
+
+
+def test_restored_rollback_uses_copied_blob_after_original_state_blob_is_removed(settings,tmp_path):
+    cfg=replace(settings,read_only=False,storage_verified=True)
+    path=synthetic(cfg); original=path.read_bytes()
+    with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
+        headers=authenticated(client,cfg);job(client,headers,'scan');drain(cfg)
+        track=client.get('/api/tracks').json()['items'][0]
+        response=client.post('/api/tracks/'+track['id']+'/proposal',headers={**headers,'If-Match':track['sha256']},json={'tags':{'title':'Restorable title'}})
+        assert response.status_code==201,response.text
+        draft=response.json()
+        job(client,headers,'apply',[track['id']],{'proposal_id':draft['id']});drain(cfg)
+        before=db.fetchone(cfg.db_path,"SELECT * FROM history WHERE track_id=? AND kind='apply'",(track['id'],))
+        source_details=json.loads(before['details'])
+        snapshot=tmp_path/'portable-snapshot';maintenance.backup(cfg,snapshot)
+        # Verify compatibility with v1 snapshots made before source_state_dir.
+        manifest_path=snapshot/'manifest.json';manifest=json.loads(manifest_path.read_text())
+        manifest.pop('source_state_dir',None);manifest_path.write_text(json.dumps(manifest))
+        restored=tmp_path/'portable-restored';maintenance.restore(snapshot,restored)
+        restored_cfg=replace(cfg,state_dir=restored)
+        details=json.loads(db.fetchone(restored_cfg.db_path,'SELECT details FROM history WHERE id=?',(before['id'],))['details'])
+        assert details['backup_path'] != source_details['backup_path']
+        copied=restored/'backups'/track['id']
+        assert Path(details['backup_path']).is_relative_to(copied)
+        journal=json.loads(Path(details['journal_path']).read_text())
+        assert journal['backup'] == details['backup_path']
+        Path(source_details['backup_path']).unlink()
+        assert maintenance.acknowledge(restored_cfg)['recovery_required'] is False
+        with TestClient(create_app(restored_cfg),base_url=cfg.app_url) as recovered:
+            auth=authenticated(recovered,restored_cfg)
+            visible=recovered.get('/api/tracks/'+track['id']).json()['history']
+            assert next(row for row in visible if row['id']==before['id'])['rollback_available']
+            rolled=job(recovered,auth,'rollback',[track['id']],{'history_id':before['id']});drain(restored_cfg)
+            assert recovered.get('/api/jobs/'+rolled['id']).json()['state']=='succeeded'
+        assert path.read_bytes()==original
 
 
 def test_retention_journal_is_verified_and_restored_with_state(settings,tmp_path):

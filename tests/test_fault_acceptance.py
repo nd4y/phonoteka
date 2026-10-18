@@ -297,7 +297,12 @@ def test_restore_old_state_preserves_newer_work_ready_and_reports_missing_rollba
         ready = cfg.publication_root/'Ready'/path.name
         newer_work, newer_ready = path.read_bytes(), ready.read_bytes()
         restored = tmp_path/'restored-old-state'; maintenance.restore(checkpoint, restored)
+        restored_history = db.fetchone(restored/'phonoteka.sqlite3', "SELECT details FROM history WHERE track_id=? AND kind='apply'", (track['id'],))
+        assert json.loads(restored_history['details'])['backup_path'] == str(restored/previous_blob)
         (restored/previous_blob).unlink()
+        # The former state's blob still exists: it must not be substituted for
+        # the missing blob belonging to this restored state.
+        assert (cfg.state_dir/previous_blob).is_file()
         recovered_cfg = replace(cfg, state_dir=restored)
         with TestClient(create_app(recovered_cfg), base_url=cfg.app_url) as recovered:
             authorized = authenticated(recovered, recovered_cfg)

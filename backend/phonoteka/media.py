@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
@@ -32,7 +33,7 @@ from mutagen.id3 import ID3, ID3NoHeaderError, APIC, SYLT, TXXX, UFID, Frames
 from mutagen.mp3 import MP3
 from mutagen.wave import WAVE
 from mutagen.aiff import AIFF
-from . import formats, intake
+from . import formats, intake, metadata_slots
 from PIL import Image, UnidentifiedImageError
 
 
@@ -62,7 +63,7 @@ _MB_DESCRIPTIONS.update({key:key for key in _RG_FIELDS})
 
 MAX_LRC_BYTES, MAX_LRC_LINES = 2 * 1024 * 1024, 20000
 MAX_AUDIO_BYTES = 8 * 1024**3
-MAX_COVER_BYTES = 15 * 1024 * 1024
+MAX_COVER_BYTES = 20 * 1024 * 1024
 _SPACE_MARGIN = 128 * 1024 * 1024
 _TAG_GROWTH_BUDGET = 64 * 1024 * 1024
 _SPACE_LOCK = threading.Lock()
@@ -264,12 +265,15 @@ def _demuxer(path: Path) -> str:
 
 
 def probe_audio(path: Path) -> dict:
-    result = _process(path, 'ffprobe', ['-show_entries','format=duration,format_name:format_tags:stream=codec_type,codec_name,sample_rate,channels,duration','-of','json'], timeout=30)
+    result = _process(path, 'ffprobe', ['-show_entries','format=duration,format_name:format_tags:stream=index,codec_type,codec_name,sample_rate,channels,duration','-of','json'], timeout=30)
     doc = json.loads(result.stdout)
     streams = [x for x in doc.get('streams', []) if x.get('codec_type') == 'audio']
     if not streams:
         raise MediaError('no_audio_stream', 'File contains no audio stream')
-    return {'duration': float(doc.get('format', {}).get('duration') or streams[0].get('duration') or 0), 'codec': streams[0].get('codec_name'), 'channels':int(streams[0].get('channels') or 0), 'sample_rate':int(streams[0].get('sample_rate') or 0), 'container':doc.get('format', {}).get('format_name'), 'tags': {k.lower():[str(v)] for k,v in doc.get('format', {}).get('tags', {}).items() if k.lower() in _TEXT_FRAMES}}
+    inventory = [{'index':stream['index'], 'codec':stream.get('codec_name'),
+                  'duration':float(stream.get('duration') or 0), 'channels':int(stream.get('channels') or 0),
+                  'sample_rate':int(stream.get('sample_rate') or 0)} for stream in streams]
+    return {'duration': float(doc.get('format', {}).get('duration') or streams[0].get('duration') or 0), 'codec': streams[0].get('codec_name'), 'channels':int(streams[0].get('channels') or 0), 'sample_rate':int(streams[0].get('sample_rate') or 0), 'audio_streams':inventory, 'audio_stream_count':len(inventory), 'container':doc.get('format', {}).get('format_name'), 'tags': {k.lower():[str(v)] for k,v in doc.get('format', {}).get('tags', {}).items() if k.lower() in _TEXT_FRAMES}}
 
 
 def fallback_inventory(path, roots, error):
@@ -321,7 +325,7 @@ def _process(path: Path, executable: str, arguments: list[str], *, timeout: int 
 
 
 def audio_identity(path: str | Path) -> str:
-    result = _process(Path(path), "ffprobe", ["-select_streams", "a:0", "-show_packets", "-show_streams", "-show_entries", "packet=data_hash:stream=codec_name,sample_rate,channels,extradata_hash", "-show_data_hash", "sha256", "-of", "json"])
+    result = _process(Path(path), "ffprobe", ["-select_streams", "a", "-show_packets", "-show_streams", "-show_entries", "packet=stream_index,data_hash:stream=index,codec_name,sample_rate,channels,extradata_hash", "-show_data_hash", "sha256", "-of", "json"])
     try:
         payload = json.loads(result.stdout)
     except (ValueError, UnicodeError) as exc:
@@ -329,19 +333,48 @@ def audio_identity(path: str | Path) -> str:
     packets = payload.get("packets", [])
     if not packets or any(not re.fullmatch(r"SHA256:[0-9a-fA-F]{64}", packet.get("data_hash", "")) for packet in packets):
         raise MediaError("invalid_audio", "No verifiable audio packets found")
+    streams = payload.get('streams', [])
+    stream_ids = {stream.get('index') for stream in streams}
+    if not streams or None in stream_ids or {packet.get('stream_index') for packet in packets} != stream_ids:
+        raise MediaError('invalid_audio', 'Not every declared audio stream has verifiable packets')
     # Side data includes encoder delay/padding. A compact text parser could omit
     # precisely those packets; JSON preserves every selected packet and its data.
     identity = {"packets": [{"hash": packet["data_hash"], "side_data": packet.get("side_data_list", [])} for packet in packets],
-                "streams": [{key: stream[key] for key in ("codec_name", "sample_rate", "channels", "extradata_hash") if key in stream} for stream in payload.get("streams", [])]}
+                "streams": [{key: stream[key] for key in ("codec_name", "sample_rate", "channels", "extradata_hash") if key in stream} for stream in streams]}
+    if len(streams) > 1:
+        # Bind each packet to its declared stream. Ordinals exclude unrelated
+        # video/cover stream indexes; the single-stream v1 hash stays compatible.
+        ordinals = {stream['index']:ordinal for ordinal,stream in enumerate(streams)}
+        identity['scheme'] = 'encoded_audio_packets_v2_all_streams'
+        for packet, original in zip(identity['packets'], packets):
+            packet['stream'] = ordinals[original['stream_index']]
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _decoder_diagnostics(stderr):
+    """Separate a known format note from warnings; never disclose raw paths."""
+    layout_notes=0;other=False
+    for line in stderr.decode('utf-8',errors='replace').splitlines():
+        line=line.strip()
+        if not line:continue
+        # FFmpeg emits this for normal PCM WAV with no channel mask. Mono and
+        # stereo are unambiguous; unknown/multichannel guesses remain warnings.
+        if re.fullmatch(r'Guessed Channel Layout for Input Stream #\d+\.\d+\s*:\s*(?:mono|stereo)',line):
+            layout_notes+=1
+        else:other=True
+    notes=[{'code':'decoder_channel_layout_inferred','count':layout_notes,
+            'message':'Для обычного mono/stereo PCM декодер определил схему каналов по их количеству'}] if layout_notes else []
+    warnings=[{'code':'decoder_diagnostics','message':'Декодер сообщил предупреждения; все аудиопотоки декодированы без фатальной ошибки'}] if other else []
+    return notes,warnings
 
 
 def audit_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
     path = _validate(path, roots)
     digest = sha256_file(path)
     try:
+        info = probe_audio(path)
         identity = audio_identity(path)
-        _process(path, "ffmpeg", ["-nostdin", "-xerror", "-map", "0:a:0", "-f", "null", "-"], timeout=1800)
+        decoded = _process(path, "ffmpeg", ["-nostdin", "-v", "warning", "-xerror", "-map", "0:a", "-f", "null", "-"], timeout=1800)
         # Diagnostics are a separate, bounded pass. A missing filter or an
         # unparseable diagnostic must not turn successful decoding into damage.
         try:
@@ -349,8 +382,18 @@ def audit_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
         except (MediaError, ValueError, OverflowError):
             signal = {"state": "unavailable", "method": "ffmpeg_signal_v1"}
             warnings = [{"code": "signal_measurements_unavailable", "message": "Измерения сигнала недоступны; проверка декодирования выполнена"}]
+        notes,decoder_warnings=_decoder_diagnostics(decoded.stderr)
+        warnings.extend(decoder_warnings)
+        if info['audio_stream_count'] > 1:
+            signal['scope'] = 'first_audio_stream_only'
+            warnings.append({'code':'multiple_audio_streams', 'message':'Проверены все аудиопотоки; измерения сигнала и предпрослушивание относятся к первому', 'count':info['audio_stream_count']})
         _expect(path, digest)
-        return {"state": "passed", "sha256": digest, "audio_identity": identity, "error": None, "warnings": warnings, "signal": signal}
+        return {"state": "passed", "sha256": digest, "audio_identity": identity,
+                'analyzer':'ffmpeg_all_audio_streams_v2', 'profile':'full_decode_all_audio_streams',
+                'audio_identity_scheme':'encoded_audio_packets_v2_all_streams' if info['audio_stream_count']>1 else 'encoded_audio_packets_v1',
+                'hash_verified_at':datetime.now(timezone.utc).isoformat(timespec='milliseconds'),
+                'duration':info['duration'], 'audio_streams':info['audio_streams'], 'audio_stream_count':info['audio_stream_count'],
+                "error": None, "warnings": warnings, 'notes':notes, "signal": signal}
     except MediaError as exc:
         return {"state": "unsupported" if exc.code == "unsupported_format" else "failed", "sha256": digest,
                 "error": exc.code, "warnings": [], "message": exc.message}
@@ -492,7 +535,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                 "bitrate": getattr(audio.info, 'bitrate', None), "bits_per_sample": getattr(audio.info, 'bits_per_sample', None),
                 "tags": tags, "has_art": has_art, "lyrics": lyrics, "lrc": lrc, "lyrics_warning": lyrics_warning,
                 "write_supported": write_supported, "write_block_reason": reason,
-                "audio_identity": None, "poweramp_verified": False}
+                "audio_identity": None, "poweramp_verified": False, "slot_inventory": metadata_slots.inventory(audio)}
 
 
 def _load_audio(file):
@@ -533,17 +576,10 @@ def read_art(path: str | Path, roots: Mapping[str, Any]) -> tuple[bytes, str] | 
 
 def _cover(data: bytes) -> tuple[str, int, int]:
     if not isinstance(data, bytes) or len(data) > MAX_COVER_BYTES:
-        raise MediaError("invalid_cover", "Cover exceeds 15 MiB")
-    try:
-        with Image.open(io.BytesIO(data)) as picture:
-            if picture.format not in {"PNG", "JPEG"} or picture.width * picture.height > 25_000_000:
-                raise MediaError("invalid_cover", "Cover must be JPEG/PNG with at most 25 megapixels")
-            mime = "image/jpeg" if picture.format == "JPEG" else "image/png"
-            width, height = picture.size
-            picture.verify()
-        return mime, width, height
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
-        raise MediaError("invalid_cover", "Cover image is malformed") from exc
+        raise MediaError("invalid_cover", "Cover exceeds 20 MiB")
+    from . import artwork
+    description = artwork.process(data)['source']
+    return description['mime'], description['width'], description['height']
 
 
 def _values(value: Any) -> list[str]:
@@ -555,7 +591,7 @@ def _values(value: Any) -> list[str]:
     return values
 
 
-def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | None) -> None:
+def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | None, slot_selection=None) -> None:
     if set(tags) - set(_TEXT_FRAMES) - _CUSTOM_FIELDS:
         raise MediaError("invalid_tags", "An unsupported tag field was requested")
     for field in set(tags) & _RG_FIELDS:
@@ -572,6 +608,7 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
     if parsed and any(line["start_ms"] > int(duration * 1000) + 1000 for line in parsed["lines"]):
         raise MediaError("invalid_lyrics", "A lyric timestamp exceeds audio duration")
     cover_info = _cover(cover) if cover is not None else None
+    metadata_slots.targets(audio, slot_selection, lyrics=normalized is not None, cover=cover is not None)
     if isinstance(audio, (MP3, WAVE, AIFF)):
         if audio.tags is None:
             audio.add_tags()
@@ -604,31 +641,13 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
                     if frame.desc.casefold()==description.casefold():audio.tags.delall(frame.HashKey)
                 if values:
                     audio.tags.add(TXXX(encoding=encoding, desc=description, text=values))
-        if parsed is not None:
-            # Multiple languages/descriptions are a manual conflict; preserve foreign slots.
-            slots = audio.tags.getall("SYLT")
-            if len(slots) > 1:
-                raise MediaError("lyrics_conflict", "Multiple synchronized lyric slots require an explicit selection")
-            desc, lang = (slots[0].desc, slots[0].lang) if slots else ("Phonoteka", "und")
-            if slots:
-                audio.tags.delall(slots[0].HashKey)
-            if parsed["lines"]:
-                audio.tags.add(SYLT(encoding=encoding, lang=lang, format=2, type=1, desc=desc,
-                                    text=[(line["text"], line["start_ms"]) for line in parsed["lines"]]))
-        if cover is not None:
-            fronts = [frame for frame in audio.tags.getall("APIC") if frame.type == 3]
-            if len(fronts) > 1:
-                raise MediaError("cover_conflict", "Multiple front covers require an explicit selection")
-            desc = fronts[0].desc if fronts else "Phonoteka front cover"
-            if not fronts and any(frame.desc == desc for frame in audio.tags.getall("APIC")):
-                raise MediaError("cover_conflict", "A different picture already owns the cover description")
-            if fronts:
-                audio.tags.delall(fronts[0].HashKey)
-            audio.tags.add(APIC(encoding=encoding, mime=cover_info[0], type=3, desc=desc, data=cover))
+        metadata_slots.edit(audio, normalized, cover, cover_info, slot_selection)
         audio.save(v2_version=version, v23_sep=None, **({} if isinstance(audio,AIFF) else {'v1':1}))
     elif isinstance(audio, formats.PROFILES):
         try:
-            formats.edit(audio, tags, normalized, cover, cover_info, _values)
+            formats.edit(audio, tags, None, None, None, _values)
+            metadata_slots.edit(audio, normalized, cover, cover_info, slot_selection)
+            audio.save()
         except (ValueError, TypeError, OverflowError) as exc:
             raise MediaError('invalid_metadata', 'Invalid metadata or conflicting cover slots') from exc
     else:
@@ -638,21 +657,7 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
                 audio[field] = values
             elif field in audio:
                 del audio[field]
-        if normalized is not None:
-            if normalized:
-                audio["lyrics"] = [normalized]
-            elif "lyrics" in audio:
-                del audio["lyrics"]
-        if cover is not None:
-            fronts = [picture for picture in audio.pictures if picture.type == 3]
-            if len(fronts) > 1:
-                raise MediaError("cover_conflict", "Multiple front covers require an explicit selection")
-            others = [picture for picture in audio.pictures if picture.type != 3]
-            image = Picture()
-            image.type, image.mime, image.width, image.height, image.depth, image.data = 3, cover_info[0], cover_info[1], cover_info[2], 24, cover
-            audio.clear_pictures()
-            for picture in [*others, image]:
-                audio.add_picture(picture)
+        metadata_slots.edit(audio, normalized, cover, cover_info, slot_selection)
         audio.save()
 
 
@@ -677,7 +682,7 @@ def _chunk_signature(path):
     return result
 
 
-def _untouched_signature(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | None) -> dict[str, Any]:
+def _untouched_signature(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | None, chosen_slots=None) -> dict[str, Any]:
     """Verify untouched metadata as well as codec packets before replacing target."""
     with _file(path) as stream:
         audio = _load_audio(stream)
@@ -693,7 +698,9 @@ def _untouched_signature(path: Path, tags: Mapping[str, Any], lrc: str | None, c
                       and not (cover is not None and key.startswith("APIC:") and frame.type == 3)}
             return {"frames": frames, "unknown": [hashlib.sha256(raw).hexdigest() for raw in audio.tags.unknown_frames], **({"chunks":_chunk_signature(path)} if isinstance(audio,(WAVE,AIFF)) else {})}
         if isinstance(audio, formats.PROFILES):
-            return formats.untouched(audio, tags, lrc, cover)
+            target = (chosen_slots or {}).get('cover') or {}
+            index = target.get('_index', int(target['native_identity'].split(':')[-1]) if target.get('native_identity', '').startswith('covr:') else 0)
+            return formats.untouched(audio, tags, lrc, cover, cover_index=index)
         if isinstance(audio, FLAC):
             excluded = {key.lower() for key in tags}
             if lrc is not None:
@@ -786,7 +793,7 @@ def _journal(path: Path, document: dict[str, Any]) -> None:
 
 def _transaction(target: Path, staged: Path, *, before: str | None, backup_dir: Path,
                  roots: Mapping[str, Any], authorize: Callable[[], None] | None = None,
-                 source_backup: Path | None = None, action: str = "apply") -> dict[str, Any]:
+                 source_backup: Path | None = None, action: str = "apply", metadata_slot_targets=None) -> dict[str, Any]:
     operation_id = uuid.uuid4().hex
     if any(_within(backup_dir, _absolute(value)) or _within(_absolute(value), backup_dir)
            for key, value in roots.items() if key in {"source", "work", "publication"} and value):
@@ -805,6 +812,10 @@ def _transaction(target: Path, staged: Path, *, before: str | None, backup_dir: 
                 "operation": "replace" if before else "create", "state": "prepared",
                 "target": str(target), "staged": str(staged), "backup": str(backup) if backup else None,
                 "before_sha256": before, "after_sha256": after, "created_at": time.time()}
+    if metadata_slot_targets is not None:
+        if set(metadata_slot_targets) - {'lyrics', 'cover'} or any(not isinstance(value, str) or len(value) > 2048 for value in metadata_slot_targets.values()):
+            raise MediaError('invalid_slot_selection', 'Invalid durable native slot identity')
+        document['metadata_slot_targets'] = metadata_slot_targets
     _journal(journal_path, document)
     try:
         _validate(target, roots, write=True, missing=before is None)
@@ -826,7 +837,8 @@ def _transaction(target: Path, staged: Path, *, before: str | None, backup_dir: 
         # Do not delete stage/backup/journal: recovery needs all three if sync failed.
         raise
     return {"operation_id": operation_id, "sha256": after, "after_sha256": after, "before_sha256": before,
-            "backup_path": str(backup) if backup else None, "journal_path": str(journal_path), "state": "committed"}
+            "backup_path": str(backup) if backup else None, "journal_path": str(journal_path), "state": "committed",
+            **({'metadata_slot_targets': metadata_slot_targets} if metadata_slot_targets is not None else {})}
 
 
 def _stage(target: Path, source: Path, directory: Path | None = None) -> Path:
@@ -847,7 +859,7 @@ def _staging_directory(target: Path, roots: Mapping[str, Any]) -> Path | None:
 def _apply_changes_impl(path: str | Path, tags: Mapping[str, Any], lrc: str | None,
                   expected_sha256: str, backup_dir: str | Path, roots: Mapping[str, Any],
                   cover: bytes | None = None, *, authorize: Callable[[], None] | None = None,
-                  full_decode: bool = True) -> dict[str, Any]:
+                  full_decode: bool = True, slot_selection=None) -> dict[str, Any]:
     _mutation_supported()
     path = _validate(path, roots, write=True)
     if "work" not in roots or not _within(path, _absolute(roots["work"])):
@@ -857,25 +869,40 @@ def _apply_changes_impl(path: str | Path, tags: Mapping[str, Any], lrc: str | No
     if not metadata["write_supported"]:
         raise MediaError("unsupported_format", str(metadata["write_block_reason"]))
     before_audio = audio_identity(path)
-    untouched = _untouched_signature(path, tags, lrc, cover)
+    original_native = _load_audio(path)
+    chosen_slots = metadata_slots.targets(original_native, slot_selection, lyrics=lrc is not None, cover=cover is not None)
+    preservation_targets = metadata_slots.planned_targets(original_native, chosen_slots)
+    preserved_slots = metadata_slots.preservation(original_native, preservation_targets)
+    post_targets = dict(preservation_targets)
+    normalized_lrc = serialize_lrc(parse_lrc(lrc)) if lrc is not None else None
+    if normalized_lrc == '' and chosen_slots.get('lyrics') and '_index' in chosen_slots['lyrics']:
+        # Removing one comment/MP4 value shifts subsequent native indexes.
+        # Compare all remaining values as a multiset instead of excluding the
+        # newly shifted neighbour under the removed value's old index.
+        post_targets['lyrics'] = {'native_identity': '<removed-native-value>'}
+    untouched = _untouched_signature(path, tags, lrc, cover, preservation_targets)
     staged = _stage(path, path)
-    _edit(staged, tags, lrc, cover)
+    if slot_selection:
+        _edit(staged, tags, lrc, cover, slot_selection)
+    else:
+        _edit(staged, tags, lrc, cover)
     if audio_identity(staged) != before_audio:
         raise MediaError("audio_changed", "Tag staging changed the encoded audio packets")
-    if _untouched_signature(staged, tags, lrc, cover) != untouched:
+    if _untouched_signature(staged, tags, lrc, cover, preservation_targets) != untouched:
         raise MediaError("metadata_changed", "Tag staging changed unrelated metadata")
     checked = inspect_audio(staged, roots)
+    staged_native = _load_audio(staged)
+    if metadata_slots.preservation(staged_native, post_targets) != preserved_slots:
+        raise MediaError('metadata_changed', 'Tag staging changed an unselected native metadata slot')
+    metadata_slots.verify(staged_native, post_targets, normalized_lrc, cover)
     for key, value in tags.items():
         if checked["tags"].get(key, []) != _values(value):
             raise MediaError("verification_failed", "A requested tag did not survive independent reopening")
-    if lrc is not None and checked["lrc"] != serialize_lrc(parse_lrc(lrc)) and lrc.strip():
-        raise MediaError("verification_failed", "Lyrics did not survive independent reopening")
-    if cover is not None and read_art(staged, roots) != (cover, _cover(cover)[0]):
-        raise MediaError("verification_failed", "Cover did not survive independent reopening")
     if full_decode:
         _process(staged, "ffmpeg", ["-nostdin", "-xerror", "-map", "0:a:0", "-f", "null", "-"], timeout=1800)
     _preserve_access(path, staged)
-    result = _transaction(path, staged, before=expected_sha256, backup_dir=_absolute(backup_dir), roots=roots, authorize=authorize)
+    result = _transaction(path, staged, before=expected_sha256, backup_dir=_absolute(backup_dir), roots=roots, authorize=authorize,
+                          metadata_slot_targets={kind: slot['native_identity'] for kind, slot in preservation_targets.items()})
     result["audio_identity"] = before_audio
     return result
 
@@ -979,13 +1006,13 @@ def _reserve_filesystem_space(requests: list[tuple[Path, int]]) -> Iterator[None
 def apply_changes(path: str | Path, tags: Mapping[str, Any], lrc: str | None,
                   expected_sha256: str, backup_dir: str | Path, roots: Mapping[str, Any],
                   cover: bytes | None = None, *, authorize: Callable[[], None] | None = None,
-                  full_decode: bool = True) -> dict[str, Any]:
+                  full_decode: bool = True, slot_selection=None) -> dict[str, Any]:
     _mutation_supported()
     target = _validate(path, roots, write=True)
     size = target.stat().st_size
     with _reserve_filesystem_space([(target.parent, size + _TAG_GROWTH_BUDGET), (_absolute(backup_dir), size)]):
         return _apply_changes_impl(path, tags, lrc, expected_sha256, backup_dir, roots, cover,
-                                   authorize=authorize, full_decode=full_decode)
+                                   authorize=authorize, full_decode=full_decode, slot_selection=slot_selection)
 
 
 def rollback(path: str | Path, backup_path: str | Path, expected_sha256: str,

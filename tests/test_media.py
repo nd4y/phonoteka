@@ -121,6 +121,18 @@ def test_changed_audio_during_signal_measurement_still_fails_audit(make_audio, r
     assert result["state"] == "failed" and result["error"] == "conflict"
 
 
+def test_decoder_layout_note_does_not_hide_additional_decode_warning():
+    # First line was captured from the supported FFmpeg on a generated WAV.
+    benign=b'Guessed Channel Layout for Input Stream #0.0 : mono\n'
+    notes,warnings=media._decoder_diagnostics(benign)
+    assert notes[0]['code']=='decoder_channel_layout_inferred' and not warnings
+    for genuine in (b'[flac @ 0x123] invalid sync code\n',b'Unexpected end of input\n',
+                    b'Guessed Channel Layout for Input Stream #0.0 : 5.1\n'):
+        notes,warnings=media._decoder_diagnostics(benign+genuine)
+        assert notes and warnings[0]['code']=='decoder_diagnostics'
+        assert '0x123' not in json.dumps((notes,warnings))
+
+
 def test_lrc_occurrences_offset_and_normalized_serialization():
     parsed = media.parse_lrc("\ufeff[offset:+500]\n[00:10][00:40]Припев\n[00:20.5]Куплет\n[01:01.010]")
     assert [line["start_ms"] for line in parsed["lines"]] == [9500, 20000, 39500, 60510]

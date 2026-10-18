@@ -73,6 +73,7 @@ def backup(settings,destination):
                     if not path.is_file() and not path.is_dir():raise ValueError('Special backup artifact rejected')
                 shutil.copytree(source,stage/name)
             manifest={'contract':'phonoteka-state-v1','schema':db.SCHEMA_VERSION,'version':__version__,'created_at':db.utcnow(),
+                      'source_state_dir':str(settings.state_dir.absolute()),
                       'music_included':False,'secrets_included':False,'authentication_hash_included':True,'files':[]}
             for path in sorted(stage.rglob('*')):
                 if path.is_file():
@@ -85,6 +86,43 @@ def backup(settings,destination):
     return {'path':str(dest),'files':len(manifest['files']),'verified':True,'music_included':False}
 
 
+def _restore_handles(stage, destination, manifest):
+    """Relocate internal handles to verified copied artifacts, never old state.
+
+    Older v1 snapshots have no source root. Their unique backups/... suffix is
+    accepted only when that exact artifact is in the verified manifest.
+    Music target/staging paths and immutable export contents are not rewritten.
+    """
+    names={item['path'] for item in manifest['files']}
+    source_root=Path(manifest['source_state_dir']) if manifest.get('source_state_dir') else None
+    def relative_handle(value):
+        if not value or not isinstance(value,str):return None
+        path=Path(value)
+        if not path.is_absolute() or '..' in path.parts:return None
+        if source_root is not None:
+            try:relative=path.relative_to(source_root).as_posix()
+            except ValueError:return None
+            return relative if relative.startswith('backups/') and relative in names else None
+        candidates=[name for name in names if name.startswith('backups/') and path.as_posix().endswith('/'+name)]
+        return candidates[0] if len(candidates)==1 else None
+    with db.transaction(stage/'phonoteka.sqlite3') as conn:
+        for row in conn.execute('SELECT id,details FROM history').fetchall():
+            details=json.loads(row['details'])
+            for key in ('backup_path','journal_path'):
+                if details.get(key):
+                    relative=relative_handle(details[key])
+                    details[key]=str(destination/relative) if relative else None
+            conn.execute('UPDATE history SET details=? WHERE id=?',(db.encode(details),row['id']))
+    for name in names:
+        if not name.startswith('backups/') or not name.endswith('.json'):continue
+        path=stage/name
+        document=json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(document,dict) and document.get('backup'):
+            relative=relative_handle(document['backup'])
+            document['backup']=str(destination/relative) if relative else None
+            media._journal(path,document)
+
+
 def restore(directory,destination):
     source=Path(directory).absolute();manifest=verify(source)
     dest=safe_destination(destination,[source]);media._no_links(dest.parent)
@@ -94,6 +132,7 @@ def restore(directory,destination):
             target=stage/entry['path'];target.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(source/entry['path'],target);os.chmod(target,0o600)
             if digest(target)!=entry['sha256']:raise ValueError('Backup changed during restore')
+        _restore_handles(stage,dest,manifest)
         with db.transaction(stage/'phonoteka.sqlite3') as conn:
             conn.execute('DELETE FROM sessions');conn.execute('DELETE FROM api_tokens')
             conn.execute("DELETE FROM settings WHERE key LIKE 'export_lease:%'")

@@ -36,12 +36,15 @@ def bearer(request,settings):
     scopes=json.loads(row['scopes']);path=request.url.path.replace('/api/v1/','/api/',1)
     allowed=False
     if request.method=='GET':
-        allowed='read' in scopes and (path in {'/api/summary','/api/providers','/api/events','/api/openapi.json'} or path.startswith(('/api/tracks','/api/jobs','/api/reports','/api/exports','/api/release-reviews')))
+        allowed='read' in scopes and (path in {'/api/summary','/api/providers','/api/events','/api/openapi.json'} or path.startswith(('/api/tracks','/api/jobs','/api/reports','/api/exports','/api/release-reviews','/api/publications','/api/album-gain-groups')))
     elif request.method=='POST':
         if path=='/api/jobs' or re.fullmatch(r'/api/jobs/[^/]+/(cancel|pause|resume)',path):allowed=bool(set(scopes)&{'jobs:analysis','jobs:write'})
         elif re.fullmatch(r'/api/tracks/[^/]+/(proposal|analysis/select)',path):allowed='jobs:write' in scopes
         elif path=='/api/deliveries':allowed='jobs:write' in scopes
+        elif path=='/api/publications/plan' or re.fullmatch(r'/api/(proposals/[^/]+/apply|publications/[^/]+/commit|revisions/[^/]+/rollback)',path):allowed='jobs:write' in scopes
         elif path=='/api/export-leases' or re.fullmatch(r'/api/export-leases/[^/]+/renew',path):allowed='jobs:write' in scopes
+    elif request.method=='PATCH' and re.fullmatch(r'/api/proposals/[^/]+',path):
+        allowed='jobs:write' in scopes
     elif request.method=='DELETE' and re.fullmatch(r'/api/export-leases/[^/]+',path):
         allowed='jobs:write' in scopes
     if not allowed:raise security.error(403,'scope_denied','Недостаточно прав API-токена')

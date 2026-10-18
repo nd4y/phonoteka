@@ -44,9 +44,10 @@ def never_receiving_model(connection):
 
 
 def stalled_oversize_sender(connection):
-    connection.recv_bytes()
+    body = read_model_input(connection.recv_bytes())
     # A real transport header followed by a stalled body used to block the
     # supervisor inside recv_bytes(8 MiB), beyond its execution deadline.
+    (Path(body['_scratch_root']).parent/'oversized-header-sent').touch()
     os.write(connection.fileno(), struct.pack('!i', 8 * 1024**2))
     time.sleep(30)
 
@@ -73,13 +74,19 @@ def deadline_case(directory, result):
 
 def oversized_control_case(directory, result):
     if os.name == 'posix': os.setsid()
-    worker = ModelProcess(target=stalled_oversize_sender, deadline=.5, scratch_root=directory)
+    # Cold spawn imports can exceed .5 s on the supported 2-vCPU container.
+    # This case exercises a received oversized header, not the separate timeout
+    # path; the external watchdog still bounds a regression in recv_bytes.
+    worker = ModelProcess(target=stalled_oversize_sender, deadline=5, scratch_root=directory)
     try:
         worker.run({'generation':1})
         result.send({'error':'unexpected_success'})
     except BudgetError as error:
+        marker = Path(directory)/'oversized-header-sent'
+        header_sent = marker.is_file()
+        marker.unlink(missing_ok=True)
         result.send({'code':error.code,'unloaded':worker.process is None,'starts':worker.starts,
-                     'scratch_empty':not list(Path(directory).iterdir())})
+                     'header_sent':header_sent,'scratch_empty':not list(Path(directory).iterdir())})
     finally:
         worker.close(); result.close()
 
@@ -166,6 +173,7 @@ def test_shutdown_races_start_and_execution_without_unstarted_join_or_orphan(tmp
 def test_stalled_oversized_result_header_aborts_without_blocking_deadline(tmp_path):
     outcome = isolated_case(oversized_control_case, tmp_path)
     assert outcome.get('code') == 'inference_worker_protocol', outcome
+    assert outcome['header_sent'], outcome
     assert outcome['unloaded'] and outcome['starts'] == 1 and outcome['scratch_empty']
 
 

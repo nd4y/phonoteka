@@ -22,12 +22,15 @@ from urllib.parse import urlsplit
 
 from . import __version__, db, security, cue, reports, intake, youtube, job_activity, field_policy, media, provider_policy, comparison, lyrics_review
 from . import lyrics_document
+from . import media_slots
+from . import artwork
 from .lyrics_document import DocumentEdit as LyricsDocumentEdit
 from .telemetry import log
 from . import webhooks,provider_attempts
 from .config import Settings
 from . import publication
 from . import retention, export_leases
+from . import album_gain_policy, api_facades
 
 
 class LoginInput(BaseModel):
@@ -43,6 +46,9 @@ class ProposalInput(BaseModel):
     cover: str | None = Field(default=None, max_length=14 * 1024 * 1024)
     base_proposal_id: str | None = Field(default=None, min_length=1, max_length=36)
     lyrics_document: LyricsDocumentEdit | None = None
+    slot_selection: media_slots.SlotSelection | None = None
+    artwork_preview_id: str | None = Field(default=None, pattern='^[a-f0-9-]{36}$')
+    confirm_smaller_cover: bool = False
 
 
 class JobInput(BaseModel):
@@ -64,7 +70,8 @@ class BodyLimitMiddleware:
             nonlocal received
             msg = await receive()
             received += len(msg.get("body", b""))
-            if received > self.max_bytes:
+            limit = 29 * 1024 * 1024 if scope.get('path', '').endswith('/artwork-preview') else self.max_bytes
+            if received > limit:
                 raise security.error(413, "payload_too_large", "Размер запроса превышает лимит")
             return msg
         await self.app(scope, limited_receive, send)
@@ -94,6 +101,7 @@ def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, 
         **meta, "id": row["id"], "relative_path": row["relative_path"],
         "filename": Path(row["relative_path"]).name,
         "sha256": row["sha256"], "revision": row["sha256"], "status": row["status"],
+        "hash_verified_at": meta.get('hash_verified_at'),
         "can_write": settings.writable and not meta.get('cue_album_image') and bool(meta.get("write_supported", meta.get("format", "").lower() in {"mp3", "flac"})) and row["status"] != "missing",
         "tags": {key: (value[0] if value else "") if isinstance(value, list) else value for key, value in meta.get("tags", {}).items()},
         "tag_values": meta.get("tags", {}), "has_art": bool(meta.get("has_art", False)),
@@ -102,19 +110,27 @@ def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, 
     }
     if detail:
         result['lyrics_document'] = lyrics_document.public_document(settings, row)
+        result['artwork_transform'] = meta.get('artwork_transform')
         analysis = db.fetchone(settings.db_path,'SELECT * FROM analyses WHERE track_id=?',(row['id'],))
         result['analysis'] = {**provider_policy.public_analysis(settings,json.loads(analysis['payload'])), 'updated_at':analysis['updated_at'], 'stale':analysis['input_sha256']!=row['sha256']} if analysis else None
         result['analysis'] = lyrics_document.analysis_view(row, result['analysis'], result['lyrics_document'])
         rows = db.fetchall(settings.db_path, "SELECT * FROM history WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 100", (row["id"],))
-        result["history"] = [public_history(item) for item in rows]
+        result["history"] = [public_history(settings, item) for item in rows]
     return result
 
 
-def public_history(row):
+def public_history(settings, row):
     # Retention marks pruned versions; missing backups are never advertised.
     details = json.loads(row["details"])
     backup = Path(details['backup_path']) if details.get('backup_path') else None
-    if details.get('backup_pruned') or (backup and (not backup.is_file() or backup.is_symlink())):
+    retained = False
+    if backup:
+        try:
+            media._no_links(backup)
+            retained = backup.is_absolute() and '..' not in backup.parts and backup.is_relative_to(settings.state_dir.absolute()/'backups'/row['track_id']) and backup.is_file() and backup.stat().st_nlink == 1
+        except (OSError, media.MediaError):
+            pass
+    if details.get('backup_pruned') or not retained:
         details['backup_path'] = None
     # Paths of backups/journals are internal worker handles, never user input.
     safe = {key: val for key, val in details.items() if key not in {"backup_path", "journal_path", "target", "source", "destination"}}
@@ -193,7 +209,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     album_batch.install(app,settings)
     lyrics_review.install(app,settings)
     lyrics_document.install(app,settings)
+    media_slots.install(app,settings)
+    artwork.install(app,settings)
     publication.install(app,settings)
+    album_gain_policy.install(app,settings)
     from . import publication_sidecars
     publication_sidecars.install(app,settings)
     from . import automatic_quality
@@ -375,8 +394,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise security.error(422, "invalid_cover", "Неверный формат обложки")
             if len(data) > 10 * 1024 * 1024:
                 raise security.error(413, "cover_too_large", "Обложка превышает 10 МиБ")
+            try:
+                mime, _, _ = media._cover(data)
+                if mime != body.cover.split(';', 1)[0][5:]: raise media.MediaError('invalid_cover', 'MIME обложки не совпадает с содержимым')
+            except media.MediaError as exc: raise security.error(422, exc.code, exc.message) from exc
         now, identity = db.utcnow(), str(uuid.uuid4())
-        payload = body.model_dump(exclude_unset=True, exclude={"base_proposal_id", "lyrics_document"})
+        payload = body.model_dump(exclude_unset=True, exclude={"base_proposal_id", "lyrics_document", "artwork_preview_id", "confirm_smaller_cover"})
         with db.transaction(settings.db_path) as conn:
             row = conn.execute("SELECT * FROM tracks WHERE id=? AND is_current=1", (track_id,)).fetchone()
             if not row:
@@ -394,6 +417,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 previous = json.loads(base["payload"])
                 merged_tags = {**previous.get("tags", {}), **payload.get("tags", {})}
                 payload = {**previous, **payload, "tags": merged_tags}
+            payload = media_slots.validate_proposal(settings, row, payload)
+            if 'cover' in body.model_fields_set and not body.artwork_preview_id:
+                payload.pop('artwork_transform', None)
+            payload = artwork.proposal(conn, row, payload, body.artwork_preview_id, body.confirm_smaller_cover)
             if 'lrc' in body.model_fields_set and body.lyrics_document is None:
                 payload.pop('lyrics_document', None)
             try:
@@ -518,8 +545,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise security.error(428, "idempotency_key_required", "Передайте Idempotency-Key длиной до 128 символов")
         if body.kind in {"apply", "rollback", "publish", "rollback_ready", "publish_sidecars", "extract_cue", "normalize_audio"} and not settings.writable:
             raise security.error(409, "read_only", "Запись отключена до проверки конфигурации хранилища")
-        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode"}:
+        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
+        if 'publication_plan_id' in body.params and (body.kind != 'publish' or not re.fullmatch('[a-f0-9-]{36}', str(body.params['publication_plan_id']))):
+            raise security.error(422, 'invalid_params', 'План публикации относится только к publish')
+        if {'release_review_id','release_review_version'} & body.params.keys():
+            if body.kind != 'replaygain_album' or not re.fullmatch('[a-f0-9-]{36}', str(body.params.get('release_review_id',''))) or type(body.params.get('release_review_version')) is not int or body.params['release_review_version'] < 1:
+                raise security.error(422, 'invalid_params', 'Укажите точную версию принятого состава релиза для Album Gain')
         if 'acceptance_mode' in body.params and (body.kind != 'apply' or not isinstance(body.params['acceptance_mode'], str) or body.params['acceptance_mode'] not in {'manual', 'automatic'}):
             raise security.error(422, 'invalid_acceptance_mode', 'Режим manual/automatic применяется только к записи предложения')
         if body.kind == 'publish_sidecars':
@@ -614,6 +646,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 item = {"track_id": track_id, "sha256": track["sha256"], "relative_path": track["relative_path"]}
                 if body.kind == 'publish':
                     item['publication_review'] = lyrics_review.freeze_publication(settings, track, conn=conn)
+                    item['publication_target'] = publication.freeze_target(track)
+                    if body.params.get('publication_plan_id'):
+                        try:
+                            api_facades.bind_plan(conn, body.params['publication_plan_id'], ids, item)
+                        except media.MediaError as exc:
+                            raise security.error(409, exc.code, exc.message) from exc
                 if body.kind == 'rollback_ready':
                     try:
                         item.update(publication.rollback_selection(conn, track, body.params['history_id'], body.params['expected_ready_sha256']))
@@ -648,6 +686,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     item["proposal"] = json.loads(prop["payload"])
                     field_policy.require_payload(settings, conn, track, item['proposal'], 'apply')
                     item['proposal']=provider_policy.api_payload(conn,track,item['proposal'],'embed')
+                    try:
+                        album_gain_policy.payload(settings, conn, track, item['proposal'])
+                    except media.MediaError as exc:
+                        raise security.error(409, exc.code, exc.message) from exc
                     item['acceptance_mode'] = body.params.get('acceptance_mode', 'manual')
                     if item['acceptance_mode'] == 'automatic':
                         try:
@@ -816,7 +858,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     yield f"id: {row['id']}\nevent: {row['kind']}\ndata: {row['payload']}\n\n"
                 if not rows:
                     yield ": keepalive\n\n"
-                await asyncio.sleep(2)
+                # Drain replay batches promptly, then poll at a bounded rate.
+                # A fixed two-second wait made ordinary progress visibly lag.
+                await asyncio.sleep(0 if len(rows) == 100 else .5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no", "Cache-Control": "private, no-store"})
 
     @app.get("/api/openapi.json")
@@ -824,6 +868,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         security.require_session(request, settings)
         return app.openapi()
 
+    api_facades.install(app, settings, JobInput, ProposalInput, create_job, proposal)
     # Versioned production contract and temporary alpha frontend alias share handlers.
     for route in list(app.routes):
         if getattr(route, "path", "").startswith("/api/"):

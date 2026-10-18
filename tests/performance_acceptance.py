@@ -117,9 +117,17 @@ def process_sample():
                         for line in Path(f"/proc/{identity}/status").read_text().splitlines():
                             if line.startswith("VmRSS:"):
                                 child_rss += int(line.split()[1]) * 1024
+    parent_fd = len(list(Path("/proc/self/fd").iterdir()))
+    def cgroup_integer(name):
+        with suppress(OSError, ValueError):
+            return int(Path('/sys/fs/cgroup', name).read_text().strip())
+        return None
     return {"at": time.monotonic(), "rss_bytes": values.get("VmRSS"), "rss_high_water_bytes": values.get("VmHWM"),
-            "threads": values.get("Threads"), "fd": len(list(Path("/proc/self/fd").iterdir())),
-            "child_process_count": len(descendants), "child_rss_bytes": child_rss, "child_fd": child_fd}
+            "threads": values.get("Threads"), "fd": parent_fd,
+            "child_process_count": len(descendants), "child_rss_bytes": child_rss, "child_fd": child_fd,
+            "combined_rss_bytes": (values.get("VmRSS") or 0) + child_rss, "combined_fd": parent_fd + child_fd,
+            "cgroup_memory_current_bytes": cgroup_integer('memory.current'),
+            "cgroup_memory_peak_bytes": cgroup_integer('memory.peak')}
 
 
 def serve(base, port, fd, interval, real_audio=False):
@@ -131,11 +139,20 @@ def serve(base, port, fd, interval, real_audio=False):
     configure_logging("performance-acceptance")
     settings = settings_for(base, port)
     app = create_app(settings)
-    readings = {"lag_ms": [], "resources": [], "task_counts": [], "background_errors": [], "updates": 0, "real_audio": real_audio, "spans": [], "max_active": 0, "active": 0, "batches": 0}
+    readings = {"lag_ms": [], "resources": [], "task_counts": [], "background_errors": [], "updates": 0,
+                "real_audio": real_audio, "spans": [], "active": 0, "batches": 0, "progress": [], "failed_jobs": []}
     stop = threading.Event()
     allocator = threading.Lock()
     next_item = 0
     records = db.fetchone(settings.db_path, "SELECT COUNT(*) AS count FROM tracks")["count"]
+    # Instrument only this disposable server. Durable event timestamps allow
+    # actual Worker SSE latency to be measured, without changing product events.
+    original_event = db.event
+    def observed_event(connection, kind, payload):
+        if str(payload.get('job_id', '')).startswith('performance-audit-'):
+            payload = {**payload, 'benchmark_emitted_at': time.monotonic()}
+        return original_event(connection, kind, payload)
+    db.event = observed_event
 
     def writer(worker):
         nonlocal next_item
@@ -155,7 +172,9 @@ def serve(base, port, fd, interval, real_audio=False):
                     count = connection.execute("SELECT completed FROM jobs WHERE id=?", ("synthetic-background",)).fetchone()[0]
                     db.event(connection, "job_progress", {"job_id": "synthetic-background", "track_id": identity,
                              "completed": count, "failed": 0, "state": "done", "benchmark_emitted_at": time.monotonic()})
-                readings["updates"] += 1
+                with allocator:
+                    readings["updates"] += 1
+                    readings["progress"].append({'at': time.monotonic(), 'updates': readings['updates']})
             except Exception as error:
                 readings["background_errors"].append(type(error).__name__)
                 return
@@ -183,12 +202,13 @@ def serve(base, port, fd, interval, real_audio=False):
         def observed(job,item):
             started=time.monotonic();thread_id=threading.get_native_id()
             with allocator:
-                readings['active']+=1;readings['max_active']=max(readings['max_active'],readings['active'])
+                readings['active']+=1
+                active=readings['active']
             try:return original(job,item)
             finally:
                 with allocator:
                     readings['active']-=1
-                    if len(readings['spans'])<64:readings['spans'].append({'start':started,'end':time.monotonic(),'thread_id':thread_id})
+                    readings['spans'].append({'start':started,'end':time.monotonic(),'thread_id':thread_id,'concurrent':active})
         audio_worker.process_item=observed
         audio_task=asyncio.create_task(audio_worker.run(),name='real-four-file-workers')
         try:
@@ -210,11 +230,19 @@ def serve(base, port, fd, interval, real_audio=False):
                     await asyncio.to_thread(enqueue)
                     readings['batches']+=1
                 stats=await asyncio.to_thread(db.fetchone,settings.db_path,"SELECT COALESCE(SUM(completed),0) AS n,COALESCE(SUM(failed),0) AS failed FROM jobs")
-                readings['updates']=stats['n']
-                if stats['failed']:raise RuntimeError('Real audio audit failed during load')
+                if readings['updates'] != stats['n']:
+                    readings['updates']=stats['n']
+                    readings['progress'].append({'at':time.monotonic(),'updates':stats['n']})
+                if stats['failed']:
+                    def failed_summary():
+                        with db.connect(settings.db_path) as connection:
+                            rows=connection.execute("SELECT job_id,item_key,state,result FROM job_items WHERE state='failed' LIMIT 16").fetchall()
+                            return [dict(row) for row in rows]
+                    readings['failed_jobs']=await asyncio.to_thread(failed_summary)
+                    raise RuntimeError('Real audio audit failed during load')
                 await asyncio.sleep(max(1,interval*4))
         except asyncio.CancelledError:raise
-        except Exception as error:readings['background_errors'].append(type(error).__name__)
+        except Exception as error:readings['background_errors'].append({'type':type(error).__name__,'reason':str(error)[:300]})
 
     @app.get("/__acceptance/observations", include_in_schema=False)
     async def observations():
@@ -310,11 +338,15 @@ async def exercise(base_url, password, args, process):
                         elif line.startswith("data:"):
                             payload = json.loads(line[5:])
                             if payload.get("job_id") == "synthetic-background" or str(payload.get('job_id','')).startswith('performance-audit-'):
+                                if started is not None and payload.get('benchmark_emitted_at', started) < started:
+                                    continue
                                 sse[index]["events"] += 1
                                 if "benchmark_emitted_at" in payload:
                                     sse[index]["delivery_ms"].append(max(0, time.monotonic() - payload["benchmark_emitted_at"]) * 1000)
                         if stopping.is_set():
                             break
+                    if not stopping.is_set():
+                        sse[index]['errors'].append('stream_ended_early')
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -330,6 +362,12 @@ async def exercise(base_url, password, args, process):
         baseline = (await clients[0].get("/__acceptance/observations")).json()
         baseline_lag = len(baseline["lag_ms"])
         baseline_resources = len(baseline["resources"])
+        baseline_tasks = len(baseline['task_counts'])
+        baseline_updates = baseline['updates']
+        for session in sse:
+            session['warmup_events'] = session['events']
+            session['events'] = 0
+            session['delivery_ms'] = []
         started = time.monotonic()
         ticket = 0
 
@@ -368,9 +406,16 @@ async def exercise(base_url, password, args, process):
         await asyncio.gather(*(load(index) for index in range(args.concurrency)))
         await asyncio.sleep(max(0, started + args.duration_seconds - time.monotonic()))
         elapsed = time.monotonic() - started
+        for index, task in enumerate(sse_tasks):
+            sse[index]['alive_at_measurement_end'] = not task.done()
         observations = (await clients[0].get("/__acceptance/observations")).json()
         observations["lag_ms"] = observations["lag_ms"][baseline_lag:]
         observations["resources"] = observations["resources"][baseline_resources:]
+        observations['task_counts'] = observations['task_counts'][baseline_tasks:]
+        observations['updates'] -= baseline_updates
+        observations['progress'] = [point for point in observations['progress'] if started <= point['at'] <= started + elapsed]
+        observations['spans'] = [span for span in observations['spans'] if started <= span['start'] <= started + elapsed]
+        observations['measurement_started_at_monotonic'] = started
         return {"elapsed_seconds": elapsed, "requests": {name: distribution(values) for name, values in latencies.items()},
                 "failures": failures, "checks": checks, "sse": sse, "observations": observations}
     finally:
@@ -390,7 +435,7 @@ def summarize(result, args):
     samples = observations["resources"]
     window = max(1, min(30, len(samples) // 4))
     growth = {}
-    for name in ("rss_bytes", "fd"):
+    for name in ("rss_bytes", "fd", 'combined_rss_bytes', 'combined_fd', 'cgroup_memory_current_bytes'):
         values = [sample[name] for sample in samples if sample.get(name) is not None]
         growth[name] = {"first_window_mean": statistics.mean(values[:window]) if values else None,
                         "last_window_mean": statistics.mean(values[-window:]) if values else None,
@@ -401,11 +446,22 @@ def summarize(result, args):
                            "async_tasks": distribution(observations["task_counts"]),
                            "server_child_processes_peak": max((sample["child_process_count"] for sample in samples), default=None),
                            "server_children_rss_peak_bytes": max((sample["child_rss_bytes"] for sample in samples), default=None),
-                           "server_children_fd_peak": max((sample["child_fd"] for sample in samples), default=None)}
+                           "server_children_fd_peak": max((sample["child_fd"] for sample in samples), default=None),
+                           "cgroup_memory_peak_bytes": max((sample.get('cgroup_memory_peak_bytes') or 0 for sample in samples), default=None)}
     result["event_loop_lag_ms"] = distribution(observations["lag_ms"])
+    measured_start = observations['measurement_started_at_monotonic']
+    measured_end = measured_start + result['elapsed_seconds']
+    progress_times = [point['at'] for point in observations['progress']]
+    progress_gaps = [b-a for a,b in zip([measured_start, *progress_times], [*progress_times, measured_end])]
+    maximum_gap = max(progress_gaps, default=result['elapsed_seconds'])
+    allowed_gap = min(60, max(20, args.duration_seconds * .1))
+    max_concurrent = max((span['concurrent'] for span in observations['spans']), default=0)
     result["background"] = {"kind": "real Worker and FFmpeg audit of 16 generated FLAC fixtures, repeated bounded batches" if observations['real_audio'] else "synthetic short SQLite transactions and durable SSE events", "workers": 4,
                             "updates": observations["updates"], "errors": observations["background_errors"],
-                            "batches":observations['batches'],"max_concurrent_files":observations['max_active'],"first_processing_spans":observations['spans']}
+                            "batches":observations['batches'],"max_concurrent_files":max_concurrent,
+                            "processing_spans":observations['spans'], 'progress':observations['progress'],
+                            'max_measured_progress_gap_seconds':maximum_gap, 'allowed_progress_gap_seconds':allowed_gap,
+                            'failed_jobs': observations['failed_jobs']}
     for session in result["sse"]:
         session["delivery_ms"] = distribution(session["delivery_ms"])
     request_count = sum(item["samples"] for item in result["requests"].values())
@@ -419,11 +475,15 @@ def summarize(result, args):
         "all_http_succeeded": not result["failures"] and request_count == args.samples,
         "list_search_status_each_p95_under_1000ms": all(item["p95"] is not None and item["p95"] <= 1000 for item in result["requests"].values()),
         "event_loop_lag_p95_under_100ms": result["event_loop_lag_ms"]["p95"] is not None and result["event_loop_lag_ms"]["p95"] <= 100,
-        "both_sse_sessions_received_updates": all(session["events"] > 0 and not session["errors"] for session in result["sse"]),
-        "background_progressed": observations["updates"] > 0 and not observations["background_errors"],
+        "both_sse_sessions_received_updates": all(session["events"] > 0 and not session["errors"] and session['alive_at_measurement_end'] for session in result["sse"]),
+        "both_sse_sessions_delivery_p95_under_1000ms": all(session['delivery_ms']['p95'] is not None and session['delivery_ms']['p95'] <= 1000 for session in result['sse']),
+        "background_progressed_throughout_measurement": observations["updates"] > 0 and not observations["background_errors"] and maximum_gap <= allowed_gap,
         "rss_growth_within_configured_regression_limit": growth["rss_bytes"]["delta"] is not None and growth["rss_bytes"]["delta"] <= args.max_rss_growth_mib * 1024 ** 2,
         "fd_growth_within_configured_regression_limit": growth["fd"]["delta"] is not None and growth["fd"]["delta"] <= args.max_fd_growth,
-        "real_audio_concurrency_observed": not args.real_audio_workers or observations['max_active']>=2 and len({span['thread_id'] for span in observations['spans']})>=2,
+        "combined_rss_growth_within_configured_regression_limit": growth['combined_rss_bytes']['delta'] is not None and growth['combined_rss_bytes']['delta'] <= args.max_rss_growth_mib * 1024**2,
+        "combined_fd_growth_within_configured_regression_limit": growth['combined_fd']['delta'] is not None and growth['combined_fd']['delta'] <= args.max_fd_growth,
+        "cgroup_memory_growth_within_configured_regression_limit": growth['cgroup_memory_current_bytes']['delta'] is not None and growth['cgroup_memory_current_bytes']['delta'] <= args.max_rss_growth_mib * 1024**2,
+        "real_audio_concurrency_observed": not args.real_audio_workers or max_concurrent >= 4 and len({span['thread_id'] for span in observations['spans']})>=4,
         **result.pop("checks"),
     }
     result["passed_measured_checks"] = all(result["criteria"].values())
@@ -456,7 +516,7 @@ def main():
     if not (2 <= args.duration_seconds <= 7200 and 6 <= args.samples <= 100000 and 30 <= args.records <= 100000
             and 2 <= args.concurrency <= 16 and 0 <= args.warmup_requests <= 300):
         parser.error("bounded profile required: duration 2..7200, samples 6..100000, records 30..100000, concurrency 2..16")
-    result = {"started_at": datetime.now(timezone.utc).isoformat(), "harness": "isolated-real-http-v2"}
+    result = {"started_at": datetime.now(timezone.utc).isoformat(), "harness": "isolated-real-http-v3"}
     with tempfile.TemporaryDirectory(prefix="phonoteka-performance-") as directory:
         base = Path(directory)
         listener = socket.socket()
@@ -492,6 +552,8 @@ def main():
                 clean = child.returncode in (0, -signal.SIGTERM) and 'service_stopping' in stopped_log
                 result.setdefault("criteria", {})["server_shutdown_clean"] = clean
                 result["passed_measured_checks"] = result["passed_measured_checks"] and clean
+                if not result['passed_measured_checks']:
+                    result['server_log_tail'] = stopped_log
         result["temporary_state_removed_after_report"] = True
     payload = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output:

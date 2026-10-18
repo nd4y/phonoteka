@@ -139,7 +139,7 @@ class Metrics:
         provider = bounded(provider, PROVIDERS); started = time.perf_counter(); outcome = 'success'
         try: yield
         except BaseException as exc:
-            outcome = bounded(getattr(exc,'code','error'), {'rate_limited','provider_unavailable','provider_cooldown','provider_unauthorized','budget_exhausted','provider_disabled'})
+            outcome = bounded(getattr(exc,'code','error'), {'rate_limited','provider_unavailable','provider_cooldown','provider_unauthorized','budget_exhausted','provider_disabled','recognition_attempt_budget_exhausted','recognition_identity_required','unknown_outcome'})
             if outcome == 'other': outcome = 'error'
             log('provider_operation_failed', logging.WARNING, provider=provider, operation=operation, code=outcome, error_type=type(exc).__name__)
             raise

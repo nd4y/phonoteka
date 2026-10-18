@@ -14,6 +14,27 @@ def ready_target(settings, relative, *, write=False, missing=False):
     return media._validate(settings.publication_root / 'Ready' / path, settings.roots, write=write, missing=missing)
 
 
+def freeze_target(row):
+    metadata = json.loads(row['metadata'])
+    previous = metadata.get('publication')
+    return {'contract': 'ready-target-v1', 'track_id': row['id'], 'work_revision': row['sha256'],
+            'ready_path': intake.publication_relative(row['relative_path'], metadata),
+            'expected_publication': previous, 'expected_ready_sha256': previous.get('sha256') if previous else None}
+
+
+def assert_target(settings, row, frozen):
+    if not isinstance(frozen, dict) or frozen != freeze_target(row):
+        raise media.MediaError('conflict', 'Состояние Ready изменилось после утверждения плана публикации')
+    target = ready_target(settings, frozen['ready_path'], write=True, missing=True)
+    expected = frozen['expected_ready_sha256']
+    if expected is None:
+        if target.exists():
+            raise media.MediaError('conflict', 'В Ready уже существует файл без утвержденной исходной ревизии')
+    elif not target.is_file() or media.sha256_file(target) != expected:
+        raise media.MediaError('conflict', 'Файл Ready изменился после утверждения плана')
+    return frozen
+
+
 def intent_key(job_id, track_id):
     return 'publication_intent:' + job_id + ':' + track_id
 
@@ -78,6 +99,8 @@ def persist(settings, job, item, result):
         meta['publication'] = after
         if job['kind'] == 'publish' and intent.get('audit'):
             meta['audit'] = intent['audit']
+            if intent['audit'].get('hash_verified_at'):
+                meta['hash_verified_at'] = intent['audit']['hash_verified_at']
         conn.execute('UPDATE tracks SET metadata=?,updated_at=? WHERE id=? AND sha256=?',
                      (db.encode(meta), db.utcnow(), row['id'], intent['work_revision']))
         conn.execute('INSERT OR IGNORE INTO history VALUES(?,?,?,?,?,?,?,?)',

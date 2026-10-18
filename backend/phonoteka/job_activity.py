@@ -54,6 +54,7 @@ SAFE_CODES = {
     "inference_unavailable", "inference_timeout", "file_unavailable", "root_identity_changed",
     "insufficient_space",
     "provider_policy_expired", "provider_policy_denied",
+    "recognition_attempt_budget_exhausted", "recognition_identity_required",
 }
 
 

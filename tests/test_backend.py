@@ -109,8 +109,10 @@ def test_auth_cookie_csrf_and_private_endpoints(client, settings):
 
 def test_fingerprint_opt_in_and_preserved_asr(settings, monkeypatch):
     from phonoteka import recognition
+    synthetic(settings)
     with TestClient(create_app(settings),base_url=settings.app_url) as client:
-        headers=authenticated(client,settings);tid,sha=seed(settings)
+        headers=authenticated(client,settings);job(client,headers,'scan');drain(settings)
+        track=client.get('/api/tracks').json()['items'][0];tid,sha=track['id'],track['sha256']
         response=client.post('/api/jobs',json={'kind':'recognize','track_ids':[tid]},headers={**headers,'Idempotency-Key':'disabled-fp'})
         assert response.status_code==409
     cfg=replace(settings,external_fingerprints=True)
@@ -193,7 +195,9 @@ def test_proposal_base_retains_cover_and_rejects_stale_draft(client, settings):
     headers = authenticated(client, settings)
     tid, sha = seed(settings)
     h = {**headers, "If-Match": sha}
-    cover = "data:image/png;base64,iVBORw0KGgo="
+    import base64
+    from test_media import cover_bytes
+    cover = 'data:image/png;base64,' + base64.b64encode(cover_bytes()).decode()
     first = client.post(f"/api/tracks/{tid}/proposal", json={"tags": {"title": "Draft"}, "cover": cover}, headers=h)
     assert first.status_code == 201
     body = {"base_proposal_id": first.json()["id"], "tags": {"album": "Draft album"}}

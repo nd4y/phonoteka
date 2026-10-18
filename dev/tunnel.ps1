@@ -1,9 +1,12 @@
-param([ValidateSet('start','status','stop')][string]$Action = 'start')
+param([ValidateSet('start','status','stop')][string]$Action = 'start',
+      [ValidateRange(1024,65535)][int]$LocalPort = 8177,
+      [ValidateRange(1024,65535)][int]$RemotePort = 8177)
 $ErrorActionPreference = 'Stop'
-$tunnelRecord = Join-Path $env:TEMP 'phonoteka-build01-tunnel.json'
-$tunnelError = Join-Path $env:TEMP 'phonoteka-build01-tunnel.stderr.log'
-$tunnelOutput = Join-Path $env:TEMP 'phonoteka-build01-tunnel.stdout.log'
-$forwardSpec = '127.0.0.1:8177:127.0.0.1:8177'
+$recordSuffix = if ($LocalPort -eq 8177 -and $RemotePort -eq 8177) { '' } else { "-$LocalPort-$RemotePort" }
+$tunnelRecord = Join-Path $env:TEMP "phonoteka-build01-tunnel$recordSuffix.json"
+$tunnelError = Join-Path $env:TEMP "phonoteka-build01-tunnel$recordSuffix.stderr.log"
+$tunnelOutput = Join-Path $env:TEMP "phonoteka-build01-tunnel$recordSuffix.stdout.log"
+$forwardSpec = "127.0.0.1:${LocalPort}:127.0.0.1:${RemotePort}"
 $destination = 'av@192.168.0.21'
 $savedProcess = $null
 if (Test-Path -LiteralPath $tunnelRecord) {
@@ -22,12 +25,12 @@ if ($Action -eq 'stop') {
     return
 }
 if ($Action -eq 'status') {
-    [pscustomobject]@{ active = [bool]$savedProcess; pid = $savedProcess.ProcessId; url = 'http://127.0.0.1:8177' }
+    [pscustomobject]@{ active = [bool]$savedProcess; pid = $savedProcess.ProcessId; url = "http://127.0.0.1:$LocalPort" }
     return
 }
 if ($savedProcess) { Write-Output 'Project tunnel already running.'; return }
-if (Get-NetTCPConnection -State Listen -LocalPort 8177 -ErrorAction SilentlyContinue) {
-    throw 'Local port 8177 is occupied. Its process was not stopped.'
+if (Get-NetTCPConnection -State Listen -LocalPort $LocalPort -ErrorAction SilentlyContinue) {
+    throw "Local port $LocalPort is occupied. Its process was not stopped."
 }
 $sshExecutable = (Get-Command ssh.exe).Source
 $child = Start-Process -FilePath $sshExecutable -ArgumentList @(
@@ -40,9 +43,9 @@ if (-not $candidate) { throw "SSH failed to start; inspect $tunnelError" }
 @{pid=$child.Id;createdTicks=$candidate.CreationDate.ToUniversalTime().Ticks} |
     ConvertTo-Json | Set-Content -LiteralPath $tunnelRecord -Encoding utf8
 for ($attempt=0; $attempt -lt 20; $attempt++) {
-    $listener = Get-NetTCPConnection -State Listen -LocalPort 8177 -ErrorAction SilentlyContinue
+    $listener = Get-NetTCPConnection -State Listen -LocalPort $LocalPort -ErrorAction SilentlyContinue
     if ($listener -and $listener.OwningProcess -contains $child.Id) {
-        Write-Output "Tunnel ready: http://127.0.0.1:8177 (SSH PID $($child.Id))"
+        Write-Output "Tunnel ready: http://127.0.0.1:$LocalPort (SSH PID $($child.Id))"
         return
     }
     Start-Sleep -Milliseconds 250

@@ -111,6 +111,9 @@ class DatabaseCollector:
             cache[r['provider']]=(r['n'],r['bytes'])
         for name,help,fn in [('provider_requests_24h','Requests reserved in rolling 24h; gauge',lambda p:used.get(p,0)),('provider_budget_remaining','Remaining rolling daily request budget',lambda p:max(0,self.settings.provider_daily_limit-used.get(p,0))),('provider_cooldown_seconds','Provider cooldown remaining',lambda p:cooldown.get(p,0)),('provider_cache_entries','Non-expired cache entries',lambda p:cache.get(p,(0,0))[0]),('provider_cache_bytes','Non-expired cache payload bytes',lambda p:cache.get(p,(0,0))[1])]:
             result.append(gauge(name,help,[((p,),fn(p)) for p in PROVIDERS],['provider']))
+        recognition=conn.execute("SELECT COUNT(*) identities,COALESCE(SUM(json_extract(value,'$.calls')),0) spent,SUM(CASE WHEN json_extract(value,'$.calls')>=json_extract(value,'$.limit') THEN 1 ELSE 0 END) exhausted FROM settings WHERE key LIKE 'recognition_usage:%'").fetchone()
+        result.append(gauge('recognition_budget_identities','Persistent audio identity quotas; a new batch does not reset them',[(('open',),recognition['identities']-(recognition['exhausted'] or 0)),(('exhausted',),recognition['exhausted'] or 0)],['state']))
+        result.append(gauge('recognition_budget_spent_calls','Fingerprint reservations shared across providers and batches',[((),recognition['spent'])]))
         formats=('mp3','flac','m4a','mp4','ogg','opus','wav','aiff','aac','webm','mka','wma','ape','wv','cue','dsf','dff','ac3','unknown')
         format_counts={}; statuses={}; youtube={}
         for r in conn.execute("SELECT json_extract(metadata,'$.format') format,status,json_extract(metadata,'$.youtube.state') youtube,COUNT(*) n FROM tracks WHERE is_current=1 GROUP BY format,status,youtube"):
@@ -128,7 +131,7 @@ class DatabaseCollector:
         for r in conn.execute("""SELECT json_extract(s.value,'$.provider') provider,json_extract(s.value,'$.state') state,COUNT(*) n
           FROM analyses a JOIN tracks t ON t.id=a.track_id AND t.sha256=a.input_sha256 AND t.is_current=1,
           json_each(a.payload,'$.sources') s GROUP BY provider,state"""):
-            p=bounded(r['provider'],PROVIDERS);s=bounded(r['state'],('fingerprint_match','no_match','candidates','provider_unavailable','provider_cooldown','rate_limited','budget_exhausted','provider_disabled'))
+            p=bounded(r['provider'],PROVIDERS);s=bounded(r['state'],('fingerprint_match','no_match','candidates','provider_unavailable','provider_cooldown','rate_limited','budget_exhausted','provider_disabled','recognition_attempt_budget_exhausted','recognition_identity_required'))
             sources[p,s]=sources.get((p,s),0)+r['n']
         result.append(gauge('analysis_sources','Current revision analysis outcomes',[((p,s),n) for (p,s),n in sources.items()],['provider','state']))
         return result
