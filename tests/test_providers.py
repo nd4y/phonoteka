@@ -57,3 +57,21 @@ def test_query_inference_never_claims_embedded_evidence():
     query,source=query_tags({'tags':{}},'01. Singer - Song.mp3')
     assert query['artist']=='Singer' and query['title']=='Song'
     assert source=='filename_hint'
+
+
+def test_rate_limit_cooldown_and_incomplete_not_no_match(tmp_path):
+    calls=[]
+    def response(request):
+        calls.append(str(request.url))
+        if request.url.host=='musicbrainz.org':return httpx.Response(429,headers={'Retry-After':'120'})
+        return httpx.Response(200,json=[])
+    async def run():
+        p=Providers(settings(tmp_path),httpx.MockTransport(response))
+        meta={'sha256':'a'*64,'tags':{'title':['Song'],'artist':['Singer']},'duration':100}
+        first=await p.analyze(meta,'song.flac')
+        assert first['state']=='incomplete' and first['sources'][0]['state']=='rate_limited'
+        second=await p.analyze(meta,'song.flac')
+        assert second['state']=='incomplete' and second['sources'][0]['state']=='provider_cooldown'
+        assert len(calls)==2
+        await p.close()
+    asyncio.run(run())

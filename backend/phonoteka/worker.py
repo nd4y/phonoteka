@@ -225,7 +225,8 @@ class Worker:
                     previous_id, identity = identity, str(uuid.uuid4())
                     conn.execute("INSERT INTO tracks(id,relative_path,sha256,metadata,status,scan_id,created_at,updated_at) VALUES(?,?,?,?,'needs_review',?,?,?)", (identity,relative,meta["sha256"],db.encode(meta),scan_id,now,now))
                     db.event(conn, "file_replaced", {"previous_track_id": previous_id, "track_id": identity})
-                    return {"track_id": identity, "relative_path": relative, "identity_changed": True}
+                    if meta.get('input_error'): conn.execute("UPDATE tracks SET status='error' WHERE id=?",(identity,))
+                    return {"track_id": identity, "relative_path": relative, "identity_changed": True, **({'input_error':meta['input_error']} if meta.get('input_error') else {})}
                 if meta.get('format') == 'cue':
                     status = 'needs_review' if meta.get('cue', {}).get('errors') else 'indexed'
                 conn.execute("UPDATE tracks SET sha256=?,metadata=?,status=?,scan_id=?,updated_at=? WHERE id=?", (meta["sha256"],db.encode(meta),status,scan_id,now,identity))
@@ -403,7 +404,9 @@ class Worker:
         # Album artwork already next to the track is a local candidate, never an arbitrary path.
         if not meta.get('has_art'):
             local = await self.io(self.local_cover, path)
-            if local: result['candidates'].append(local)
+            if local:
+                result['candidates'].append(local)
+                result['state']='candidates'
         await self.io(media._expect, path, item['sha256'])
         if int(db.setting(self.settings.db_path, 'auth_epoch', '0')) != job['auth_epoch'] or self.cancelled(job['id']):
             raise media.MediaError('authorization_revoked','Analysis authorization revoked')

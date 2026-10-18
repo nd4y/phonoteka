@@ -458,3 +458,25 @@ def test_analysis_plain_lyrics_are_an_untimed_draft(client,settings):
     proposal=client.get(f'/api/tracks/{identity}').json()['proposal']
     assert proposal['lrc']=='Words without times'
     assert not media.parse_lrc(proposal['lrc'])['complete']
+
+
+def test_slow_inference_does_not_block_ordinary_queue(settings,monkeypatch):
+    from phonoteka import inference_client
+    settings=replace(settings,inference_url='http://inference:8001')
+    with TestClient(create_app(settings),base_url=settings.app_url) as client:
+        headers=authenticated(client,settings);identity,_=seed(settings)
+        long_job=job(client,headers,'transcribe',[identity]);ordinary=job(client,headers,'audit',[identity])
+        completed=[]
+        async def inference(worker,task,item):
+            for _ in range(100):
+                if completed:return {'draft':True}
+                await asyncio.sleep(.01)
+            raise AssertionError('Normal queue stalled behind inference')
+        def normal(worker,task,item):
+            completed.append(task['id']);return {'audit':'fixture'}
+        monkeypatch.setattr(inference_client,'process',inference)
+        monkeypatch.setattr(Worker,'process_item',normal)
+        drain(settings)
+        assert completed==[ordinary['id']]
+        assert client.get('/api/jobs/'+long_job['id']).json()['state']=='succeeded'
+        assert client.get('/api/jobs/'+ordinary['id']).json()['state']=='succeeded'

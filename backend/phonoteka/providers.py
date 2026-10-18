@@ -103,7 +103,11 @@ class Providers:
                             continue
                         if response.status_code==404: data=None;break
                         if response.status_code in (401,403): raise ProviderError('provider_unauthorized',provider,'Источник отклонил доступ')
-                        if response.status_code==429: raise ProviderError('rate_limited',provider,'Источник ограничил частоту запросов')
+                        if response.status_code==429:
+                            retry=response.headers.get('retry-after','60')
+                            seconds=min(86400,max(60,int(retry))) if retry.isdigit() else 300
+                            await asyncio.to_thread(db.set_setting,self.settings.db_path,'provider_breaker:'+provider,db.encode({'until':time.time()+seconds,'reason':'rate_limited'}))
+                            raise ProviderError('rate_limited',provider,'Источник ограничил частоту запросов')
                         if response.status_code>=500: raise ProviderError('provider_unavailable',provider,'Источник временно недоступен')
                         if response.status_code!=200: raise ProviderError('provider_error',provider,'Неожиданный ответ источника')
                         content=bytearray();limit=5*1024**2 if binary else 2*1024**2
@@ -119,7 +123,7 @@ class Providers:
             except (httpx.HTTPError,ValueError) as exc:
                 if attempt==2: raise ProviderError('provider_unavailable',provider,'Ошибка сети или формата ответа') from exc
             except ProviderError as exc:
-                if exc.code not in {'rate_limited','provider_unavailable'} or attempt==2: raise
+                if exc.code!='provider_unavailable' or attempt==2: raise
             await asyncio.sleep(2**(attempt+1))
         raise ProviderError('provider_unavailable',provider,'Источник недоступен')
 
@@ -203,6 +207,6 @@ class Providers:
                 if art: result['candidates'].append(art)
                 result['sources'].append({'provider':'coverartarchive','state':'candidate' if art else 'no_match'})
             except (ProviderError, media.MediaError) as exc: result['sources'].append({'provider':'coverartarchive','state':exc.code})
-        result['state']='candidates' if result['candidates'] else 'no_match' 
+        result['state']='candidates' if result['candidates'] else 'no_match' if all(x['state']=='no_match' for x in result['sources']) else 'incomplete' 
         result['sources'].append({'provider':'acoustid','state':'key_required'})
         return result
