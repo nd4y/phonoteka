@@ -1,0 +1,32 @@
+/* Shared interaction minimums override compact component variants. The visible
+   icons stay small; the actual focus/click/touch boxes remain at least 44px. */
+:where(button, select, summary, .file-button, input:not([type=checkbox], [type=radio], [type=hidden], [type=file])) {
+  min-height: 44px !important;
+}
+:where(button, select, summary, .file-button) {
+  min-width: 44px !important;
+}
+body label:has(>input:is([type=checkbox], [type=radio])) {
+  min-height: 44px !important;
+  min-width: 44px !important;
+}
+
+/* Keep the timeline centered on the dock edge. Its transparent hit area ends
+   before the transport buttons, so it does not intercept their taps. */
+.dock-progress input[type=range] { height: 44px; top: -22px; }
+.dock-player .dock-play { min-width: 44px; min-height: 44px; }
+.dock-player .icon-button { flex-shrink: 0; }
+.dock-tools-volume input[type=range] { min-width: 44px; }
+
+/* A larger stamp button needs a matching grid column, and the four lyric
+   actions wrap within their own row instead of overlapping the text input. */
+.lyric-line { grid-template-columns: 20px 86px 44px minmax(100px,1fr); }
+.line-actions { grid-column: 2/-1; flex-wrap: wrap; }
+.line-actions .icon-button { opacity: 1; }
+@media(min-width:1650px) {
+  .lyric-line { grid-template-columns: 25px 95px 44px minmax(100px,1fr) 182px; }
+  .line-actions { grid-column: 5; }
+}
+@media(max-width:650px) {
+  .lyric-line { grid-template-columns: 17px 82px 44px minmax(0,1fr); }
+}
