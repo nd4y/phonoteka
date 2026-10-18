@@ -452,9 +452,17 @@ class Worker:
             audio, offset=await self.io(recognition.sample,path,self.settings.roots,float(meta.get('duration',0)))
             try:
                 identified=await recognition.recognize(self.providers,audio,offset,authorized)
+                alternate=min(max(0,float(meta.get('duration',0))-12),float(meta.get('duration',0))*.65)
+                if not identified and abs(alternate-offset)>=5:
+                    audio,offset=await self.io(recognition.sample,path,self.settings.roots,float(meta.get('duration',0)),alternate)
+                    identified=await recognition.recognize(self.providers,audio,offset,authorized)
                 recognition_source={'provider':'shazam','state':'fingerprint_match' if identified else 'no_match'}
             except ProviderError as exc:
                 recognition_source={'provider':'shazam','state':exc.code,'message':str(exc)}
+        else:
+            previous=await self.io(db.fetchone,self.settings.db_path,'SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256']))
+            if previous:
+                identified=next((c for c in json.loads(previous['payload']).get('candidates',[]) if c.get('provider')=='shazam'),None)
         if self.settings.external_metadata:
             result = await self.providers.analyze(meta, item['relative_path'],identified)
         else:

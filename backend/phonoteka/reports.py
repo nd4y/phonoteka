@@ -30,11 +30,13 @@ def summary(settings):
         tags=meta.get('tags',{});album=scalar(tags,'album');artist=scalar(tags,'albumartist') or scalar(tags,'artist')
         if album:
             albums[(normalized(artist),normalized(album))].append({**entry,'album':album,'artist':artist,'track':scalar(tags,'tracknumber'),'disc':scalar(tags,'discnumber')})
+    counts['metadata_pending_retry']=0
     for row in db.fetchall(settings.db_path,'SELECT a.payload FROM analyses a JOIN tracks t ON t.id=a.track_id AND t.is_current=1 AND t.sha256=a.input_sha256'):
         data=json.loads(row['payload']);counts['analyzed']+=1;counts['with_candidates']+=bool(data.get('candidates'));counts['no_match']+=data.get('state')=='no_match';counts['asr_drafts']+=bool(data.get('asr'))
         for source in data.get('sources',[]):
             if source['provider']=='shazam':
                 counts['fingerprint_matches' if source['state']=='fingerprint_match' else 'fingerprint_no_match' if source['state']=='no_match' else 'fingerprint_unavailable']+=1
+        counts['metadata_pending_retry']+=any(s.get('provider') in {'musicbrainz','lrclib'} and s.get('state') not in {'candidates','no_match'} for s in data.get('sources',[]))
     album_report=[]
     for items in albums.values():
         observed=defaultdict(list);declared={}

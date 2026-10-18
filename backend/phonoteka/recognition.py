@@ -123,7 +123,8 @@ async def recognize(providers, audio, offset, authorize=lambda: None):
                         tags['album'] = str(entry['text'])[:1000]
         source = str(track.get('url', ''))
         if urlsplit(source).scheme != 'https' or urlsplit(source).hostname not in {'www.shazam.com', 'shazam.com'}: source = ''
+        with wave.open(io.BytesIO(audio)) as wav: seconds=wav.getnframes()/wav.getframerate()
         return {'id': 'shazam:' + str(track['key'])[:100], 'provider': 'shazam', 'kind': 'metadata', 'tags': tags,
                 'identification': 'audio_fingerprint', 'source_url': source, 'sample_offset': offset,
-                'sample_seconds': 12, 'recording_version_verified': False,
+                'sample_seconds': seconds, 'recording_version_verified': False,
                 'match': {'state': 'fingerprint_match', 'reasons': ['recording_version_unverified']}}

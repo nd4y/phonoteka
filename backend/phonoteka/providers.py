@@ -66,6 +66,11 @@ class Providers:
 
     async def close(self): await self.client.aclose()
 
+    def unavailable(self, provider):
+        previous=json.loads(db.setting(self.settings.db_path,'provider_breaker:'+provider,'{}'))
+        failures=min(6,previous.get('failures',0)+1)
+        db.set_setting(self.settings.db_path,'provider_breaker:'+provider,db.encode({'until':time.time()+min(1200,60*2**(failures-1)),'reason':'provider_unavailable','failures':failures}))
+
     def reserve(self, provider):
         now=time.time()
         with db.transaction(self.settings.db_path) as conn:
@@ -108,7 +113,7 @@ class Providers:
                             seconds=min(86400,max(60,int(retry))) if retry.isdigit() else 300
                             await asyncio.to_thread(db.set_setting,self.settings.db_path,'provider_breaker:'+provider,db.encode({'until':time.time()+seconds,'reason':'rate_limited'}))
                             raise ProviderError('rate_limited',provider,'Источник ограничил частоту запросов')
-                        if response.status_code>=500: raise ProviderError('provider_unavailable',provider,'Источник временно недоступен')
+                        if response.status_code>=500: raise ProviderError('provider_unavailable',provider,'Источник временно недоступен: HTTP '+str(response.status_code))
                         if response.status_code!=200: raise ProviderError('provider_error',provider,'Неожиданный ответ источника')
                         content=bytearray();limit=5*1024**2 if binary else 2*1024**2
                         async for chunk in response.aiter_bytes():
@@ -121,7 +126,7 @@ class Providers:
                 await asyncio.to_thread(self.cache,key,provider,data)
                 return data
             except (httpx.HTTPError,ValueError) as exc:
-                if attempt==2: raise ProviderError('provider_unavailable',provider,'Ошибка сети или формата ответа') from exc
+                if attempt==2: raise ProviderError('provider_unavailable',provider,'Ошибка сети или формата ответа: '+type(exc).__name__) from exc
             except ProviderError as exc:
                 if exc.code!='provider_unavailable' or attempt==2: raise
             await asyncio.sleep(2**(attempt+1))
@@ -153,7 +158,12 @@ class Providers:
         return candidates
 
     async def lyrics(self, query, duration):
-        data=await self.get('lrclib','https://lrclib.net/api/search',{'track_name':query['title'],'artist_name':query['artist']})
+        data=None
+        if query.get('album') and query.get('artist') and duration:
+            exact=await self.get('lrclib','https://lrclib.net/api/get',{'track_name':query['title'],'artist_name':query['artist'],'album_name':query['album'],'duration':round(duration)})
+            if isinstance(exact,dict) and exact.get('id') is not None:data=[exact]
+        if data is None:
+            data=await self.get('lrclib','https://lrclib.net/api/search',{'track_name':query['title'],'artist_name':query['artist']})
         candidates=[]
         for row in (data or [])[:20]:
             if not isinstance(row,dict): continue
@@ -200,7 +210,7 @@ class Providers:
                 result['sources'].append({'provider':provider,'state':'candidates' if candidates else 'no_match','count':len(candidates)})
             except ProviderError as exc:
                 if exc.code=='provider_unavailable':
-                    await asyncio.to_thread(db.set_setting,self.settings.db_path,'provider_breaker:'+provider,db.encode({'until':time.time()+1200,'reason':exc.code}))
+                    await asyncio.to_thread(self.unavailable,provider)
                 result['sources'].append({'provider':provider,'state':exc.code,'message':str(exc)})
         matching=[c for c in result['candidates'] if c['kind']=='metadata' and c['match']['state']=='matching_metadata']
         releases={v['id'] for c in matching for v in c.get('releases',[]) if query['album'] and normalized(v['title'])==normalized(query['album'])}

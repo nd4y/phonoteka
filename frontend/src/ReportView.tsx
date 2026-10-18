@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, messageFor } from './api';
 type Entry={id:string;path:string;format:string;duration?:number;status:string};
 type Report={counts:Record<string,number>;exact_duplicates:Entry[][];same_audio_packets:Entry[][];albums:Array<{album:string;artist:string;files:number;missing_by_tags:Record<string,number[]>;duplicate_numbers:Record<string,number[]>;ids:string[]}>};
-const labels:Record<string,string>={fingerprint_matches:'Совпадения по аудиоотпечатку',fingerprint_no_match:'Отпечаток не найден',fingerprint_unavailable:'Распознавание временно недоступно',files:'Всего записей',cue_sheets:'CUE',input_errors:'Поврежденные файлы',writable_profiles:'Доступна запись',with_lyrics:'С синхронным текстом',with_cover:'С обложкой',analyzed:'Проанализировано',with_candidates:'Есть предложения',no_match:'Нет совпадений',asr_drafts:'Черновики ASR'};
+const labels:Record<string,string>={metadata_pending_retry:'Поиск метаданных требует повтора',fingerprint_matches:'Совпадения по аудиоотпечатку',fingerprint_no_match:'Отпечаток не найден',fingerprint_unavailable:'Распознавание временно недоступно',files:'Всего записей',cue_sheets:'CUE',input_errors:'Поврежденные файлы',writable_profiles:'Доступна запись',with_lyrics:'С синхронным текстом',with_cover:'С обложкой',analyzed:'Проанализировано',with_candidates:'Есть предложения',no_match:'Нет совпадений',asr_drafts:'Черновики ASR'};
 export function ReportView({onOpen}:{onOpen:(id:string)=>void}) {
  const [report,setReport]=useState<Report|null>(null);const [error,setError]=useState('');
  async function load(){try {setReport(await api<Report>('/reports/collection'));setError('');}catch(e){setError(messageFor(e));}}

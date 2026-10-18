@@ -114,6 +114,8 @@ def test_fingerprint_opt_in_and_preserved_asr(settings, monkeypatch):
         assert detail['analysis']['candidates'][0]['tags']['title']=='Actual'
         assert detail['sha256']==sha and not detail.get('proposal')
         assert client.get('/api/reports/collection').json()['counts']['fingerprint_matches']==1
+        pending=client.post('/api/jobs',json={'kind':'recognize','params':{'scope':'pending'}},headers={**headers,'Idempotency-Key':'pending-fp'})
+        assert pending.status_code==409 and pending.json()['code']=='nothing_to_process'
 
 
 def test_password_reset_revokes_session_and_epoch(client, settings):

@@ -381,9 +381,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise security.error(409,'inference_disabled','ASR не настроен')
         ids = list(dict.fromkeys(body.track_ids))
         if body.params.get('scope'):
-            if body.kind not in {'analyze','recognize','replaygain'} or body.params['scope']!='all' or ids:
+            if body.kind not in {'analyze','recognize','replaygain'} or body.params['scope'] not in {'all','pending'} or ids:
                 raise security.error(422,'invalid_scope','Полная библиотека доступна только для анализа')
             ids=[row['id'] for row in db.fetchall(settings.db_path,"SELECT id FROM tracks WHERE is_current=1 AND status NOT IN ('error','missing') AND json_extract(metadata,'$.format')<>'cue' AND COALESCE(json_extract(metadata,'$.cue_album_image'),0)=0 LIMIT 10000")]
+            if body.params['scope']=='pending':
+                pending=[]
+                known={}
+                for row in db.fetchall(settings.db_path,"SELECT a.track_id,json_extract(s.value,'$.provider') AS provider,json_extract(s.value,'$.state') AS state FROM analyses a JOIN tracks t ON t.id=a.track_id AND t.sha256=a.input_sha256 AND t.is_current=1,json_each(a.payload,'$.sources') s"):
+                    known.setdefault(row['track_id'],{})[row['provider']]=row['state']
+                for track_id in ids:
+                    sources=known.get(track_id,{})
+                    wanted=['shazam'] if body.kind=='recognize' else ['local_replaygain'] if body.kind=='replaygain' else ['musicbrainz','lrclib']
+                    if any(sources.get(p) not in {'candidates','candidate','no_match','fingerprint_match'} for p in wanted):pending.append(track_id)
+                ids=pending
+                if not ids:raise security.error(409,'nothing_to_process','Все доступные записи уже обработаны этим этапом')
         if body.kind=='analyze' and not settings.external_metadata:
             raise security.error(409,'provider_disabled','Внешние метаданные отключены')
         if body.kind=='recognize' and not settings.external_fingerprints:

@@ -59,6 +59,24 @@ def test_query_inference_never_claims_embedded_evidence():
     assert source=='filename_hint'
 
 
+def test_exact_lyrics_before_broad_search_and_404_fallback(tmp_path):
+    calls=[]
+    def response(request):
+        calls.append(request.url.path)
+        if request.url.path=='/api/get':
+            if request.url.params['album_name']=='Absent':return httpx.Response(404)
+            return httpx.Response(200,json={'id':1,'trackName':'Song','artistName':'Singer','duration':100,'syncedLyrics':'[00:01]Line'})
+        return httpx.Response(200,json=[])
+    async def run():
+        p=Providers(settings(tmp_path),httpx.MockTransport(response))
+        first=await p.lyrics({'title':'Song','artist':'Singer','album':'Album'},100)
+        assert len(first)==1 and calls==['/api/get']
+        second=await p.lyrics({'title':'Song','artist':'Singer','album':'Absent'},100)
+        assert second==[] and calls==['/api/get','/api/get','/api/search']
+        await p.close()
+    asyncio.run(run())
+
+
 def test_rate_limit_cooldown_and_incomplete_not_no_match(tmp_path):
     calls=[]
     def response(request):
