@@ -29,6 +29,7 @@ class ClosingConnection(sqlite3.Connection):
 def connect(path: Path) -> sqlite3.Connection:
     db = sqlite3.connect(path, timeout=15, factory=ClosingConnection)
     db.row_factory = sqlite3.Row
+    db.create_function("casefold", 1, lambda value: str(value or "").casefold(), deterministic=True)
     db.execute("PRAGMA foreign_keys=ON")
     db.execute("PRAGMA busy_timeout=15000")
     db.execute("PRAGMA synchronous=FULL")

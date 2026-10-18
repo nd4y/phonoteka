@@ -239,9 +239,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         clauses = ["t.is_current=1"]
         args = []
         if search:
-            clauses.append("(LOWER(t.relative_path) LIKE LOWER(?) ESCAPE '\\' OR LOWER(t.metadata) LIKE LOWER(?) ESCAPE '\\')")
+            clauses.append("(casefold(t.relative_path) LIKE casefold(?) ESCAPE '\\' OR EXISTS (SELECT 1 FROM json_tree(t.metadata,'$.tags') v WHERE v.type='text' AND casefold(v.atom) LIKE casefold(?) ESCAPE '\\') OR EXISTS (SELECT 1 FROM json_tree(t.metadata,'$.cue.tracks') v WHERE v.type='text' AND casefold(v.atom) LIKE casefold(?) ESCAPE '\\'))")
             term = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            args += [term, term]
+            args += [term, term, term]
         filters = {
             "all": "1=1",
             "cue": "json_extract(t.metadata,'$.format')='cue'",

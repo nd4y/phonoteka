@@ -15,7 +15,12 @@ def header_is_audio(header):
     if header[:4]==b'FORM' and header[8:12] in (b'AIFF',b'AIFC'):return True
     if header[:4]==b'FRM8' and header[12:16]==b'DSD ':return True
     if header[4:8]==b'ftyp':return True
-    return len(header)>=4 and header[0]==255 and header[1]&224==224
+    if len(header)<4 or header[0]!=255:return False
+    # MPEG Layer III and AAC ADTS; a generic 11-bit sync also matches UTF-16 LE BOM.
+    mp3=(header[1]&224==224 and header[1]&6==2 and header[1]&24!=8
+         and header[2]>>4!=15 and header[2]&12!=12 and header[3]&3!=2)
+    adts=header[1]&246==240 and (header[2]>>2)&15<13
+    return mp3 or adts
 
 
 def describe(path,audio):

@@ -553,3 +553,25 @@ def test_extensionless_and_wrong_suffix_audio_cycle(settings):
         assert target.exists() and media.sha256_file(target)==media.sha256_file(noext)
         assert client.get('/api/tracks/'+track['id']).json()['publication']['relative_path']=='download_123.mp3'
         assert noext.exists() and not (settings.work_root/'download_123.mp3').exists()
+
+
+def test_discovery_does_not_mistake_utf16_logs_for_audio():
+    from phonoteka.intake import header_is_audio
+    for text in ['Exact Audio Copy log file', 'Report from CD ripper', 'Album and artist']:
+        assert not header_is_audio(text.encode('utf-16')[:32])
+    for header in [bytes.fromhex('fffb9064'), bytes.fromhex('fff15080'), b'ID3\x04'+bytes(28), b'fLaC'+bytes(28)]:
+        assert header_is_audio(header)
+
+
+def test_search_matches_values_not_json_keys_with_unicode_case(client, settings):
+    authenticated(client, settings)
+    one,_=seed(settings,'one.mp3');two,_=seed(settings,'two.mp3')
+    with db.transaction(settings.db_path) as conn:
+        for identity,tags in [(one,{'title':['Numb'],'artist':['Linkin Park'],'tracknumber':'13'}),(two,{'title':['ПЕСНЯ %_'],'artist':['Артист'],'tracknumber':'1'})]:
+            row=conn.execute('SELECT metadata FROM tracks WHERE id=?',(identity,)).fetchone()
+            meta=json.loads(row['metadata']);meta['tags']=tags
+            conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),identity))
+    for term,expected in [('numb',one),('песня',two),('%_',two),('LINKIN',one)]:
+        result=client.get('/api/tracks',params={'search':term}).json()
+        assert result['total']==1 and result['items'][0]['id']==expected
+    assert client.get('/api/tracks',params={'search':'tracknumber'}).json()['total']==0
