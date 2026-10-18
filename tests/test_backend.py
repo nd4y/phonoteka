@@ -499,3 +499,19 @@ def test_inference_starts_during_existing_metadata_batch(settings,monkeypatch):
         drain(settings)
         assert started==[second['id']]
         assert all(client.get('/api/jobs/'+j['id']).json()['state']=='succeeded' for j in [first,second])
+
+
+def test_metadata_refresh_retains_same_revision_asr(client,settings):
+    settings=replace(settings,external_metadata=True)
+    headers=authenticated(client,settings);identity,sha=seed(settings)
+    previous={'input_sha256':sha,'asr':{'text':'independent draft'},'alignment':{'coverage':.5},'candidates':[{'id':'alignment:1','provider':'independent_asr'}]}
+    with db.transaction(settings.db_path) as conn:conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(identity,sha,db.encode(previous),db.utcnow()))
+    class Fixture:
+        async def analyze(self,*args):return {'input_sha256':sha,'candidates':[],'sources':[],'state':'no_match'}
+    task={'id':'fixture','auth_epoch':int(db.setting(settings.db_path,'auth_epoch','0'))}
+    worker=Worker(settings);worker.providers=Fixture();worker.cancelled=lambda _:False
+    try:asyncio.run(worker.analyze_item(task,{'track_id':identity,'sha256':sha,'relative_path':'a.mp3'}))
+    finally:worker.pool.shutdown()
+    result=json.loads(db.fetchone(settings.db_path,'SELECT payload FROM analyses WHERE track_id=?',(identity,))['payload'])
+    assert result['asr']==previous['asr'] and result['alignment']==previous['alignment']
+    assert result['candidates']==previous['candidates']

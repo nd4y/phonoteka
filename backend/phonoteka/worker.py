@@ -415,6 +415,12 @@ class Worker:
         with db.transaction(self.settings.db_path) as conn:
             current = conn.execute('SELECT sha256 FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
             if not current or current['sha256'] != item['sha256']: raise media.MediaError('conflict','File revision changed')
+            previous=conn.execute('SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256'])).fetchone()
+            if previous:
+                old=json.loads(previous['payload'])
+                for key in ('asr','alignment'):
+                    if key in old: result[key]=old[key]
+                result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider')=='independent_asr')
             conn.execute('INSERT OR REPLACE INTO analyses VALUES(?,?,?,?)',(item['track_id'],item['sha256'],db.encode(result),db.utcnow()))
             db.event(conn,'analysis_completed',{'track_id':item['track_id'],'state':result['state']})
         return {'state':result['state'],'candidates':len(result['candidates']),'sources':result['sources']}
