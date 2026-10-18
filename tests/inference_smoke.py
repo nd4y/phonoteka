@@ -25,4 +25,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert len(result['words'])>5 and all(0<=w['start']<=w['end']<=result['duration']+.1 for w in result['words'])
         assert result['automatic_acceptance'] is False
         print(json.dumps({'real_model':result['model'],'revision':result['model_revision'],'words':len(result['words']),'timeline_valid':True,'deduplication':True}))
+    except BaseException:
+        subprocess.run(['docker','logs','--tail','100',name],check=False)
+        raise
     finally:subprocess.run(['docker','rm','-f',name],check=False)

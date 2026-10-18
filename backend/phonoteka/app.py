@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
-from . import __version__, db, security, cue
+from . import __version__, db, security, cue, reports
 from .config import Settings
 
 
@@ -375,6 +375,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise security.error(422, "exception_reason_required", "Укажите причину публикации неполных метаданных")
         if body.params.get('language') and not re.fullmatch('[a-z]{2,3}',str(body.params['language'])):
             raise security.error(422,'invalid_language','Язык: ru, en или автоматическое определение')
+        if 'generation' in body.params and (type(body.params['generation']) is not int or not 0<=body.params['generation']<=1000000):
+            raise security.error(422,'invalid_generation','Неверная версия запроса ASR')
         if body.kind in {'transcribe','align'} and not settings.inference_url:
             raise security.error(409,'inference_disabled','ASR не настроен')
         ids = list(dict.fromkeys(body.track_ids))
@@ -445,6 +447,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             db.event(conn, "job_cancel_requested", {"job_id": job_id})
         return public_job(settings, db.fetchone(settings.db_path, "SELECT * FROM jobs WHERE id=?", (job_id,)))
 
+    @app.get('/api/reports/collection')
+    def collection_report(request: Request):
+        security.require_session(request,settings)
+        return reports.summary(settings)
+
+    @app.get('/api/reports/export/{kind}')
+    def export_report(request:Request,kind:Literal['json','csv']):
+        security.require_session(request,settings)
+        return Response(reports.export(settings,kind),media_type='application/json' if kind=='json' else 'text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="phonoteka-report.{kind}"','Cache-Control':'private, no-store'})
+
     @app.get('/api/providers')
     def provider_status(request: Request):
         security.require_session(request, settings)
@@ -453,7 +465,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post('/api/tracks/{track_id}/analysis/select',status_code=201)
     async def select_analysis(request: Request, track_id: str):
         security.require_session(request, settings, True)
-        body = await request.json()
+        try: body = await request.json()
+        except ValueError: raise security.error(422,'invalid_selection','Ожидается JSON')
+        if not isinstance(body,dict): raise security.error(422,'invalid_selection','Ожидается объект')
         ids = body.get('candidate_ids')
         if not isinstance(ids,list) or not 1<=len(ids)<=8 or any(not isinstance(x,str) for x in ids):
             raise security.error(422,'invalid_selection','Выберите от одного до восьми кандидатов')
@@ -473,7 +487,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload={'tags':{},'sources':[]}
             for candidate in chosen:
                 payload['tags'].update(candidate.get('tags',{}))
-                if candidate.get('lrc'): payload['lrc']=candidate['lrc']
+                if candidate.get('lrc') or candidate.get('plain_lyrics'): payload['lrc']=candidate.get('lrc') or candidate['plain_lyrics']
                 if candidate.get('cover'): payload['cover']=candidate['cover']
                 payload['sources'].append({k:candidate[k] for k in ('id','provider','source_url','source_path','identification','timing_verified') if k in candidate})
             identity=str(uuid.uuid4());now=db.utcnow()

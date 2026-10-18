@@ -531,3 +531,17 @@ def test_extended_formats_preserve_packets_and_tags(roots,backup_dir,ext,codec):
     assert after['tags']['title']==['Название'] and after['has_art'] and after['lrc']
     assert media.audio_identity(target)==identity
     assert mutagen.File(target)[private]==([b'keep'] if ext=='m4a' else ['keep'])
+
+
+@LINUX
+@TOOLS
+@pytest.mark.parametrize('ext,codec',[('wav','pcm_s16le'),('aiff','pcm_s16be')])
+def test_riff_aiff_id3_roundtrip(roots,backup_dir,ext,codec):
+    target=roots['work']/('test.'+ext)
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=3','-c:a',codec,str(target)],check=True)
+    before=media.inspect_audio(target,roots);identity=media.audio_identity(target)
+    assert before['write_supported']
+    media.apply_changes(target,{'title':'Название'},'[00:01.00]Строка',before['sha256'],backup_dir,roots)
+    after=media.inspect_audio(target,roots)
+    assert after['tags']['title']==['Название'] and after['lrc']
+    assert media.audio_identity(target)==identity

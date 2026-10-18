@@ -55,3 +55,5 @@
 @media(max-width:600px){.analysis-panel{padding:16px}.analysis-panel .button-row{flex-wrap:wrap}.analysis-panel .button{white-space:normal}}
 
 .asr-tools { margin-top:12px; flex-wrap:wrap; }.asr-result { margin-top:18px; }.asr-result pre { white-space:pre-wrap; max-height:300px; overflow:auto; font-size:12px; }
+
+.report-view {display:grid;gap:24px}.report-view details {padding:12px 0;border-bottom:1px solid var(--border);overflow-wrap:anywhere}.report-view details button{display:block;max-width:100%;white-space:normal;text-align:left}.report-view summary{cursor:pointer}.report-view .panel-heading{flex-wrap:wrap;gap:12px}

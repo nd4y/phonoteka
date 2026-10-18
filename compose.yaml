@@ -28,6 +28,10 @@ x-env: &env
   INSTANCE_ID: ${INSTANCE_ID:?Set an instance ID}
   FILE_WORKERS: ${FILE_WORKERS:-2}
   IO_THREADS: ${IO_THREADS:-2}
+  EXTERNAL_METADATA: ${EXTERNAL_METADATA:-false}
+  PROVIDER_DAILY_LIMIT: ${PROVIDER_DAILY_LIMIT:-2500}
+  INFERENCE_URL: ${INFERENCE_URL:-}
+  INFERENCE_SECRET_FILE: /run/secrets/inference_key
 services:
   app:
     <<: *common
@@ -92,5 +96,36 @@ services:
       - type: bind
         source: ${PASSWORD_FILE:?}
         target: /run/secrets/owner_password
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${INFERENCE_KEY_FILE:?}
+        target: /run/secrets/inference_key
+        read_only: true
+        bind: {create_host_path: false}
+  inference:
+    <<: *common
+    image: ${PHONOTEKA_INFERENCE_IMAGE:?Set a tested immutable inference digest}
+    environment:
+      WORK_ROOT: /work
+      INFERENCE_STATE: /inference
+      INFERENCE_SECRET_FILE: /run/secrets/inference_key
+      ASR_MODEL: small
+      OMP_NUM_THREADS: "2"
+    mem_limit: 3g
+    cpus: 2
+    volumes:
+      - type: bind
+        source: ${WORK_PATH:?}
+        target: /work
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${INFERENCE_STATE_PATH:?}
+        target: /inference
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${INFERENCE_KEY_FILE:?}
+        target: /run/secrets/inference_key
         read_only: true
         bind: {create_host_path: false}

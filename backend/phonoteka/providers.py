@@ -129,7 +129,11 @@ class Providers:
             # Cap total entries, including large artwork, without unbounded growth.
             if conn.execute('SELECT COUNT(*) FROM provider_cache').fetchone()[0]>=4000:
                 conn.execute('DELETE FROM provider_cache WHERE key IN (SELECT key FROM provider_cache ORDER BY expires LIMIT 100)')
-            conn.execute('INSERT OR REPLACE INTO provider_cache VALUES(?,?,?,?)',(key,provider,db.encode(data),time.time()+(86400 if data is None else 7*86400)))
+            payload=db.encode(data)
+            # A byte budget also bounds artwork; SQLite pages are reused after eviction.
+            while (conn.execute('SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) FROM provider_cache').fetchone()[0]+len(payload.encode()))>256*1024**2:
+                conn.execute('DELETE FROM provider_cache WHERE key IN (SELECT key FROM provider_cache ORDER BY expires LIMIT 100)')
+            conn.execute('INSERT OR REPLACE INTO provider_cache VALUES(?,?,?,?)',(key,provider,payload,time.time()+(86400 if data is None else 7*86400)))
 
     async def musicbrainz(self, query, duration):
         def escape(value): return re.sub(r'([+\-&|!(){}\[\]^"~*?:\\/])',r'\\\1',value[:180])

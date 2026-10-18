@@ -4,11 +4,13 @@ from contextlib import asynccontextmanager
 import hashlib
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
 import tempfile
 import time
+import wave
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, Field
 from . import cue, media
@@ -21,6 +23,7 @@ MODEL_REVISION='536b0662742c02347bc0e980a01041f333bce120'
 if MODEL not in MODELS: raise ValueError('Model must be selected by deployment from the registry')
 SECRET=Path(os.environ.get('INFERENCE_SECRET_FILE','/run/secrets/inference_key'))
 MODEL_INSTANCE=None
+LOG=logging.getLogger('phonoteka.inference')
 
 
 def connect():
@@ -40,7 +43,7 @@ class Input(BaseModel):
     generation:int=Field(default=0,ge=0,le=1000000)
 
 
-def identity(body): return hashlib.sha256(json.dumps([body,MODEL,'transcribe-v1'],sort_keys=True).encode()).hexdigest()
+def identity(body): return hashlib.sha256(json.dumps([body,MODEL,MODEL_REVISION,'transcribe-v1'],sort_keys=True).encode()).hexdigest()
 
 
 def execute(body):
@@ -56,7 +59,13 @@ def execute(body):
     with tempfile.TemporaryDirectory(dir=STATE) as directory:
         pcm=Path(directory)/'analysis.wav'
         media._process(source,'ffmpeg',['-nostdin','-map','0:a:0','-t','1800','-ac','1','-ar','16000','-c:a','pcm_s16le','-fs',str(60*1024**2),str(pcm)],timeout=600)
-        segments,info_asr=MODEL_INSTANCE.transcribe(str(pcm),language=body.get('language'),beam_size=5,word_timestamps=True,vad_filter=False,condition_on_previous_text=False)
+        # Consume our validated PCM directly; do not decode twice through PyAV.
+        import numpy as np
+        with wave.open(str(pcm), 'rb') as audio:
+            if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16000):
+                raise ValueError('Unexpected analysis PCM profile')
+            samples=np.frombuffer(audio.readframes(audio.getnframes()),dtype='<i2').astype(np.float32)/32768.0
+        segments,info_asr=MODEL_INSTANCE.transcribe(samples,language=body.get('language'),beam_size=5,word_timestamps=True,vad_filter=False,condition_on_previous_text=False)
         words=[];lines=[]
         for segment in segments:
             if segment.no_speech_prob>.6 or segment.avg_logprob<-1: continue
@@ -78,6 +87,7 @@ async def worker():
             result=await asyncio.to_thread(execute,json.loads(row['input']))
             state='succeeded'
         except Exception as exc:
+            LOG.exception("Inference job failed: %s", row["id"])
             # Never persist credentials, request headers, or arbitrary model traceback.
             result={'code':getattr(exc,'code','inference_failed'),'message':str(exc)[:300] if isinstance(exc,(media.MediaError,ValueError)) else 'Inference failed; see private service diagnostics'};state='failed'
         with connect() as conn:

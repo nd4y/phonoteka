@@ -107,6 +107,10 @@ jobs:
           gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n tested-amd64-image
           sha256sum -c phonoteka-image.sha256
           gzip -dc phonoteka-image.tar.gz | docker load
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n tested-inference-image
+          sha256sum -c inference-image.sha256
+          gzip -dc inference-image.tar.gz | docker load
+          test "$(docker inspect phonoteka-inference:ci --format '{{.Id}}')" = "$(cat inference-image-id.txt)"
           test "$(docker inspect phonoteka:ci --format '{{.Id}}')" = "$(cat image-id.txt)"
       - name: Publish immutable revision
         env:
@@ -117,9 +121,15 @@ jobs:
           docker tag phonoteka:ci "$image:sha-$GITHUB_SHA"
           docker push "$image:sha-$GITHUB_SHA"
           docker inspect "$image:sha-$GITHUB_SHA" --format '{{index .RepoDigests 0}}' > image-digest.txt
+          docker tag phonoteka-inference:ci "$image-inference:sha-$GITHUB_SHA"
+          docker push "$image-inference:sha-$GITHUB_SHA"
+          docker inspect "$image-inference:sha-$GITHUB_SHA" --format '{{index .RepoDigests 0}}' > inference-digest.txt
+          cat inference-digest.txt >> "$GITHUB_STEP_SUMMARY"
           cat image-digest.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: image-digest
-          path: image-digest.txt
+          path: |
+            image-digest.txt
+            inference-digest.txt
           retention-days: 90

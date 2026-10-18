@@ -19,8 +19,8 @@ async def process(worker, job, item):
     token=(await worker.io(settings.inference_secret_file.read_text)).strip()
     body={'relative_path':item['relative_path'],'sha256':item['sha256'],'language':params.get('language') or None,'generation':params.get('generation',0)}
     async with httpx.AsyncClient(base_url=settings.inference_url,timeout=15,headers={'Authorization':'Bearer '+token}) as client:
-        health=await client.get('/health');health.raise_for_status();model=health.json()['model']
-        remote_id=hashlib.sha256(json.dumps([body,model,'transcribe-v1'],sort_keys=True).encode()).hexdigest()
+        health=await client.get('/health');health.raise_for_status();model=health.json()['model'];revision=health.json()['model_revision']
+        remote_id=hashlib.sha256(json.dumps([body,model,revision,'transcribe-v1'],sort_keys=True).encode()).hexdigest()
         worker.item_result(job['id'],item['track_id'],'running',{'inference_job_id':remote_id,'model':model})
         # The remote API deduplicates by the complete input contract, including model and generation.
         for attempt in range(2):

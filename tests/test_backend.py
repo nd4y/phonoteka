@@ -426,3 +426,35 @@ def test_bad_audio_is_catalogued_and_webm_readable(client,settings):
     assert bad['status']=='error' and bad['input_error'] and not bad['can_write']
     assert good['codec']=='opus' and good['duration']>0
     assert client.get('/api/jobs/'+scan['id']).json()['failed']==1
+
+
+def test_collection_reports_auth_duplicates_and_csv_formula(client,settings):
+    assert client.get('/api/reports/collection').status_code==401
+    assert client.get('/api/reports/export/csv').status_code==401
+    authenticated(client,settings)
+    first,sha=seed(settings,relative='=formula.mp3');second,_=seed(settings,relative='second.mp3')
+    with db.transaction(settings.db_path) as conn:
+        for identity,number in [(first,'1/3'),(second,'3/3')]:
+            row=conn.execute('SELECT metadata FROM tracks WHERE id=?',(identity,)).fetchone()
+            meta=json.loads(row['metadata']);meta['tags'].update({'album':['Album'],'tracknumber':[number]})
+            conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),identity))
+    report=client.get('/api/reports/collection').json()
+    assert report['counts']['files']==2 and len(report['exact_duplicates'])==1
+    assert report['albums'][0]['missing_by_tags']=={'1':[2]}
+    assert report['albums'][0]['release_completeness']=='unknown'
+    csv=client.get('/api/reports/export/csv');assert csv.status_code==200 and "'=formula.mp3" in csv.text
+    exported=client.get('/api/reports/export/json').json();assert len(exported['files'])==2
+    assert media.sha256_file(settings.work_root/'=formula.mp3')==sha
+
+
+def test_analysis_plain_lyrics_are_an_untimed_draft(client,settings):
+    headers=authenticated(client,settings);identity,sha=seed(settings)
+    candidate={'id':'plain:1','kind':'lyrics','provider':'fixture','plain_lyrics':'Words without times'}
+    with db.transaction(settings.db_path) as conn:
+        conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(identity,sha,db.encode({'candidates':[candidate],'sources':[]}),db.utcnow()))
+    endpoint=f'/api/tracks/{identity}/analysis/select';headers={**headers,'If-Match':'"'+sha+'"'}
+    assert client.post(endpoint,json=[],headers=headers).status_code==422
+    assert client.post(endpoint,json={'candidate_ids':['plain:1']},headers=headers).status_code==201
+    proposal=client.get(f'/api/tracks/{identity}').json()['proposal']
+    assert proposal['lrc']=='Words without times'
+    assert not media.parse_lrc(proposal['lrc'])['complete']

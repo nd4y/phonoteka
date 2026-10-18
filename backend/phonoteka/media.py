@@ -29,6 +29,8 @@ import mutagen
 from mutagen.flac import FLAC, Picture
 from mutagen.id3 import ID3, ID3NoHeaderError, APIC, SYLT, TXXX, UFID, Frames
 from mutagen.mp3 import MP3
+from mutagen.wave import WAVE
+from mutagen.aiff import AIFF
 from . import formats
 from PIL import Image, UnidentifiedImageError
 
@@ -360,7 +362,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
         has_art = False
         write_supported = False
         reason = "format_not_validated"
-        if isinstance(audio, MP3):
+        if isinstance(audio, (MP3, WAVE, AIFF)):
             existing = audio.tags
             for field, frame in _TEXT_FRAMES.items():
                 if field=='date' and existing and existing.version[1]==3: frame='TYER'
@@ -426,10 +428,13 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
 
 def _load_audio(file):
     audio = mutagen.File(file)
-    if isinstance(audio, MP3):
+    if isinstance(audio, (MP3, WAVE, AIFF)):
         if hasattr(file, 'seek'): file.seek(0)
-        try: audio.tags = ID3(file, translate=False)
-        except ID3NoHeaderError: audio.tags = None
+        if isinstance(audio,(WAVE,AIFF)):
+            audio=type(audio)(file,translate=False)
+        else:
+            try: audio.tags = ID3(file, translate=False)
+            except ID3NoHeaderError: audio.tags = None
     return audio
 
 
@@ -437,7 +442,7 @@ def read_art(path: str | Path, roots: Mapping[str, Any]) -> tuple[bytes, str] | 
     path = _validate(path, roots)
     with _file(path) as stream:
         audio = _load_audio(stream)
-        if isinstance(audio, MP3):
+        if isinstance(audio, (MP3, WAVE, AIFF)):
             pictures = audio.tags.getall("APIC") if audio.tags else []
         elif isinstance(audio, FLAC):
             pictures = audio.pictures
@@ -487,12 +492,12 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
     parsed = parse_lrc(lrc) if lrc is not None else None
     normalized = serialize_lrc(parsed) if parsed else None
     audio = _load_audio(path)
-    if audio is None or not isinstance(audio, (MP3, FLAC, *formats.PROFILES)):
+    if audio is None or not isinstance(audio, (MP3, WAVE, AIFF, FLAC, *formats.PROFILES)):
         raise MediaError("unsupported_format", "Only MP3 and FLAC writes are supported")
     if parsed and any(line["start_ms"] > int(audio.info.length * 1000) + 1000 for line in parsed["lines"]):
         raise MediaError("invalid_lyrics", "A lyric timestamp exceeds audio duration")
     cover_info = _cover(cover) if cover is not None else None
-    if isinstance(audio, MP3):
+    if isinstance(audio, (MP3, WAVE, AIFF)):
         if audio.tags is None:
             audio.add_tags()
         version = audio.tags.version[1]
@@ -544,7 +549,7 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
             if fronts:
                 audio.tags.delall(fronts[0].HashKey)
             audio.tags.add(APIC(encoding=encoding, mime=cover_info[0], type=3, desc=desc, data=cover))
-        audio.save(v2_version=version, v1=1, v23_sep=None)
+        audio.save(v2_version=version, v23_sep=None, **({} if isinstance(audio,AIFF) else {'v1':1}))
     elif isinstance(audio, formats.PROFILES):
         try:
             formats.edit(audio, tags, normalized, cover, cover_info, _values)
@@ -575,21 +580,42 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
         audio.save()
 
 
+def _chunk_signature(path):
+    result=[]
+    with path.open('rb') as stream:
+        header=stream.read(12);big=header[:4]==b'FORM'
+        if header[:4] not in {b'RIFF',b'FORM'}: return result
+        while chunk:=stream.read(8):
+            if len(chunk)!=8: raise MediaError('invalid_audio','Truncated container chunk')
+            size=int.from_bytes(chunk[4:],'big' if big else 'little')
+            if stream.tell()+size>path.stat().st_size: raise MediaError('invalid_audio','Container chunk exceeds file')
+            if chunk[:4].lower() in {b'id3 ',b'data',b'ssnd',b'junk',b'pad '}:
+                stream.seek(size+(size%2),1);continue
+            digest=hashlib.sha256();left=size
+            while left:
+                data=stream.read(min(left,1024*1024))
+                if not data: raise MediaError('invalid_audio','Truncated container chunk')
+                digest.update(data);left-=len(data)
+            result.append([chunk[:4].hex(),digest.hexdigest()])
+            if size%2:stream.seek(1,1)
+    return result
+
+
 def _untouched_signature(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | None) -> dict[str, Any]:
     """Verify untouched metadata as well as codec packets before replacing target."""
     with _file(path) as stream:
         audio = _load_audio(stream)
-        if isinstance(audio, MP3):
+        if isinstance(audio, (MP3, WAVE, AIFF)):
             excluded = {('TYER' if key=='date' and audio.tags and audio.tags.version[1]==3 else _TEXT_FRAMES[key]) for key in tags if key in _TEXT_FRAMES}
             excluded.update(f"TXXX:{_MB_DESCRIPTIONS[key]}" for key in tags if key in _MB_FIELDS and key != "musicbrainz_trackid")
             if "musicbrainz_trackid" in tags:
                 excluded.add("UFID:http://musicbrainz.org")
             if not audio.tags:
-                return {"frames": {}, "unknown": []}
+                return {"frames": {}, "unknown": [], **({"chunks":_chunk_signature(path)} if isinstance(audio,(WAVE,AIFF)) else {})}
             frames = {key: repr(frame) for key, frame in audio.tags.items()
                       if key not in excluded and not (lrc is not None and key.startswith("SYLT:"))
                       and not (cover is not None and key.startswith("APIC:") and frame.type == 3)}
-            return {"frames": frames, "unknown": [hashlib.sha256(raw).hexdigest() for raw in audio.tags.unknown_frames]}
+            return {"frames": frames, "unknown": [hashlib.sha256(raw).hexdigest() for raw in audio.tags.unknown_frames], **({"chunks":_chunk_signature(path)} if isinstance(audio,(WAVE,AIFF)) else {})}
         if isinstance(audio, formats.PROFILES):
             return formats.untouched(audio, tags, lrc, cover)
         if isinstance(audio, FLAC):
