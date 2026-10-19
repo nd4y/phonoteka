@@ -6,8 +6,13 @@ import type { ViewState } from './viewState';
 export function useViewPersistence(view: Omit<ViewState, 'scroll' | 'queueScroll'>, initial: ViewState, ready: boolean, authenticated: boolean) {
   const current = useRef(view); current.current = view;
   const restoring = useRef(true);
+  const reloadView = useRef<ViewState | null>(null);
   const write = () => {
-    if (!authenticated || restoring.current) return;
+    if (!authenticated) return;
+    // Activation can change page layout before controllerchange/pagehide.
+    // Keep the owner's captured view throughout that transition.
+    if (reloadView.current) { saveView(reloadView.current); return; }
+    if (restoring.current) return;
     saveView({ ...current.current, scroll: window.scrollY, queueScroll: document.querySelector('.queue-tracks')?.scrollTop || 0 });
   };
   const writeRef = useRef(write); writeRef.current = write;
@@ -34,5 +39,14 @@ export function useViewPersistence(view: Omit<ViewState, 'scroll' | 'queueScroll
     window.addEventListener('pagehide', remember);
     return () => { window.removeEventListener('scroll', remember, true); window.removeEventListener('pagehide', remember); };
   }, []);
-  return () => writeRef.current();
+  return Object.assign(() => writeRef.current(), {
+    freezeForReload: () => {
+      if (!authenticated || reloadView.current) return;
+      reloadView.current = { ...current.current,
+        scroll: restoring.current ? initial.scroll : window.scrollY,
+        queueScroll: restoring.current ? initial.queueScroll : document.querySelector('.queue-tracks')?.scrollTop || 0 };
+      saveView(reloadView.current);
+    },
+    releaseReload: () => { reloadView.current = null; writeRef.current(); },
+  });
 }

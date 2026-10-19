@@ -15,7 +15,7 @@ import re
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import db, field_policy, lyrics_document, lyrics_review, media, provider_policy, release_review, security
+from . import db, field_policy, lyrics_document, lyrics_review, media, provider_policy, release_review, security, input_readiness, automation
 from .providers import normalized, scalar
 
 CONTRACT = 'automatic-quality-v1'
@@ -73,7 +73,7 @@ def actor_snapshot(conn, active):
         token = conn.execute('SELECT auth_epoch,revoked,expires,scopes FROM api_tokens WHERE id=?', (active['api_token_id'],)).fetchone()
         if token:
             import time
-            result.update(token=dict(token), write_authorized=bool(result['write_authorized'] and not token['revoked'] and token['expires'] > time.time() and token['auth_epoch'] == epoch and 'jobs:write' in json.loads(token['scopes'])))
+            result.update(token=dict(token), write_authorized=bool(result['write_authorized'] and not token['revoked'] and token['expires'] > time.time() and token['auth_epoch'] == epoch and automation.has_scope(json.loads(token['scopes']), 'files:write')))
         else:
             result['write_authorized'] = False
     return result
@@ -234,6 +234,8 @@ def evaluate(settings, conn, row, proposal, active):
     if not proposal or proposal['input_sha256'] != row['sha256'] or not latest or latest['id'] != proposal['id']:
         blocked.append('proposal_stale_or_missing')
     if not analysis: reasons.append('current_analysis_required')
+    if input_readiness.describe(metadata,grace_seconds=settings.input_grace_seconds)['state']!='ready':
+        reasons.append('input_stabilizing')
     if analysis.get('critical_conflicts') or analysis.get('unresolved_conflicts'):
         reasons.append('analysis_conflict_unresolved')
     if analysis.get('possible_mix') or metadata.get('possible_mix') or analysis.get('multiple_recordings'):

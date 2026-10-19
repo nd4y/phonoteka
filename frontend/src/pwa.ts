@@ -141,16 +141,25 @@ export async function checkPwaUpdate() {
 
 // Called only after the owner's explicit click and optional draft confirmation.
 // Other tabs may receive a new controller, but never reload automatically.
-export async function activatePwaUpdate(onBeforeReload?: () => void) {
+export interface PwaUpdateCallbacks {
+  onBeforeActivate?: () => void;
+  onBeforeReload?: () => void;
+  onActivationFailed?: () => void;
+}
+export async function activatePwaUpdate({ onBeforeActivate, onBeforeReload, onActivationFailed }: PwaUpdateCallbacks = {}) {
   if (state.updating) return false;
-  syncWorkerState();
-  const waiting = registration?.waiting;
-  if (!waiting || !state.updateReady) {
-    publish({ updateReady: false, error: 'Готового обновления больше нет. Проверьте обновления ещё раз.' });
-    return false;
-  }
-  publish({ updating: true, error: null });
   try {
+    // Freeze navigation before any worker/store notification can change layout.
+    // Playback is deliberately sampled later, immediately before the reload.
+    onBeforeActivate?.();
+    syncWorkerState();
+    const waiting = registration?.waiting;
+    if (!waiting || !state.updateReady) {
+      publish({ updateReady: false, error: 'Готового обновления больше нет. Проверьте обновления ещё раз.' });
+      onActivationFailed?.();
+      return false;
+    }
+    publish({ updating: true, error: null });
     await new Promise<void>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         navigator.serviceWorker.removeEventListener('controllerchange', changed);
@@ -171,6 +180,7 @@ export async function activatePwaUpdate(onBeforeReload?: () => void) {
   } catch {
     syncWorkerState();
     publish({ updating: false, error: 'Обновление пока не применилось. Ваши данные остаются на экране. Повторите попытку.' });
+    onActivationFailed?.();
     return false;
   }
 }

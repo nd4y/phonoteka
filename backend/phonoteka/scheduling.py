@@ -5,7 +5,7 @@ import uuid
 
 from fastapi import Request
 from pydantic import BaseModel,ConfigDict,Field
-from . import db,security
+from . import db,security,input_readiness
 
 KINDS={'scan','analyze','recognize','replaygain'}
 
@@ -59,16 +59,22 @@ def tick(settings,now=None):
         if not state.get('remaining'):
             if state.get('next_run',now)>now:return
             state['remaining']=list(state['steps']);state['last_run']=now
-        kind=state['remaining'].pop(0);items=[]
+        kind=state['remaining'].pop(0);items=[];waiting_inputs=0
         enabled=kind not in {'analyze','recognize'} or (settings.external_metadata if kind=='analyze' else settings.external_fingerprints)
         if kind!='scan' and enabled:
             sources={}
             for row in conn.execute("SELECT a.track_id,json_extract(s.value,'$.provider') AS provider,json_extract(s.value,'$.state') AS state FROM analyses a JOIN tracks t ON t.id=a.track_id AND t.sha256=a.input_sha256 AND t.is_current=1,json_each(a.payload,'$.sources') s"):
                 sources.setdefault(row['track_id'],{})[row['provider']]=row['state']
             wanted=['shazam'] if kind=='recognize' else ['local_replaygain'] if kind=='replaygain' else ['musicbrainz','lrclib']
-            for row in conn.execute("SELECT id,relative_path,sha256 FROM tracks WHERE is_current=1 AND status NOT IN ('error','missing') AND json_extract(metadata,'$.format')<>'cue' AND COALESCE(json_extract(metadata,'$.cue_album_image'),0)=0 LIMIT 10000"):
+            for row in conn.execute("SELECT id,relative_path,sha256,metadata FROM tracks WHERE is_current=1 AND status NOT IN ('error','missing') AND json_extract(metadata,'$.format')<>'cue' AND COALESCE(json_extract(metadata,'$.cue_album_image'),0)=0 LIMIT 10000"):
                 if any(sources.get(row['id'],{}).get(p) not in {'candidates','candidate','fingerprint_match','no_match'} for p in wanted):
+                    if input_readiness.describe(json.loads(row['metadata']),grace_seconds=settings.input_grace_seconds,now=now)['state'] != 'ready':
+                        waiting_inputs+=1
+                        continue
                     items.append({'track_id':row['id'],'relative_path':row['relative_path'],'sha256':row['sha256']})
+        state['waiting_inputs']=waiting_inputs
+        if waiting_inputs:state['waiting_reason']='input_stabilizing'
+        elif state.get('waiting_reason')=='input_stabilizing':state.pop('waiting_reason',None)
         if enabled and (items or kind=='scan'):
             from .webhooks import can_accept
             if not can_accept(conn):
@@ -76,7 +82,7 @@ def tick(settings,now=None):
                 state['waiting_reason']='webhook_queue_full'
                 conn.execute("UPDATE settings SET value=? WHERE key='schedule'",(db.encode(state),))
                 return
-            state.pop('waiting_reason',None)
+            if not waiting_inputs:state.pop('waiting_reason',None)
             identity=str(uuid.uuid4());stamp=db.utcnow()
             payload={'items':items,'params':{},'trigger':'schedule'}
             conn.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch) VALUES(?,?,'queued','pending',?,?,?,?,?)",(identity,kind,db.encode(payload),len(items),stamp,stamp,epoch))

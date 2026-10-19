@@ -4,11 +4,11 @@ import time
 from fastapi.testclient import TestClient
 from phonoteka import db,scheduling,webhooks
 from phonoteka.app import create_app
-from test_backend import settings,client,authenticated,synthetic,drain
+from test_backend import settings,client,authenticated,synthetic,drain,job
 
 
-def test_schedule_resolves_new_files_after_scan_and_deduplicates(settings):
-    cfg=replace(settings,external_fingerprints=True)
+def test_schedule_resolves_stable_new_files_after_two_scans_and_deduplicates(settings):
+    cfg=replace(settings,external_fingerprints=True,input_grace_seconds=0)
     synthetic(cfg)
     with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
         headers=authenticated(client,cfg)
@@ -21,6 +21,13 @@ def test_schedule_resolves_new_files_after_scan_and_deduplicates(settings):
         # the normal loop only ticks once before draining the scan.
         drain(cfg)
         scheduling.tick(cfg,now=state['next_run']+3)
+        assert db.fetchone(cfg.db_path,"SELECT * FROM jobs WHERE kind='recognize'") is None
+        waiting=json.loads(db.setting(cfg.db_path,'schedule'))
+        assert waiting['waiting_inputs']==1 and waiting['waiting_reason']=='input_stabilizing'
+        job(client,headers,'scan');drain(cfg)
+        # A later normal cycle sees two independently completed observations.
+        db.set_setting(cfg.db_path,'schedule',db.encode({**waiting,'next_run':0,'remaining':['recognize']}))
+        scheduling.tick(cfg)
         queued=db.fetchone(cfg.db_path,"SELECT * FROM jobs WHERE kind='recognize'")
         assert queued['total']==1 and json.loads(queued['payload'])['items'][0]['relative_path']=='sample.flac'
         client.put('/api/schedule',json={'enabled':False,'steps':['scan']},headers=headers)

@@ -86,6 +86,28 @@ def test_opt_in_plan_owner_auth_and_worker_publishes_all_objects(settings):
         assert not db.fetchall(cfg.db_path, "SELECT id FROM history WHERE kind='apply'")
 
 
+def test_classification_change_invalidates_already_queued_sidecar_plan(settings):
+    cfg=owner(settings)
+    with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
+        headers=authenticated(client,cfg);tid,sha=generated(cfg,client,headers)
+        plan=sidecars.create_plan(cfg,[tid],cover=True,lrc=True)
+        queued=job(client,headers,'publish_sidecars',[tid],{'plan_id':plan['id']})
+        response=client.put(f'/api/tracks/{tid}/recording-classification',
+            json={'kind':'possible_mix','base_version':0,'reason':'Owner identified several different songs in this file'},
+            headers={**headers,'If-Match':f'"{sha}"'})
+        assert response.status_code==200,response.text
+        row=db.fetchone(cfg.db_path,'SELECT * FROM tracks WHERE id=?',(tid,))
+        gate=lyrics_review.publication_gate(cfg,row)
+        assert gate['state']=='blocked' and 'possible_mix_requires_manual_review' in gate['reasons']
+        drain(cfg)
+        assert client.get('/api/jobs/'+queued['id']).json()['state']!='succeeded'
+        assert not (cfg.publication_root/'Ready/Album/cover.jpg').exists()
+        assert not (cfg.publication_root/'Ready/Album/song.lrc').exists()
+        assert not sidecars.load_plan(cfg,plan['id'])['results']
+        assert media.sha256_file(cfg.work_root/'Album/song.flac')==sha
+        assert media.sha256_file(cfg.publication_root/'Ready/Album/song.flac')==sha
+
+
 def test_concurrent_conflicting_album_cover_plans_do_not_overwrite(settings):
     cfg = owner(settings)
     with TestClient(create_app(cfg), base_url=cfg.app_url) as client:

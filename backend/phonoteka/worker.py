@@ -20,7 +20,7 @@ import threading
 import time
 import uuid
 
-from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy, provider_attempts
+from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy, provider_attempts, input_readiness, automation, recording_review
 from .providers import Providers, ProviderError
 from .config import Settings
 from .telemetry import Metrics, configure_logging, context, log, opaque_id, bounded, KINDS, worker_server
@@ -181,7 +181,8 @@ class Worker:
         # every admission check. Only these mutable controls leave SQLite.
         return db.fetchone(self.settings.db_path, """SELECT cancel_requested,auth_epoch,
             json_extract(payload,'$.pause_requested') AS pause_requested,
-            json_extract(payload,'$.auth_token_id') AS auth_token_id
+            json_extract(payload,'$.auth_token_id') AS auth_token_id,kind,
+            json_extract(payload,'$.auth_scopes') AS auth_scopes
             FROM jobs WHERE id=?""", (job_id,))
 
     def control_cancelled(self, row):
@@ -190,8 +191,8 @@ class Worker:
         if row['auth_epoch'] != epoch:return True
         token_id=row['auth_token_id']
         if token_id:
-            token=db.fetchone(self.settings.db_path,'SELECT revoked,expires,auth_epoch FROM api_tokens WHERE id=?',(token_id,))
-            return not token or token['revoked'] or token['expires']<=time.time() or token['auth_epoch']!=epoch
+            return not automation.token_grant_allowed(self.settings, token_id=token_id,
+                auth_epoch=row['auth_epoch'], kind=row['kind'], granted_scopes=row['auth_scopes'])
         return False
 
     def cancelled(self, job_id):
@@ -280,6 +281,7 @@ class Worker:
             if exc.code not in {'invalid_audio','unsupported_format'}: raise
             inspected = media.fallback_inventory(path, self.settings.roots, exc)
         meta = normalize_metadata(inspected)
+        recording_review.annotate(meta,meta['sha256'],False)
         if meta.get('format')!='cue' and not meta.get('input_error'):
             meta['youtube']=youtube.merge(youtube.discover(path,self.settings,meta))
         after = path.stat()
@@ -295,11 +297,12 @@ class Worker:
             if current:
                 identity = current["id"]
                 old = json.loads(current["metadata"])
+                meta['input_readiness'] = input_readiness.observed(meta, old, scan_id)
                 for key in ("cue_sheets", "cue_album_image"):
                     if key in old:
                         meta[key] = old[key]
                 if current["sha256"] == meta["sha256"]:
-                    for key in ("audit", "publication", "cue_sheets", "cue_album_image", "derived_from", "cue_export", "audio_export", "usage_provenance", "preferred_lyrics_slot", "lyrics_selection_empty", "preferred_cover", "artwork_transform"):
+                    for key in ("audit", "publication", "cue_sheets", "cue_album_image", "derived_from", "cue_export", "audio_export", "usage_provenance", "preferred_lyrics_slot", "lyrics_selection_empty", "preferred_cover", "artwork_transform", "recording_classification", "possible_mix", "record_type"):
                         if key in old:
                             meta[key] = old[key]
                     if old.get('preferred_lyrics_slot') or old.get('lyrics_selection_empty'):
@@ -324,6 +327,7 @@ class Worker:
                     status = 'needs_review' if meta.get('cue', {}).get('errors') else 'indexed'
                 conn.execute("UPDATE tracks SET sha256=?,metadata=?,status=?,scan_id=?,updated_at=? WHERE id=?", (meta["sha256"],db.encode(meta),status,scan_id,now,identity))
             else:
+                meta['input_readiness'] = input_readiness.observed(meta, {}, scan_id)
                 identity = str(uuid.uuid4())
                 conn.execute("INSERT INTO tracks(id,relative_path,sha256,metadata,scan_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (identity,relative,meta["sha256"],db.encode(meta),scan_id,now,now))
                 if meta.get('cue', {}).get('errors'):
@@ -332,10 +336,28 @@ class Worker:
                 conn.execute("UPDATE tracks SET status='error' WHERE id=?", (identity,))
         return {"track_id": identity, "relative_path": relative, **({'input_error':meta['input_error']} if meta.get('input_error') else {})}
 
+    def confirm_scan_inputs(self, scan_id, coverage_complete):
+        """Unrelated invalid audio does not invalidate a fully observed good file.
+
+        Root/enumeration/cancellation failures never establish a second pass.
+        Unseen and changed entries lose readiness, including after partial scans.
+        """
+        with db.transaction(self.settings.db_path) as conn:
+            for row in conn.execute('SELECT id,scan_id,metadata FROM tracks WHERE is_current=1').fetchall():
+                meta=json.loads(row['metadata'])
+                if row['scan_id'] == scan_id:
+                    value=input_readiness.confirm(meta,scan_id,complete=coverage_complete,
+                        grace_seconds=self.settings.input_grace_seconds)
+                else:
+                    value=input_readiness.observed(meta,{},None)
+                if value is not None:
+                    meta['input_readiness']=value
+                    conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),row['id']))
+
     def link_cue_sheets(self):
         """Mark album images explicitly; individual CUE songs never write their tags."""
         with db.transaction(self.settings.db_path) as conn:
-            rows = conn.execute("SELECT id,relative_path,metadata FROM tracks WHERE is_current=1 AND status<>'missing'").fetchall()
+            rows = conn.execute("SELECT id,relative_path,sha256,metadata FROM tracks WHERE is_current=1 AND status<>'missing'").fetchall()
             links = {}
             uncertain = any(json.loads(row['metadata']).get('cue', {}).get('errors') for row in rows)
             for row in rows:
@@ -358,6 +380,7 @@ class Worker:
                     continue
                 meta['cue_sheets'] = links.get(row['relative_path'], [])
                 meta['cue_album_image'] = any(x['track_count'] > 1 for x in meta['cue_sheets'])
+                recording_review.annotate(meta,row['sha256'],False)
                 conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), row['id']))
 
     async def scan(self, job):
@@ -386,6 +409,7 @@ class Worker:
         await self.bounded_items(paths, one, should_stop=stop_admission)
         stats = db.fetchone(self.settings.db_path, "SELECT * FROM jobs WHERE id=?", (job["id"],))
         final_identity = await self.io(root_identity, self.settings.work_root)
+        await self.io(self.confirm_scan_inputs,job['id'],not errors and not self.cancelled(job['id']) and final_identity == identity)
         complete = not errors and not stats["failed"] and not self.cancelled(job["id"]) and final_identity == identity
         if complete:
             with db.transaction(self.settings.db_path) as conn:
@@ -436,11 +460,17 @@ class Worker:
             result['usage_after']=provenance
             for field in ('derived_from','cue_sheets','cue_album_image','youtube'):
                 if field in old: metadata[field]=old[field]
+            if old.get('recording_classification') and result.get('audio_identity'):
+                # Native edits verified identical audio packets. The explicit
+                # recording decision follows those packets, not a new song.
+                metadata['recording_classification']={**old['recording_classification'], 'input_sha256':metadata['sha256']}
+            recording_review.annotate(metadata,metadata['sha256'],False)
+            metadata['input_readiness']=input_readiness.observed(metadata,{},None)
             if old.get("publication"):
                 metadata["publication"] = old["publication"]
             if result.get("audio_identity") and old.get("audit", {}).get("audio_identity") == result["audio_identity"]:
                 metadata["audit"] = {**old["audit"], "sha256": metadata["sha256"], "reused_by_audio_identity": True}
-            status = "accepted" if job["kind"] == "apply" else "indexed"
+            status = recording_review.catalog_status("accepted" if job["kind"] == "apply" else "indexed",metadata['possible_mix'])
             from . import lyrics_document
             lyrics_document.committed(conn, current, metadata, item.get('proposal', {}) if job['kind'] == 'apply' else {})
             conn.execute("UPDATE tracks SET sha256=?,metadata=?,status=?,updated_at=? WHERE id=?", (metadata["sha256"],db.encode(metadata),status,db.utcnow(),track_id))
@@ -463,6 +493,8 @@ class Worker:
         if not current or current["sha256"] != item["sha256"]:
             raise media.MediaError("conflict", "Input revision is no longer current")
         meta = json.loads(current['metadata'])
+        if job['kind'] in {'apply','publish','publish_sidecars','normalize_audio'} and recording_review.possible_mix(meta,item['sha256']):
+            raise media.MediaError('possible_mix_requires_manual_review', 'Составная запись не получает теги отдельной песни; подтвердите тип записи вручную')
         if job['kind'] == 'rollback_ready':
             from . import publication
             return publication.rollback(self.settings, job, item, lambda: self.authorize(job))
@@ -473,7 +505,14 @@ class Worker:
             self.authorize(job)
             from . import derivatives
             exporter=cue_export if job['kind']=='extract_cue' else derivatives
-            result=exporter.export(path,meta,self.settings,lambda:self.authorize(job))
+            def authorize_export():
+                self.authorize(job)
+                fresh=db.fetchone(self.settings.db_path,'SELECT sha256,metadata FROM tracks WHERE id=? AND is_current=1',(item['track_id'],))
+                if not fresh or fresh['sha256']!=item['sha256']:
+                    raise media.MediaError('conflict','Source revision changed before derivative commit')
+                if job['kind']=='normalize_audio' and recording_review.possible_mix(json.loads(fresh['metadata']),item['sha256']):
+                    raise media.MediaError('possible_mix_requires_manual_review','Классификация записи изменилась до создания производной')
+            result=exporter.export(path,meta,self.settings,authorize_export)
             derived=[]
             for entry in result['files']:
                 indexed=self.scan_one(entry['relative_path'],None)
@@ -484,8 +523,25 @@ class Worker:
                     conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(data),indexed['track_id']))
                 derived.append(indexed['track_id'])
             with db.transaction(self.settings.db_path) as conn:
-                meta['cue_export' if job['kind']=='extract_cue' else 'audio_export']={'identity':result['identity'],'track_ids':derived,'count':len(derived),'gap_policy':result.get('gap_policy')}
-                conn.execute('UPDATE tracks SET metadata=?,updated_at=? WHERE id=? AND sha256=?',(db.encode(meta),db.utcnow(),item['track_id'],item['sha256']))
+                fresh=conn.execute('SELECT sha256,metadata FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
+                if not fresh or fresh['sha256']!=item['sha256']:
+                    raise media.MediaError('conflict','Source revision changed before derivative catalog commit')
+                latest=json.loads(fresh['metadata'])
+                if job['kind']=='normalize_audio' and recording_review.possible_mix(latest,item['sha256']):
+                    # A commit already in progress may finish after the owner
+                    # marks its source. The whole-file derivative inherits the
+                    # safety flag, never a forged owner confirmation.
+                    for derived_id in derived:
+                        child=conn.execute('SELECT sha256,metadata,status FROM tracks WHERE id=? AND is_current=1',(derived_id,)).fetchone()
+                        if not child:raise media.MediaError('conflict','Derivative catalog revision changed before source bookkeeping')
+                        child_meta=json.loads(child['metadata'])
+                        if recording_review.decision(child_meta,child['sha256']).get('origin')!='owner':
+                            child_meta['possible_mix']=True
+                            recording_review.annotate(child_meta,child['sha256'],False)
+                            conn.execute('UPDATE tracks SET metadata=?,status=? WHERE id=?',
+                                (db.encode(child_meta),recording_review.catalog_status(child['status'],True),derived_id))
+                latest['cue_export' if job['kind']=='extract_cue' else 'audio_export']={'identity':result['identity'],'track_ids':derived,'count':len(derived),'gap_policy':result.get('gap_policy')}
+                conn.execute('UPDATE tracks SET metadata=?,updated_at=? WHERE id=? AND sha256=?',(db.encode(latest),db.utcnow(),item['track_id'],item['sha256']))
                 db.event(conn,'cue_extracted' if job['kind']=='extract_cue' else 'audio_normalized',{'track_id':item['track_id'],'count':len(derived),'export_identity':result['identity']})
             return {'state':'succeeded','derived_track_ids':derived,'reused':result.get('reused',False),'identity':result['identity']}
         if meta.get('format') == 'cue' or (meta.get('cue_album_image') and job['kind'] not in {'audit','analyze'}):
@@ -500,11 +556,14 @@ class Worker:
                 raise media.MediaError("conflict", "File changed before audit")
             result["checked_at"] = db.utcnow()
             with db.transaction(self.settings.db_path) as conn:
-                meta = json.loads(current["metadata"])
-                meta["audit"] = result
+                fresh=conn.execute('SELECT sha256,metadata,status FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
+                if not fresh or fresh['sha256']!=item['sha256']:
+                    raise media.MediaError('conflict','Input revision changed during audio audit')
+                latest=json.loads(fresh['metadata'])
+                latest["audit"] = result
                 if result.get('hash_verified_at'):
-                    meta['hash_verified_at'] = result['hash_verified_at']
-                conn.execute("UPDATE tracks SET metadata=?,status=?,updated_at=? WHERE id=? AND sha256=?", (db.encode(meta),"error" if result["state"] == "failed" else current["status"],db.utcnow(),item["track_id"],item["sha256"]))
+                    latest['hash_verified_at'] = result['hash_verified_at']
+                conn.execute("UPDATE tracks SET metadata=?,status=?,updated_at=? WHERE id=? AND sha256=?", (db.encode(latest),"error" if result["state"] == "failed" else fresh["status"],db.utcnow(),item["track_id"],item["sha256"]))
             if result["state"] != "passed":
                 raise media.MediaError("audit_failed", "Audio did not pass decoding audit")
             return {"audit": result}
@@ -530,6 +589,12 @@ class Worker:
         def authorize():
             nonlocal commit_announced
             self.authorize(job)
+            if job['kind'] in {'apply','publish'}:
+                latest=db.fetchone(self.settings.db_path,'SELECT sha256,metadata FROM tracks WHERE id=? AND is_current=1',(item['track_id'],))
+                if not latest or latest['sha256']!=item['sha256']:
+                    raise media.MediaError('conflict','Input revision changed before commit')
+                if recording_review.possible_mix(json.loads(latest['metadata']),item['sha256']):
+                    raise media.MediaError('possible_mix_requires_manual_review','Классификация записи изменилась до файлового эффекта')
             provider_policy.require_track(self.settings,current,'cache')
             if job['kind']=='apply':
                 from . import automatic_quality
@@ -619,7 +684,7 @@ class Worker:
             if int(db.setting(self.settings.db_path,'auth_epoch','0'))!=job['auth_epoch'] or self.cancelled(job['id']):
                 raise media.MediaError('authorization_revoked','Analysis authorization revoked')
         authorized()
-        identified=None; recognition_source=None
+        identified=None; recognition_source=None; segment_result=None
         if fingerprint:
             def current_audit(value):
                 return (isinstance(value,dict) and value.get('state')=='passed'
@@ -655,23 +720,26 @@ class Worker:
             # probe is needed after the full audit.
             audio_identity=audit['audio_identity']
             await self.io(self.item_action,job,item,'fingerprint_sample')
-            audio, offset=await self.io(recognition.sample,path,self.settings.roots,float(meta.get('duration',0)))
-            try:
-                with provider_attempts.recognition_scope(audio_identity,job['id']):
-                    await self.io(self.item_action,job,item,'fingerprint_lookup')
-                    identified=await recognition.recognize(self.providers,audio,offset,authorized,input_revision=item['sha256'])
-                    alternate=min(max(0,float(meta.get('duration',0))-12),float(meta.get('duration',0))*.65)
-                    if not identified and abs(alternate-offset)>=5:
-                        audio,offset=await self.io(recognition.sample,path,self.settings.roots,float(meta.get('duration',0)),alternate)
-                        identified=await recognition.recognize(self.providers,audio,offset,authorized,input_revision=item['sha256'])
-                recognition_source={'provider':'shazam','state':'fingerprint_match' if identified else 'no_match'}
-            except ProviderError as exc:
-                recognition_source={'provider':'shazam','state':exc.code,'message':str(exc)}
+            async def sample_audio(offset):
+                await self.io(self.item_action,job,item,'fingerprint_sample')
+                value=await self.io(recognition.sample,path,self.settings.roots,float(meta.get('duration',0)),offset)
+                await self.io(self.item_action,job,item,'fingerprint_lookup')
+                return value
+            segment_result=await recognition.identify_segments(self.providers,sample_audio,float(meta.get('duration',0)),authorized,
+                input_revision=item['sha256'],audio_identity=audio_identity,batch_id=job['id'])
+            matches=[entry['candidate'] for entry in segment_result['segments'] if entry.get('candidate')]
+            identified=matches[0] if matches and not segment_result['possible_mix'] else None
+            failures=[entry['state'] for entry in segment_result['segments'] if entry['state'] not in {'match','no_match'}]
+            recognition_source={'provider':'shazam','state':failures[0] if failures else 'needs_review' if segment_result['possible_mix'] else 'fingerprint_match' if identified else 'no_match'}
         else:
             previous=await self.io(db.fetchone,self.settings.db_path,'SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256']))
             if previous:
                 identified=next((c for c in json.loads(previous['payload']).get('candidates',[]) if c.get('provider')=='shazam' and c.get('tags')),None)
-        if self.settings.external_metadata:
+        if (segment_result and segment_result['possible_mix']) or recording_review.possible_mix(meta,item['sha256']):
+            # Never use the first song of a compilation as a whole-file query.
+            result={'input_sha256':item['sha256'],'query_source':'conflicting_audio_segments','candidates':[],
+                    'sources':[],'automatic_apply':False,'state':'needs_review'}
+        elif self.settings.external_metadata:
             await self.io(self.item_action,job,item,'metadata_lookup')
             result = await self.providers.analyze(meta, item['relative_path'],identified,authorized)
         else:
@@ -679,8 +747,16 @@ class Worker:
                     'automatic_apply':False,'state':'incomplete'}
         if recognition_source:
             result['sources'].insert(0,recognition_source)
-            if identified:
-                result['candidates'].insert(0,identified);result['state']='candidates'
+            if segment_result:
+                matches={entry['candidate']['id']:entry['candidate'] for entry in segment_result['segments'] if entry.get('candidate')}
+                result['candidates'][:0]=matches.values()
+                result['recognition_segments']=[{**{key:value for key,value in entry.items() if key!='candidate'},
+                    **({'provider':entry['candidate'].get('provider'),'provider_recording_id':entry['candidate'].get('provider_recording_id') or entry['candidate']['id'],
+                        'isrc':entry['candidate'].get('isrc')} if entry.get('candidate') else {})}
+                    for entry in segment_result['segments']]
+                result['recording_confirmation']=segment_result['state']
+                result['possible_mix']=segment_result['possible_mix']
+                if matches and not segment_result['possible_mix']:result['state']='candidates'
         # Album artwork already next to the track is a local candidate, never an arbitrary path.
         if not meta.get('has_art'):
             local = await self.io(self.local_cover, path)
@@ -691,7 +767,7 @@ class Worker:
         if int(db.setting(self.settings.db_path, 'auth_epoch', '0')) != job['auth_epoch'] or self.cancelled(job['id']):
             raise media.MediaError('authorization_revoked','Analysis authorization revoked')
         with db.transaction(self.settings.db_path) as conn:
-            current = conn.execute('SELECT sha256 FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
+            current = conn.execute('SELECT sha256,metadata,status FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
             if not current or current['sha256'] != item['sha256']: raise media.MediaError('conflict','File revision changed')
             previous=conn.execute('SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256'])).fetchone()
             if previous:
@@ -702,6 +778,12 @@ class Worker:
                 if not fingerprint:
                     result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider')=='shazam')
                     result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider')=='shazam')
+                    for key in ('recognition_segments','recording_confirmation','possible_mix'):
+                        if key in old:result[key]=old[key]
+            if segment_result:
+                fresh_meta=recording_review.annotate(json.loads(current['metadata']),item['sha256'],segment_result['possible_mix'])
+                conn.execute('UPDATE tracks SET metadata=?,status=?,updated_at=? WHERE id=?',
+                    (db.encode(fresh_meta),recording_review.catalog_status(current['status'],fresh_meta['possible_mix']),db.utcnow(),item['track_id']))
             result=provider_policy.prepare_analysis(conn,result)
             conn.execute('INSERT OR REPLACE INTO analyses VALUES(?,?,?,?)',(item['track_id'],item['sha256'],db.encode(result),db.utcnow()))
             db.event(conn,'analysis_completed',{'track_id':item['track_id'],'state':result['state']})
@@ -880,7 +962,7 @@ class Worker:
                     waiting_storage=True;retry_at=max(retry_at,time.time()+60)
                     self.item_result(job['id'],key,'deferred',{**result,'retry_at':retry_at,'wait_reason':'storage'})
                     return
-                state = "interrupted" if has_intent else "conflict" if result["code"] in {"conflict", "revision_conflict"} else "needs_review" if result["code"] in {"needs_review", "invalid_lyrics", "unsupported_format", "authorization_revoked", "publication_snapshot_required", "publication_review_stale", "lyrics_document_stale", "lyrics_line_locked", "lyrics_document_conflict", "partial_lyrics", "recognition_attempt_budget_exhausted", "recognition_identity_required"} else "failed"
+                state = "interrupted" if has_intent else "conflict" if result["code"] in {"conflict", "revision_conflict"} else "needs_review" if result["code"] in {"needs_review", "invalid_lyrics", "unsupported_format", "authorization_revoked", "publication_snapshot_required", "publication_review_stale", "lyrics_document_stale", "lyrics_line_locked", "lyrics_document_conflict", "partial_lyrics", "recognition_attempt_budget_exhausted", "recognition_identity_required", "possible_mix_requires_manual_review"} else "failed"
                 if has_intent:
                     with db.transaction(self.settings.db_path) as conn:
                         conn.execute("UPDATE tracks SET status='needs_review' WHERE id=?", (key,))

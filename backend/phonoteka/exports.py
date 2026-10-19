@@ -147,7 +147,9 @@ def install(app,settings):
     @app.post('/api/deliveries',status_code=201)
     def receipt(request:Request,body:ReceiptInput):
         active=security.require_session(request,settings,True)
-        if active.get('api_token_id') and ('jobs:write' not in active['scopes'] or body.poweramp_checked):
+        from . import automation
+        automation.check_scope(active, 'publish:write', 'Токен не разрешает доставку')
+        if active.get('api_token_id') and body.poweramp_checked:
             raise security.error(403,'owner_session_required','Poweramp подтверждает владелец в браузере')
         doc=manifest(settings,body.export_id)
         expected={x['path']:x['sha256'] for x in doc['files']}

@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import tempfile
 from pathlib import Path
 import time
@@ -156,7 +157,66 @@ async def recognize(providers, audio, offset, authorize=lambda: None,*,input_rev
         source = str(track.get('url', ''))
         if urlsplit(source).scheme != 'https' or urlsplit(source).hostname not in {'www.shazam.com', 'shazam.com'}: source = ''
         with wave.open(io.BytesIO(audio)) as wav: seconds=wav.getnframes()/wav.getframerate()
+        isrc = str(track.get('isrc', '')).upper()
         return {'id': 'shazam:' + str(track['key'])[:100], 'provider': 'shazam', 'kind': 'metadata', 'tags': tags,
+                'provider_recording_id': str(track['key'])[:100],
+                'isrc': isrc if re.fullmatch('[A-Z]{2}[A-Z0-9]{3}[0-9]{7}', isrc) else None,
+                'sample_sha256': hashlib.sha256(audio).hexdigest(), 'extractor_profile': POLICY,
                 'identification': 'audio_fingerprint', 'source_url': source, 'sample_offset': offset,
                 'sample_seconds': seconds, 'recording_version_verified': False,
                 'match': {'state': 'fingerprint_match', 'reasons': ['recording_version_unverified']}}
+
+
+def offsets(duration):
+    """Two separated real fragments when the recording is long enough."""
+    if not math.isfinite(duration) or duration <= 0:
+        return [None]
+    first = min(45., max(0., duration * .25))
+    second = min(max(0., duration - 12), duration * .65)
+    return [first, second] if abs(second - first) >= 5 else [first]
+
+
+def segment_verdict(segments):
+    matches = [item['candidate'] for item in segments if item.get('state') == 'match']
+    identities = {(item.get('provider'), item.get('provider_recording_id') or item.get('id')) for item in matches
+                  if isinstance(item.get('provider_recording_id') or item.get('id'), str) and (item.get('provider_recording_id') or item.get('id'))}
+    isrcs = {item['isrc'] for item in matches if item.get('isrc')}
+    conflict = len(identities) > 1 or len(isrcs) > 1
+    matched_offsets=[item['offset'] for item in segments if item.get('state')=='match']
+    separated=len(matched_offsets)>=2 and max(matched_offsets)-min(matched_offsets)>=5
+    agreed = len(matches) >= 2 and len(identities) == 1 and separated and not conflict
+    return {'state': 'conflict' if conflict else 'agreement' if agreed else 'insufficient',
+            'possible_mix': conflict, 'recording_only': True,
+            'release_verified': False, 'lyrics_verified': False}
+
+
+async def identify_segments(providers, sample_audio, duration, authorize, *, input_revision,
+                            audio_identity, batch_id):
+    """No hidden retry: all fragments share the existing durable call budget.
+
+    sample_audio is the Worker's bounded I/O lane. recognize retains its exact
+    per-fragment cache/transport policy, including unknown-outcome accounting.
+    """
+    segments = []
+    with provider_attempts.recognition_scope(audio_identity, batch_id):
+        for requested in offsets(duration):
+            authorize()
+            audio, offset = await sample_audio(requested)
+            authorize()
+            # A truncated tail fallback may resolve to the same first sample.
+            digest = hashlib.sha256(audio).hexdigest()
+            if any(item['offset'] == offset and item['sample_sha256'] == digest for item in segments):
+                continue
+            entry = {'offset': offset, 'sample_sha256': digest, 'extractor_profile': POLICY}
+            try:
+                candidate = await recognize(providers, audio, offset, authorize, input_revision=input_revision)
+                authorize()
+                entry.update(state='match' if candidate else 'no_match', candidate=candidate)
+                if candidate: entry['sample_seconds'] = candidate.get('sample_seconds')
+            except ProviderError as exc:
+                entry.update(state=exc.code, candidate=None)
+                segments.append(entry)
+                # Cooldown/unknown/budget must not create another network send.
+                break
+            segments.append(entry)
+    return {'segments': segments, **segment_verdict(segments)}

@@ -10,7 +10,7 @@ import uuid
 from fastapi.testclient import TestClient
 import pytest
 
-from phonoteka import automatic_quality as quality, db, lyrics_document, media, provider_policy
+from phonoteka import automatic_quality as quality, db, lyrics_document, media, provider_policy, input_readiness
 from phonoteka.app import create_app
 from phonoteka.worker import Worker
 from test_backend import settings, authenticated, seed, accept_publication_review
@@ -22,6 +22,11 @@ def fixture(settings, client, headers):
     with db.transaction(settings.db_path) as conn:
         row = conn.execute('SELECT * FROM tracks WHERE id=?', (tid,)).fetchone()
         metadata = json.loads(row['metadata']); metadata.update(duration=3, audit={'state': 'passed', 'sha256': sha, 'fixture': 'gate_dependencies_only'})
+        stat=(settings.work_root/row['relative_path']).stat()
+        metadata.update(size=stat.st_size,mtime_ns=stat.st_mtime_ns)
+        for scan_id,at in [('fixture-first',0),('fixture-second',60)]:
+            metadata['input_readiness']=input_readiness.observed(metadata,metadata,scan_id,now=at)
+            metadata['input_readiness']=input_readiness.confirm(metadata,scan_id,complete=True,grace_seconds=60,now=at)
         conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(metadata), tid))
     accept_publication_review(client, headers, tid)
     row = db.fetchone(settings.db_path, 'SELECT * FROM tracks WHERE id=?', (tid,))
@@ -93,6 +98,19 @@ def test_production_profile_blocks_even_structurally_valid_input_and_cannot_be_f
         assert forged_job.status_code == 422
         malformed_mode = client.post('/api/jobs', json={'kind': 'apply', 'track_ids': [tid], 'params': {'acceptance_mode': []}}, headers={**headers, 'Idempotency-Key': 'malformed-mode'})
         assert malformed_mode.status_code == 422
+
+
+def test_automatic_gate_requires_stable_intake_even_after_hypothetical_pilot(settings,monkeypatch):
+    enabled_for_test(monkeypatch)
+    cfg=replace(settings,read_only=False,storage_verified=True)
+    with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
+        headers=authenticated(client,cfg);tid,_,_=fixture(cfg,client,headers)
+        with db.transaction(cfg.db_path) as conn:
+            row=conn.execute('SELECT metadata FROM tracks WHERE id=?',(tid,)).fetchone()
+            meta=json.loads(row['metadata']);meta.pop('input_readiness')
+            conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),tid))
+        result=preview(client,tid)
+        assert result['state']!='passed' and 'input_stabilizing' in result['reason_codes']
 
 
 @pytest.mark.parametrize(('mutation', 'expected'), [

@@ -30,7 +30,7 @@ from . import webhooks,provider_attempts
 from .config import Settings
 from . import publication
 from . import retention, export_leases
-from . import album_gain_policy, api_facades, audit_status
+from . import album_gain_policy, api_facades, audit_status, recording_review, input_readiness
 
 
 class LoginInput(BaseModel):
@@ -102,12 +102,14 @@ def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, 
         "filename": Path(row["relative_path"]).name,
         "sha256": row["sha256"], "revision": row["sha256"], "status": row["status"],
         "hash_verified_at": meta.get('hash_verified_at'),
-        "can_write": settings.writable and not meta.get('cue_album_image') and bool(meta.get("write_supported", meta.get("format", "").lower() in {"mp3", "flac"})) and row["status"] != "missing",
+        "can_write": settings.writable and not meta.get('cue_album_image') and not recording_review.possible_mix(meta,row['sha256']) and bool(meta.get("write_supported", meta.get("format", "").lower() in {"mp3", "flac"})) and row["status"] != "missing",
         "tags": {key: (value[0] if value else "") if isinstance(value, list) else value for key, value in meta.get("tags", {}).items()},
         "tag_values": meta.get("tags", {}), "has_art": bool(meta.get("has_art", False)),
         "lyrics": meta.get("lyrics", ""), "lrc": meta.get("lrc", ""),
         "proposal": _public_proposal(proposal), "updated_at": row["updated_at"],
         **audit_status.describe(meta, row['sha256'], row['status']),
+        'input_readiness': {**(meta['input_readiness'] if isinstance(meta.get('input_readiness'),dict) else {}),
+            **input_readiness.describe(meta,grace_seconds=settings.input_grace_seconds)},
     }
     if detail:
         result['lyrics_document'] = lyrics_document.public_document(settings, row)
@@ -218,6 +220,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     publication_sidecars.install(app,settings)
     from . import automatic_quality
     automatic_quality.install(app,settings)
+    recording_review.install(app,settings)
     retention.install(app,settings)
     export_leases.install(app,settings)
     @app.get('/api/openapi.json',include_in_schema=False)
@@ -643,6 +646,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if not track:
                     raise security.error(404, "track_not_found", "Трек не найден", file_id=track_id)
                 meta = json.loads(track['metadata'])
+                if body.kind in {'apply','publish','publish_sidecars','normalize_audio'} and recording_review.possible_mix(meta,track['sha256']):
+                    raise security.error(409,'possible_mix_requires_manual_review','Составная запись не получает теги отдельной песни; подтвердите тип записи вручную')
                 if body.kind=='normalize_audio' and (meta.get('write_supported') or meta.get('input_error')):
                     raise security.error(409,'native_or_invalid','Файл уже поддерживает запись либо поврежден')
                 if body.kind=='extract_cue':
@@ -718,7 +723,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except media.MediaError as exc:
                     raise security.error(409, exc.code, exc.message) from exc
             payload = {"items": items, "params": body.params}
-            if active.get('api_token_id'):payload['auth_token_id']=active['api_token_id']
+            if active.get('api_token_id'):
+                payload['auth_token_id']=active['api_token_id']
+                payload['auth_scopes']=sorted(active['scopes'])
             conn.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch) VALUES(?,?,'queued','pending',?,?,?,?,?)", (identity,body.kind,db.encode(payload),len(items),now,now,active["auth_epoch"]))
             conn.execute("INSERT INTO idempotency VALUES(?,?,?,?,?)", (scope,key,request_hash,identity,now))
             db.event(conn, "job_created", {"job_id": identity, "kind": body.kind})
@@ -760,8 +767,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 if row['state']!='paused':raise security.error(409,'job_not_paused','Задание не приостановлено')
                 if db.setting(settings.db_path,'recovery_required','false')=='true':raise security.error(409,'recovery_required','Сначала завершите восстановление')
-                payload['pause_requested']=False;payload.pop('auth_token_id',None)
-                if active.get('api_token_id'):payload['auth_token_id']=active['api_token_id']
+                payload['pause_requested']=False;payload.pop('auth_token_id',None);payload.pop('auth_scopes',None)
+                if active.get('api_token_id'):
+                    payload['auth_token_id']=active['api_token_id']
+                    payload['auth_scopes']=sorted(active['scopes'])
                 state='queued';stage=('waiting_storage' if payload.get('wait_reason')=='storage' else 'waiting_provider') if payload.get('retry_at',0)>time.time() else 'pending'
             conn.execute('UPDATE jobs SET payload=?,state=?,stage=?,auth_epoch=?,updated_at=? WHERE id=?',(db.encode(payload),state,stage,active['auth_epoch'],db.utcnow(),job_id))
             db.event(conn,'job_'+action,{'job_id':job_id})

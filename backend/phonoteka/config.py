@@ -27,6 +27,7 @@ class Settings:
     allow_insecure_localhost: bool = False
     file_workers: int = 2
     io_threads: int = 2
+    input_grace_seconds: int = 60
     session_hours: int = 12
     provider_daily_limit: int = 2500
     external_metadata: bool = False
@@ -48,6 +49,8 @@ class Settings:
     webhook_max_pending: int = 10000
 
     def __post_init__(self):
+        if type(self.input_grace_seconds) is not int or not 0 <= self.input_grace_seconds <= 86400:
+            raise ValueError("INPUT_GRACE_SECONDS must be an integer in 0..86400")
         if self.musicbrainz_host not in {"musicbrainz.org", "beta.musicbrainz.org"}:
             raise ValueError("MUSICBRAINZ_HOST must be an official MusicBrainz endpoint")
 
@@ -89,6 +92,7 @@ class Settings:
             musicbrainz_host=os.environ.get("MUSICBRAINZ_HOST", "musicbrainz.org"),
             provider_daily_limit=max(1,min(int(os.environ.get("PROVIDER_DAILY_LIMIT","2500")),10000)),
             io_threads=max(1, min(int(os.environ.get("IO_THREADS", "2")), 8)),
+            input_grace_seconds=int(os.environ.get('INPUT_GRACE_SECONDS', '60')),
         )
 
     @property

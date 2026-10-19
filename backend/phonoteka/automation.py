@@ -9,20 +9,80 @@ from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 from . import db, security
 
-SCOPES={'read','jobs:analysis','jobs:write'}
+CANONICAL_SCOPES={'library:read','jobs:create','files:write','publish:write'}
+LEGACY_SCOPES={'read','jobs:analysis','jobs:write'}
+SCOPES=CANONICAL_SCOPES|LEGACY_SCOPES
+FILE_JOBS={'apply','rollback','extract_cue','normalize_audio'}
+PUBLICATION_JOBS={'publish','rollback_ready','publish_sidecars','export_ready'}
+ANALYSIS_JOBS={'scan','audit','analyze','recognize','transcribe','align','replaygain','replaygain_album','youtube','release_audit'}
+# These are compatibility grants, not broad aliases for jobs:create. In
+# particular old jobs:write never permitted analysis, and old jobs:analysis
+# permitted export_ready but no other publication or delivery operation.
+LEGACY_WRITE_JOBS=FILE_JOBS|{'publish','rollback_ready','publish_sidecars'}
+LEGACY_ANALYSIS_JOBS=ANALYSIS_JOBS|{'export_ready'}
 
 
 class TokenInput(BaseModel):
     model_config=ConfigDict(extra='forbid')
     name:str=Field(min_length=1,max_length=80)
-    scopes:list[str]=Field(min_length=1,max_length=3)
+    scopes:list[str]=Field(min_length=1,max_length=7)
     days:int=Field(default=30,ge=1,le=365)
 
 
+def scope_set(value):
+    """Fail closed for malformed stored/snapshotted scopes."""
+    if isinstance(value,str):
+        try:value=json.loads(value)
+        except (TypeError,ValueError):return frozenset()
+    if not isinstance(value,(list,tuple,set,frozenset)) or not value or len(value)>7:
+        return frozenset()
+    if any(not isinstance(item,str) or item not in SCOPES for item in value):
+        return frozenset()
+    return frozenset(value)
+
+
+def has_scope(scopes,required):
+    scopes=scope_set(scopes)
+    aliases={'library:read':{'read'},'files:write':{'jobs:write'},'publish:write':{'jobs:write'}}
+    return required in CANONICAL_SCOPES and bool(scopes&({required}|aliases.get(required,set())))
+
+
+def job_scope_allowed(scopes,kind):
+    scopes=scope_set(scopes)
+    if kind not in ANALYSIS_JOBS|FILE_JOBS|PUBLICATION_JOBS:return False
+    if 'jobs:create' in scopes:
+        if kind in FILE_JOBS and has_scope(scopes,'files:write'):return True
+        if kind in PUBLICATION_JOBS and has_scope(scopes,'publish:write'):return True
+        if kind in ANALYSIS_JOBS:return True
+    return bool('jobs:analysis' in scopes and kind in LEGACY_ANALYSIS_JOBS
+                or 'jobs:write' in scopes and kind in LEGACY_WRITE_JOBS)
+
+
+def token_grant_allowed(settings,*,token_id,auth_epoch,kind,granted_scopes=None):
+    """Recheck accepted and live powers before an effect, without job payloads.
+
+    Old jobs have no scope snapshot. Only their legacy names may authorize
+    those jobs; adding canonical powers later cannot broaden a past grant.
+    The worker supplies the small JSON projection from job_control.
+    """
+    if not token_id:return True
+    epoch=int(db.setting(settings.db_path,'auth_epoch','0'))
+    token=db.fetchone(settings.db_path,'SELECT scopes,revoked,expires,auth_epoch FROM api_tokens WHERE id=?',(token_id,))
+    if not token or token['revoked'] or token['expires']<=time.time() or token['auth_epoch']!=epoch or auth_epoch!=epoch:
+        return False
+    current=scope_set(token['scopes'])
+    accepted=scope_set(granted_scopes) if granted_scopes is not None else current&LEGACY_SCOPES
+    return job_scope_allowed(current,kind) and job_scope_allowed(accepted,kind)
+
+
+def check_scope(active,required,message='Недостаточно прав API-токена'):
+    if active.get('api_token_id') and not has_scope(active.get('scopes'),required):
+        raise security.error(403,'scope_denied',message)
+
+
 def check_job(active,kind):
-    if not active.get('api_token_id'):return
-    required='jobs:write' if kind in {'apply','rollback','publish','rollback_ready','publish_sidecars','extract_cue','normalize_audio'} else 'jobs:analysis'
-    if required not in active['scopes']:raise security.error(403,'scope_denied','Токен не разрешает этот вид задания')
+    if active.get('api_token_id') and not job_scope_allowed(active.get('scopes'),kind):
+        raise security.error(403,'scope_denied','Токен не разрешает этот вид задания')
 
 
 def bearer(request,settings):
@@ -33,25 +93,27 @@ def bearer(request,settings):
                     (security.token_hash(header[7:]),time.time()))
     if not row or row['auth_epoch']!=int(db.setting(settings.db_path,'auth_epoch','0')):
         raise security.error(401,'invalid_api_token','API-токен истек или отозван')
-    scopes=json.loads(row['scopes']);path=request.url.path.replace('/api/v1/','/api/',1)
+    scopes=scope_set(row['scopes']);path=request.url.path.replace('/api/v1/','/api/',1)
     allowed=False
     if request.method=='GET':
-        allowed='read' in scopes and (path in {'/api/summary','/api/providers','/api/events','/api/openapi.json'} or path.startswith(('/api/tracks','/api/jobs','/api/reports','/api/exports','/api/release-reviews','/api/publications','/api/album-gain-groups')))
+        allowed=has_scope(scopes,'library:read') and (path in {'/api/summary','/api/providers','/api/events','/api/openapi.json'} or path.startswith(('/api/tracks','/api/jobs','/api/reports','/api/exports','/api/release-reviews','/api/publications','/api/album-gain-groups')))
     elif request.method=='POST':
-        if path=='/api/jobs' or re.fullmatch(r'/api/jobs/[^/]+/(cancel|pause|resume)',path):allowed=bool(set(scopes)&{'jobs:analysis','jobs:write'})
-        elif re.fullmatch(r'/api/tracks/[^/]+/(proposal|analysis/select)',path):allowed='jobs:write' in scopes
-        elif path=='/api/deliveries':allowed='jobs:write' in scopes
-        elif path=='/api/publications/plan' or re.fullmatch(r'/api/(proposals/[^/]+/apply|publications/[^/]+/commit|revisions/[^/]+/rollback)',path):allowed='jobs:write' in scopes
-        elif path=='/api/export-leases' or re.fullmatch(r'/api/export-leases/[^/]+/renew',path):allowed='jobs:write' in scopes
+        if path=='/api/jobs' or re.fullmatch(r'/api/jobs/[^/]+/(cancel|pause|resume)',path):allowed=bool(scopes&{'jobs:create','jobs:analysis','jobs:write'})
+        elif re.fullmatch(r'/api/jobs/[^/]+/retry-storage',path):allowed='jobs:create' in scopes
+        elif re.fullmatch(r'/api/tracks/[^/]+/(proposal|analysis/select)',path):allowed=has_scope(scopes,'files:write')
+        elif path in {'/api/deliveries','/api/publications/plan','/api/export-leases'} or re.fullmatch(r'/api/export-leases/[^/]+/renew',path):allowed=has_scope(scopes,'publish:write')
+        elif re.fullmatch(r'/api/proposals/[^/]+/apply',path):allowed=job_scope_allowed(scopes,'apply')
+        elif re.fullmatch(r'/api/publications/[^/]+/commit',path):allowed=job_scope_allowed(scopes,'publish')
+        elif re.fullmatch(r'/api/revisions/[^/]+/rollback',path):allowed=job_scope_allowed(scopes,'rollback') or job_scope_allowed(scopes,'rollback_ready')
     elif request.method=='PATCH' and re.fullmatch(r'/api/proposals/[^/]+',path):
-        allowed='jobs:write' in scopes
+        allowed=has_scope(scopes,'files:write')
     elif request.method=='DELETE' and re.fullmatch(r'/api/export-leases/[^/]+',path):
-        allowed='jobs:write' in scopes
+        allowed=has_scope(scopes,'publish:write')
     if not allowed:raise security.error(403,'scope_denied','Недостаточно прав API-токена')
     if request.headers.get('origin') not in (None,settings.app_url) or request.headers.get('sec-fetch-site')=='cross-site':
         raise security.error(403,'origin_denied','Межсайтовый запрос не разрешен')
     with db.transaction(settings.db_path) as conn:conn.execute('UPDATE api_tokens SET last_used=? WHERE id=?',(time.time(),row['id']))
-    return {'auth_epoch':row['auth_epoch'],'api_token_id':row['id'],'scopes':scopes}
+    return {'auth_epoch':row['auth_epoch'],'api_token_id':row['id'],'scopes':sorted(scopes)}
 
 
 def install(app,settings):

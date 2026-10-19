@@ -5,11 +5,13 @@ import './PwaStatus.css';
 
 interface PwaStatusProps {
   beforeUpdate?: () => boolean | Promise<boolean>;
+  onBeforeActivate?: () => void;
   onBeforeReload?: () => void;
+  onActivationFailed?: () => void;
   showInstall?: boolean;
 }
 
-export default function PwaStatus({ beforeUpdate, onBeforeReload, showInstall = true }: PwaStatusProps) {
+export default function PwaStatus({ beforeUpdate, onBeforeActivate, onBeforeReload, onActivationFailed, showInstall = true }: PwaStatusProps) {
   const pwa = usePwa();
   const [help, setHelp] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -18,7 +20,7 @@ export default function PwaStatus({ beforeUpdate, onBeforeReload, showInstall = 
     if (confirming || pwa.updating) return;
     setConfirming(true);
     try {
-      if (!beforeUpdate || await beforeUpdate()) await activatePwaUpdate(onBeforeReload);
+      if (!beforeUpdate || await beforeUpdate()) await activatePwaUpdate({ onBeforeActivate, onBeforeReload, onActivationFailed });
     } finally { setConfirming(false); }
   };
   const install = async () => { if (!await promptPwaInstall()) setHelp(true); };

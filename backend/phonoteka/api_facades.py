@@ -131,7 +131,7 @@ def install(app, settings, job_model, proposal_model, create_job, save_proposal)
     @app.post('/api/publications/plan', status_code=201)
     def plan_publication(request: Request, body: PlanInput):
         active = security.require_session(request, settings, True)
-        automation.check_job(active, 'publish')
+        automation.check_scope(active, 'publish:write')
         key = request.headers.get('idempotency-key', '')
         if not key or len(key) > 128:
             raise security.error(428, 'idempotency_key_required', 'Передайте Idempotency-Key длиной до 128 символов')
@@ -236,6 +236,7 @@ def install(app, settings, job_model, proposal_model, create_job, save_proposal)
         if ready:
             params['expected_ready_sha256'] = expected
         operation = job_model(kind='rollback_ready' if ready else 'rollback', track_ids=[row['id']], params=params)
+        automation.check_job(active, operation.kind)
         previous = replay(request, active, operation)
         if previous is not None:
             return previous

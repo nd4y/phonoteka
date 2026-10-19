@@ -122,8 +122,8 @@ class StartInput(BaseModel):
 def install(app, settings):
     def access(request):
         active = security.require_session(request, settings, True)
-        if active.get('api_token_id') and 'jobs:write' not in active['scopes']:
-            raise security.error(403, 'scope_denied', 'Токен не разрешает доставку')
+        from . import automation
+        automation.check_scope(active, 'publish:write', 'Токен не разрешает доставку')
         return active
 
     @app.post('/api/export-leases', status_code=201)

@@ -13,7 +13,7 @@ from typing import Literal
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import db, media, provider_policy, security
+from . import db, media, provider_policy, security, recording_review
 
 POLICY_VERSION = 'owner-listening-review-v1'
 PROFILES = ('lyrics_required', 'instrumental', 'relaxed')
@@ -95,6 +95,8 @@ def publication_gate(settings, row, *, conn=None, audit=None):
     review = current_review(row, load(conn, row['id']))
     reasons = []
     blocked = []
+    if recording_review.possible_mix(meta,row['sha256']):
+        blocked.append('possible_mix_requires_manual_review')
     if row['status'] in {'conflict', 'error', 'missing'} or meta.get('input_error') or meta.get('critical_conflicts'):
         blocked.append('critical_file_conflict')
     try:

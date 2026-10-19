@@ -103,7 +103,7 @@ describe('PWA lifecycle and explicit updates', () => {
     expect(pwa.usePwa().updateReady).toBe(true);
     expect(next.postMessage).not.toHaveBeenCalled();
     const beforeReload = vi.fn();
-    const accepted = pwa.activatePwaUpdate(beforeReload);
+    const accepted = pwa.activatePwaUpdate({ onBeforeReload: beforeReload });
     expect(next.postMessage).toHaveBeenCalledWith({ type: 'PHONOTEKA_ACTIVATE' });
     serviceWorker.dispatchEvent(new Event('controllerchange'));
     await Promise.resolve();
@@ -147,11 +147,16 @@ describe('PWA lifecycle and explicit updates', () => {
     const { pwa, reload } = await setup(current, current.active);
     current.waiting = null;
     const beforeReload = vi.fn();
-    await expect(pwa.activatePwaUpdate(beforeReload)).resolves.toBe(false);
+    const beforeActivate = vi.fn();
+    const activationFailed = vi.fn();
+    await expect(pwa.activatePwaUpdate({ onBeforeReload: beforeReload,
+      onBeforeActivate: beforeActivate, onActivationFailed: activationFailed })).resolves.toBe(false);
     expect(pwa.usePwa()).toMatchObject({ updateReady: false, updating: false });
     expect(pwa.usePwa().error).toContain('Готового обновления больше нет');
     expect(next.postMessage).not.toHaveBeenCalled();
     expect(beforeReload).not.toHaveBeenCalled();
+    expect(beforeActivate).toHaveBeenCalledOnce();
+    expect(activationFailed).toHaveBeenCalledOnce();
     expect(reload).not.toHaveBeenCalled();
   });
 
@@ -174,12 +179,59 @@ describe('PWA lifecycle and explicit updates', () => {
     current.waiting = new FakeWorker('installed');
     const { pwa, reload } = await setup(current, current.active);
     const beforeReload = vi.fn();
-    const accepted = pwa.activatePwaUpdate(beforeReload);
+    const beforeActivate = vi.fn();
+    const activationFailed = vi.fn();
+    const accepted = pwa.activatePwaUpdate({ onBeforeReload: beforeReload,
+      onBeforeActivate: beforeActivate, onActivationFailed: activationFailed });
     await vi.advanceTimersByTimeAsync(15000);
     await expect(accepted).resolves.toBe(false);
     expect(pwa.usePwa()).toMatchObject({ updateReady: true, updating: false });
     expect(pwa.usePwa().error).toContain('данные остаются на экране');
     expect(beforeReload).not.toHaveBeenCalled();
+    expect(beforeActivate).toHaveBeenCalledOnce();
+    expect(activationFailed).toHaveBeenCalledOnce();
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('captures the intended view before activation can move layout and samples playback only at reload', async () => {
+    const current = new FakeRegistration();
+    current.active = new FakeWorker('activated');
+    const next = new FakeWorker('installed');
+    current.waiting = next;
+    const { pwa, serviceWorker, reload } = await setup(current, current.active);
+    let scroll = 800;
+    let playback = 12;
+    let capturedScroll: number | undefined;
+    let savedPlayback: number | undefined;
+    const beforeActivate = vi.fn(() => { capturedScroll = scroll; });
+    const beforeReload = vi.fn(() => { savedPlayback = playback; });
+    next.postMessage.mockImplementation(() => { scroll = 717; });
+    const accepted = pwa.activatePwaUpdate({ onBeforeActivate: beforeActivate, onBeforeReload: beforeReload });
+    expect(capturedScroll).toBe(800);
+    expect(scroll).toBe(717);
+    expect(beforeActivate.mock.invocationCallOrder[0]).toBeLessThan(next.postMessage.mock.invocationCallOrder[0]);
+    expect(beforeReload).not.toHaveBeenCalled();
+    playback = 13;
+    current.waiting = null; current.active = next; serviceWorker.controller = next;
+    serviceWorker.dispatchEvent(new Event('controllerchange'));
+    await expect(accepted).resolves.toBe(true);
+    expect(savedPlayback).toBe(13);
+    expect(beforeReload.mock.invocationCallOrder[0]).toBeLessThan(reload.mock.invocationCallOrder[0]);
+  });
+
+  it('releases captured navigation when sending the activation request fails', async () => {
+    const current = new FakeRegistration();
+    current.active = new FakeWorker('activated');
+    current.waiting = new FakeWorker('installed');
+    const { pwa, reload } = await setup(current, current.active);
+    current.waiting.postMessage.mockImplementation(() => { throw new Error('worker unavailable'); });
+    const beforeActivate = vi.fn(); const activationFailed = vi.fn(); const beforeReload = vi.fn();
+    await expect(pwa.activatePwaUpdate({ onBeforeActivate: beforeActivate,
+      onActivationFailed: activationFailed, onBeforeReload: beforeReload })).resolves.toBe(false);
+    expect(beforeActivate).toHaveBeenCalledOnce();
+    expect(activationFailed).toHaveBeenCalledOnce();
+    expect(beforeReload).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+    expect(pwa.usePwa()).toMatchObject({ updating: false, updateReady: true });
   });
 });
