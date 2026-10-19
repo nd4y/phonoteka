@@ -71,7 +71,7 @@ def test_revocation_retains_nonterminal_notification_reservations_atomically(cli
     running=client.get('/api/jobs/'+ids[2]).json()
     assert running['state']=='running' and running['stage']=='waiting_authorization' and not running['cancel_requested']
     status=webhooks.status(cfg)
-    assert status['reserved_jobs']==3 and status['counts']['pending']==0
+    assert status['reserved_jobs']==3 and status['counts'].get('pending',0)==0
     with db.connect(settings.db_path) as conn:
         documents=[json.loads(row['payload']) for row in conn.execute('SELECT payload FROM webhook_outbox')]
     assert not documents

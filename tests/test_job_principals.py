@@ -23,7 +23,10 @@ def test_idempotency_is_scoped_to_owner_and_each_token(client, settings):
     for token, jid in zip(tokens, jobs):
         assert db.fetchone(settings.db_path, 'SELECT payload FROM jobs WHERE id=?',(jid,))['payload'].find(token['id']) >= 0
     assert client.delete('/api/tokens/'+tokens[0]['id'],headers=headers).status_code == 200
-    assert client.get('/api/jobs/'+jobs[0]).json()['state'] == 'cancelled'
+    waiting = client.get('/api/jobs/'+jobs[0]).json()
+    assert waiting['id'] == jobs[0] and waiting['state'] == 'waiting_authorization'
+    assert not waiting['cancel_requested'] and waiting['completed'] == waiting['failed'] == 0
+    assert waiting['authorization']['reason'] == 'authorization_revoked'
     assert client.get('/api/jobs/'+jobs[1]).json()['state'] == 'queued'
     assert client.get('/api/jobs/'+owner_job['id']).json()['state'] == 'queued'
 
