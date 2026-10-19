@@ -24,3 +24,6 @@ export function readView(): ViewState {
 export function saveView(view: ViewState) {
   try { sessionStorage.setItem(viewKey, JSON.stringify(view)); } catch { /* A disabled browser store must not prevent navigation. */ }
 }
+export function clearView() {
+  try { sessionStorage.removeItem(viewKey); } catch { /* Logging out also works without browser storage. */ }
+}

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { saveView } from './viewState';
 import type { ViewState } from './viewState';
 
@@ -6,7 +6,12 @@ import type { ViewState } from './viewState';
 export function useViewPersistence(view: Omit<ViewState, 'scroll' | 'queueScroll'>, initial: ViewState, ready: boolean, authenticated: boolean) {
   const current = useRef(view); current.current = view;
   const restoring = useRef(true);
+  const target = useRef(initial);
+  const [restoreVersion, setRestoreVersion] = useState(0);
   const reloadView = useRef<ViewState | null>(null);
+  const capture = (): ViewState => reloadView.current ?? { ...current.current,
+    scroll: restoring.current ? target.current.scroll : window.scrollY,
+    queueScroll: restoring.current ? target.current.queueScroll : document.querySelector('.queue-tracks')?.scrollTop || 0 };
   const write = () => {
     if (!authenticated) return;
     // Activation can change page layout before controllerchange/pagehide.
@@ -20,7 +25,7 @@ export function useViewPersistence(view: Omit<ViewState, 'scroll' | 'queueScroll
   useLayoutEffect(() => {
     if (!ready || !authenticated || !restoring.current) return;
     const queue = document.querySelector('.queue-tracks');
-    const restore = () => { window.scrollTo({ top: initial.scroll, behavior: 'instant' }); if (queue) queue.scrollTop = initial.queueScroll; };
+    const restore = () => { window.scrollTo({ top: target.current.scroll, behavior: 'instant' }); if (queue) queue.scrollTop = target.current.queueScroll; };
     restore();
     const finish = () => { restoring.current = false; observer.disconnect(); window.clearTimeout(timer); writeRef.current(); };
     const observer = new ResizeObserver(restore);
@@ -31,7 +36,7 @@ export function useViewPersistence(view: Omit<ViewState, 'scroll' | 'queueScroll
     window.addEventListener('wheel', userAction, { once: true, passive: true });
     window.addEventListener('keydown', userAction, { once: true });
     return () => { observer.disconnect(); clearTimeout(timer); window.removeEventListener('pointerdown', userAction); window.removeEventListener('wheel', userAction); window.removeEventListener('keydown', userAction); };
-  }, [ready, authenticated, initial]);
+  }, [ready, authenticated, restoreVersion]);
   useEffect(() => { writeRef.current(); }, [view.page, view.query, view.filter, view.pageNumber, view.selectedId]);
   useEffect(() => {
     const remember = () => writeRef.current();
@@ -40,11 +45,11 @@ export function useViewPersistence(view: Omit<ViewState, 'scroll' | 'queueScroll
     return () => { window.removeEventListener('scroll', remember, true); window.removeEventListener('pagehide', remember); };
   }, []);
   return Object.assign(() => writeRef.current(), {
+    capture,
+    restore: (next: ViewState) => { target.current = next; restoring.current = true; setRestoreVersion(value => value + 1); },
     freezeForReload: () => {
       if (!authenticated || reloadView.current) return;
-      reloadView.current = { ...current.current,
-        scroll: restoring.current ? initial.scroll : window.scrollY,
-        queueScroll: restoring.current ? initial.queueScroll : document.querySelector('.queue-tracks')?.scrollTop || 0 };
+      reloadView.current = capture();
       saveView(reloadView.current);
     },
     releaseReload: () => { reloadView.current = null; writeRef.current(); },

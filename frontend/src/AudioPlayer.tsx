@@ -3,6 +3,7 @@ import type { CSSProperties, KeyboardEvent, RefObject } from 'react';
 import { Music2, MoreHorizontal, SkipBack, SkipForward, X, CornerDownLeft, LoaderCircle, Pause, Play, RefreshCw, Repeat1, RotateCcw, RotateCw, Square, Volume2, VolumeX } from 'lucide-react';
 import { clampPosition, defaultPreferences, parsePlayerTime, playbackRates, playbackWindow, playerTime, preferences } from './player';
 import './AudioPlayer.css';
+import { useBackLayer } from './useAppHistory';
 
 type Props = {
   cover?: string; navigationBusy?: boolean; navigationLabel?: string;
@@ -23,6 +24,7 @@ export function AudioPlayer({ src, title = 'Прослушать аудио', su
   const autoplayPending = useRef(autoPlay);
   const [settings, setSettings] = useState(() => { try { return preferences(JSON.parse(localStorage.getItem(preferenceKey) || 'null')); } catch { return defaultPreferences; } });
   const [expanded, setExpanded] = useState(false);
+  useBackLayer(expanded, () => setExpanded(false), 50);
   const [coverFailed, setCoverFailed] = useState(false);
   const container = useRef<HTMLElement>(null);
   useEffect(() => {

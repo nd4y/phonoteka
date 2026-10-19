@@ -64,3 +64,7 @@ label>input[type="checkbox"]{width:20px;height:20px;min-height:20px;flex:0 0 20p
 .settings-panel>label{margin:14px 0}.settings-panel>.button{margin-top:10px}
 
 .youtube-panel{margin-bottom:18px}.youtube-panel>.button-row{margin:14px 0}.youtube-candidate{padding:16px;margin:12px 0;border:1px solid var(--line);border-radius:16px;overflow-wrap:anywhere}.youtube-candidate>a{font-weight:650;color:var(--accent)}
+
+/* Navigation remains reachable above the persistent audio dock on touch screens. */
+.topbar-leading{display:flex;align-items:center;gap:12px;min-width:0}.topbar .app-back{height:44px;width:44px;min-width:44px;flex-shrink:0}.breadcrumb{min-width:0}.breadcrumb>.breadcrumb-home{opacity:1}.app-back:disabled{opacity:.3;cursor:default}
+@media(max-width:650px){.topbar{gap:8px}.topbar-leading{gap:5px}.breadcrumb>.breadcrumb-home,.breadcrumb>.breadcrumb-divider{display:none}.breadcrumb{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}.mobile-back{height:44px;width:44px;min-width:44px}}

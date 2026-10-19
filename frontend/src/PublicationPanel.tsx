@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ArchiveRestore, CircleAlert, RefreshCw, ShieldCheck } from 'lucide-react';
 import { api, messageFor } from './api';
 import './PublicationPanel.css';
+import { useBackLayer } from './useAppHistory';
 
 type Version = { history_id: string; kind: string; created_at: string; ready_revision: string; restore_revision: string | null; profile: string; rollback_available: boolean };
 type PlanItem = { track_id: string; relative_path: string; ready_path: string; work_revision: string; ready_revision: string | null; current_track: boolean; stale_ready: boolean; action: string; destination_exists: boolean; destination_integrity: string; actual_ready_revision: string | null; gate: { state: string; reasons: string[] }; versions: Version[] };
@@ -15,6 +16,7 @@ export default function PublicationPanel({ trackId, disabled = false, onJobQueue
   const [staleOnly, setStaleOnly] = useState(false), [generation, setGeneration] = useState(0);
   const [loading, setLoading] = useState(true), [verifying, setVerifying] = useState(''), [saving, setSaving] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [pending, setPending] = useState<{ item: PlanItem; version: Version } | null>(null);
+  useBackLayer(!!pending, () => { if (!saving) setPending(null); }, 100);
   const dialog = useRef<HTMLDialogElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
   useEffect(() => {
