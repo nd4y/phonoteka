@@ -7,6 +7,7 @@ type Effect = () => void | (() => void);
 const { effects, layouts } = vi.hoisted(() => ({ effects: [] as Effect[], layouts: [] as Effect[] }));
 vi.mock('react', () => ({
   useRef: <T>(value: T) => ({ current: value }),
+  useState: <T>(value: T) => [value, vi.fn()],
   useEffect: (effect: Effect) => { effects.push(effect); },
   useLayoutEffect: (effect: Effect) => { layouts.push(effect); },
 }));
@@ -41,6 +42,26 @@ afterEach(() => {
 });
 
 describe('view persistence during an explicit PWA activation', () => {
+  it('captures the destination offsets while a Back restoration waits for content', () => {
+    const { target, queue, persistence, initial } = setup();
+    const destination = { ...initial, scroll: 1240, queueScroll: 260 };
+    persistence.restore(destination);
+    target.scrollY = 0; queue.scrollTop = 0;
+    expect(persistence.capture()).toMatchObject({ scroll: 1240, queueScroll: 260 });
+    persistence.freezeForReload(); target.dispatchEvent(new Event('pagehide'));
+    expect(readView()).toMatchObject({ scroll: 1240, queueScroll: 260 });
+  });
+
+  it('applies a later history restoration instead of the original startup offsets', () => {
+    const { target, queue, persistence, initial } = setup();
+    persistence.restore({ ...initial, scroll: 640, queueScroll: 70 });
+    target.scrollY = 0; queue.scrollTop = 0;
+    const cleanup = layouts[0](); if (cleanup) cleanups.push(cleanup);
+    expect(target.scrollY).toBe(640); expect(queue.scrollTop).toBe(70);
+    target.dispatchEvent(new Event('wheel'));
+    expect(readView()).toMatchObject({ scroll: 640, queueScroll: 70 });
+  });
+
   it('keeps the captured view through banner-removal scroll and pagehide before reload', () => {
     const { target, queue, persistence, initial } = setup();
     persistence.freezeForReload();
