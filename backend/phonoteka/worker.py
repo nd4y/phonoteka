@@ -14,6 +14,7 @@ import logging
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -27,6 +28,15 @@ from .telemetry import Metrics, configure_logging, context, log, opaque_id, boun
 LOG = logging.getLogger("phonoteka.worker")
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".aiff", ".ape", ".wv", ".wma", ".webm", ".cue", ".m4b", ".oga", ".aif", ".mp4", ".mka", ".mkv", ".dsf", ".dff", ".ac3", ".wave", ".bin"}
 EXCLUDED_DIRS = {"@eadir", "#recycle", ".trash", ".snapshot", ".phonoteka-staging", "@recycle"}
+DB_BUSY_RETRY_SECONDS = .5
+
+
+def sqlite_busy(exc):
+    """Extended BUSY/LOCKED codes are contention; other DB errors are fatal."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    return isinstance(exc, sqlite3.OperationalError) and isinstance(code, int) and (
+        code & 0xff
+    ) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
 
 
 @contextmanager
@@ -145,8 +155,15 @@ class Worker:
 
     async def heartbeats(self):
         while not self.stopping:
-            await asyncio.to_thread(self.heartbeat)
-            await asyncio.sleep(3)
+            delay = 3
+            try:
+                await asyncio.to_thread(self.heartbeat)
+            except sqlite3.OperationalError as exc:
+                if not sqlite_busy(exc):
+                    raise
+                log('worker_database_busy', logging.WARNING, stage='heartbeat')
+                delay = DB_BUSY_RETRY_SECONDS
+            await asyncio.sleep(delay)
 
     def claim_job(self):
         with db.transaction(self.settings.db_path) as conn:
@@ -973,18 +990,34 @@ class Worker:
                 stack.enter_context(media.writer_guard(self.settings.storage_guard_dir, self.settings.instance_id))
             await self.io(self.recover_jobs)
             self.state = "idle"
-            self.heartbeat()
+            await asyncio.to_thread(self.heartbeat)
             heartbeat_task = asyncio.create_task(self.heartbeats())
             next_schedule=0
             try:
                 while not self.stopping:
-                    if time.monotonic()>=next_schedule:
-                        await self.io(provider_policy.cleanup_cache,self.settings)
-                        from . import provider_attempts
-                        await self.io(provider_attempts.recover_stale,self.settings)
-                        await self.io(scheduling.tick,self.settings)
-                        next_schedule=time.monotonic()+30
-                    job = self.claim_job()
+                    if heartbeat_task.done():
+                        # A schema/I/O error must remain visible, rather than
+                        # silently losing the heartbeat task permanently.
+                        heartbeat_task.result()
+                    try:
+                        if time.monotonic()>=next_schedule:
+                            await self.io(provider_policy.cleanup_cache,self.settings)
+                            from . import provider_attempts
+                            await self.io(provider_attempts.recover_stale,self.settings)
+                            await self.io(scheduling.tick,self.settings)
+                            next_schedule=time.monotonic()+30
+                        # SQLite's busy_timeout can wait 15s. Keep this wait off
+                        # both the event loop and the bounded media I/O pool.
+                        job = await asyncio.to_thread(self.claim_job)
+                    except sqlite3.OperationalError as exc:
+                        if not sqlite_busy(exc):
+                            raise
+                        # The transaction context rolled back and closed its
+                        # connection. Retry a fresh poll after a bounded await;
+                        # never acknowledge or restart a partially claimed job.
+                        log('worker_database_busy', logging.WARNING, stage='scheduler')
+                        await asyncio.sleep(DB_BUSY_RETRY_SECONDS)
+                        continue
                     if job:
                         task=asyncio.create_task(self.background_job(job))
                         if job['kind'] in {'transcribe','align'}: self.inference_task=task
