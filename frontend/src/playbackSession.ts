@@ -1,7 +1,7 @@
 import type { CueTrack, Track } from './types';
 
 export const playbackSessionKey = 'phonoteka-playback-session-v1';
-const filters = ['all', 'cue', 'review', 'missing_lyrics', 'missing_art', 'published'];
+const filters = ['all', 'cue', 'review', 'missing_lyrics', 'missing_art', 'published', 'audit_errors', 'audit_warnings', 'audit_unchecked', 'audit_passed'];
 type CueIdentity = { number: number; fileIndex: number; start: number; end?: number };
 export type PlaybackSession = {
   version: 1; trackId: string; revision: string; position: number;

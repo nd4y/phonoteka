@@ -58,7 +58,7 @@ def document(row):
             'document_revision': digest([row['sha256'], words_revision, timings_revision]),
             'lines': lines, 'parse_error': error, 'has_text': bool(raw.strip()),
             'complete': bool(lines) and all(line['timing_valid'] for line in lines),
-            'audio_identity': (meta.get('audit') or {}).get('audio_identity')}
+            'audio_identity': (meta.get('audit') if isinstance(meta.get('audit'), dict) else {}).get('audio_identity')}
 
 
 def load(conn, track_id):
@@ -101,7 +101,8 @@ def publication_gate(settings, row, *, conn=None, audit=None):
         provider_policy.require_track(settings, row, 'export', conn=conn)
     except media.MediaError:
         blocked.append('provider_export_denied')
-    checked = audit if audit is not None else meta.get('audit') or {}
+    checked = audit if audit is not None else meta.get('audit')
+    checked = checked if isinstance(checked, dict) else {}
     if checked.get('state') in {'failed', 'unsupported'} and checked.get('sha256') == row['sha256']:
         blocked.append('decode_audit_failed')
     if checked.get('state') != 'passed' or checked.get('sha256') != row['sha256']:

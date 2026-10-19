@@ -4,7 +4,7 @@ import csv
 import io
 import json
 import re
-from . import db,provider_policy
+from . import audit_status,db,provider_policy
 from .providers import scalar, normalized
 
 
@@ -36,7 +36,8 @@ def summary(settings, conn=None):
         entry={'id':row['id'],'path':row['relative_path'],'format':meta.get('format'),'duration':meta.get('duration'),'status':row['status']}
         by_id[row['id']]=entry
         exact[row['sha256']].append(entry)
-        identity=meta.get('audit',{}).get('audio_identity') or meta.get('audio_identity')
+        checked_audit=meta.get('audit') if isinstance(meta.get('audit'),dict) else {}
+        identity=checked_audit.get('audio_identity') or meta.get('audio_identity')
         if identity:audio[identity].append(entry)
         tags=meta.get('tags',{});album=scalar(tags,'album');artist=scalar(tags,'albumartist') or scalar(tags,'artist')
         recording=scalar(tags,'musicbrainz_trackid')
@@ -94,11 +95,12 @@ def export(settings, kind):
                 'skipped':result.get('skipped') is True,'reason':safe_code(result.get('reason')),
                 'job_created_at':row['created_at']})
         for row,meta in records:
+            input_error=meta.get('input_error') if isinstance(meta.get('input_error'),dict) else {}
             entry={'id':row['id'],'path':row['relative_path'],'sha256':row['sha256'],'format':meta.get('format'),
                    'status':row['status'],'title':scalar(meta.get('tags',{}),'title'),
                    'artist':scalar(meta.get('tags',{}),'artist'),'album':scalar(meta.get('tags',{}),'album'),
                    'duration':meta.get('duration'),'has_art':bool(meta.get('has_art')),'has_lrc':bool(meta.get('lrc')),
-                   'error':safe_code((meta.get('input_error') or {}).get('code')),
+                   'error':safe_code(input_error.get('code')),
                    'write_supported':bool(meta.get('write_supported')) and not meta.get('cue_album_image',False)}
             provenance=meta.get('usage_provenance',{})
             excluded=[]
@@ -114,8 +116,9 @@ def export(settings, kind):
             entry['analysis_sources']=json.dumps([{'provider':safe_code(source.get('provider')),
                 'state':safe_code(source.get('state'))} for source in analysis.get('sources',[])],ensure_ascii=False)
             entry['latest_outcomes']=json.dumps(outcomes.get(row['id'],[]),ensure_ascii=False)
-            audit=meta.get('audit') or {}
+            audit=meta.get('audit') if isinstance(meta.get('audit'),dict) else {}
             entry['audit_state']=safe_code(audit.get('state')) if audit.get('sha256')==row['sha256'] else 'not_current'
+            entry.update(audit_status.describe(meta,row['sha256'],row['status']))
             gate=lyrics_review.publication_gate(settings,row,conn=conn)
             entry['publication_gate']=gate['state']
             entry['publication_reasons']=';'.join(gate['reasons'])

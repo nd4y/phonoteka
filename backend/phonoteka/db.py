@@ -8,6 +8,8 @@ from pathlib import Path
 import sqlite3
 import uuid
 
+from . import audit_status
+
 SCHEMA_VERSION = 2
 
 
@@ -31,6 +33,7 @@ def configure_connection(db):
     db.row_factory = sqlite3.Row
     db.create_function("casefold", 1, lambda value: str(value or "").casefold(), deterministic=True)
     db.create_function("phonoteka_schema_version", 0, lambda: SCHEMA_VERSION, deterministic=True)
+    db.create_function("phonoteka_audit_filter", 4, audit_status.matches, deterministic=True)
     db.execute("PRAGMA foreign_keys=ON")
     db.execute("PRAGMA busy_timeout=15000")
     db.execute("PRAGMA synchronous=FULL")

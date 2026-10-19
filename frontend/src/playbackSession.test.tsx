@@ -64,6 +64,16 @@ describe('player session navigation pointer', () => {
 });
 
 describe('fresh authenticated playback restore', () => {
+  it.each(['audit_errors', 'audit_warnings', 'audit_unchecked', 'audit_passed'])('restores paused playback inside the %s filtered catalog', async filter => {
+    storage();
+    const auditContext = { search: 'проверка', filter };
+    savePlaybackSession(playbackSessionFor(track, 12.5, auditContext)!);
+    const saved = readPlaybackSession()!;
+    const load = vi.fn(async () => track);
+    expect(await restorePlaybackSession(saved, load, () => true)).toEqual({ track, cue: undefined, initialPosition: 12.5, ...auditContext, autoPlay: false });
+    expect(load).toHaveBeenCalledWith(track.id);
+  });
+
   it.each([
     { name: 'ordinary track', current: { ...track, id: 'fixture-002' }, item: undefined },
     { name: 'CUE composition', current: { ...sheet, id: 'fixture-cue' }, item: cue },

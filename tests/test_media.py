@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import contextlib
 import json
 import os
 import shutil
@@ -447,16 +448,19 @@ def test_untouched_metadata_corruption_blocks_replace(make_audio, roots, backup_
 @TOOLS
 def test_packet_side_data_is_part_of_audio_identity(make_audio, monkeypatch):
     path = make_audio()
-    original_process = media._process
+    original_process = media.packetstream.process_chunks
     original = media.audio_identity(path)
-    def change_gapless(filename, executable, arguments, **kwargs):
-        result = original_process(filename, executable, arguments, **kwargs)
-        payload = json.loads(result.stdout)
-        assert payload["packets"][0].get("side_data_list"), "Generated MP3 must have gapless packet side data"
-        payload["packets"][0]["side_data_list"][0]["skip_samples"] += 10
-        result.stdout = json.dumps(payload).encode()
-        return result
-    monkeypatch.setattr(media, "_process", change_gapless)
+    @contextlib.contextmanager
+    def change_gapless(command, **kwargs):
+        with original_process(command, **kwargs) as chunks:
+            raw = b''.join(chunks)
+            assert len(raw) < 1024**2, 'Only the tiny generated MP3 is materialized by this regression'
+            payload = json.loads(raw)
+            assert payload["packets"][0].get("side_data_list"), "Generated MP3 must have gapless packet side data"
+            payload["packets"][0]["side_data_list"][0]["skip_samples"] += 10
+            raw = json.dumps(payload).encode()
+            yield (raw[index:index+65536] for index in range(0, len(raw), 65536))
+    monkeypatch.setattr(media.packetstream, "process_chunks", change_gapless)
     assert media.audio_identity(path) != original
 
 
@@ -464,14 +468,17 @@ def test_packet_side_data_is_part_of_audio_identity(make_audio, monkeypatch):
 @TOOLS
 def test_audio_packet_without_hash_is_rejected(make_audio, monkeypatch):
     path = make_audio()
-    original_process = media._process
-    def drop_packet_hash(filename, executable, arguments, **kwargs):
-        result = original_process(filename, executable, arguments, **kwargs)
-        payload = json.loads(result.stdout)
-        del payload["packets"][0]["data_hash"]
-        result.stdout = json.dumps(payload).encode()
-        return result
-    monkeypatch.setattr(media, "_process", drop_packet_hash)
+    original_process = media.packetstream.process_chunks
+    @contextlib.contextmanager
+    def drop_packet_hash(command, **kwargs):
+        with original_process(command, **kwargs) as chunks:
+            raw = b''.join(chunks)
+            assert len(raw) < 1024**2, 'Only the tiny generated MP3 is materialized by this regression'
+            payload = json.loads(raw)
+            del payload["packets"][0]["data_hash"]
+            raw = json.dumps(payload).encode()
+            yield (raw[index:index+65536] for index in range(0, len(raw), 65536))
+    monkeypatch.setattr(media.packetstream, "process_chunks", drop_packet_hash)
     with pytest.raises(media.MediaError, match="packets"):
         media.audio_identity(path)
 

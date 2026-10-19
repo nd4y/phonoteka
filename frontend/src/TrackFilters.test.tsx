@@ -10,6 +10,23 @@ function elements(node: ReactNode): ReactElement<Record<string, unknown>>[] {
 }
 
 describe('published collection search', () => {
+  it('offers the same audio audit filters in the catalog and compact editor without changing the active query', () => {
+    const onSearch = vi.fn(), onFilter = vi.fn();
+    for (const compact of [false, true]) {
+      const tree = TrackFilters({ search: 'альбом', onSearch, filter: 'audit_errors', onFilter, compact });
+      const markup = renderToStaticMarkup(tree);
+      for (const [value, label] of [['audit_errors', 'Аудио: ошибки'], ['audit_warnings', 'Аудио: предупреждения'], ['audit_unchecked', 'Аудио: не проверено'], ['audit_passed', 'Аудио: проверено']]) {
+        expect(markup).toContain(`value="${value}"`);
+        expect(markup).toContain(label);
+      }
+      expect(markup).toMatch(/<option(?=[^>]*value="audit_errors")(?=[^>]*selected="")[^>]*>/);
+      const select = elements(tree).find(node => node.type === 'select');
+      (select!.props.onChange as (event: { target: { value: string } }) => void)({ target: { value: 'audit_warnings' } });
+    }
+    expect(onFilter.mock.calls).toEqual([['audit_warnings'], ['audit_warnings']]);
+    expect(onSearch).not.toHaveBeenCalled();
+  });
+
   it('keeps an inherited query visible and clears it on Ready with the actual page-reset callback', () => {
     let search = '002', page = 7;
     const props = () => ({ search, onSearch: (value: string) => { search = value; }, onPage: (value: number) => { page = value; } });

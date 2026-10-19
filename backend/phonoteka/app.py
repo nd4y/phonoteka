@@ -30,7 +30,7 @@ from . import webhooks,provider_attempts
 from .config import Settings
 from . import publication
 from . import retention, export_leases
-from . import album_gain_policy, api_facades
+from . import album_gain_policy, api_facades, audit_status
 
 
 class LoginInput(BaseModel):
@@ -107,6 +107,7 @@ def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, 
         "tag_values": meta.get("tags", {}), "has_art": bool(meta.get("has_art", False)),
         "lyrics": meta.get("lyrics", ""), "lrc": meta.get("lrc", ""),
         "proposal": _public_proposal(proposal), "updated_at": row["updated_at"],
+        **audit_status.describe(meta, row['sha256'], row['status']),
     }
     if detail:
         result['lyrics_document'] = lyrics_document.public_document(settings, row)
@@ -330,6 +331,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "missing_art": "json_extract(t.metadata,'$.format')<>'cue' AND COALESCE(json_extract(t.metadata,'$.has_art'),0)=0",
             "published": "json_extract(t.metadata,'$.publication.sha256')=t.sha256",
         }
+        filters.update({name: f"phonoteka_audit_filter(t.metadata,t.sha256,t.status,'{name}')=1"
+                        for name in audit_status.FILTERS})
         if filter not in filters:
             raise security.error(422, "invalid_filter", "Неизвестный фильтр")
         clauses.append(filters[filter])

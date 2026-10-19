@@ -33,7 +33,7 @@ from mutagen.id3 import ID3, ID3NoHeaderError, APIC, SYLT, TXXX, UFID, Frames
 from mutagen.mp3 import MP3
 from mutagen.wave import WAVE
 from mutagen.aiff import AIFF
-from . import formats, intake, metadata_slots
+from . import formats, intake, metadata_slots, packetstream
 from PIL import Image, UnidentifiedImageError
 
 
@@ -288,7 +288,8 @@ def fallback_inventory(path, roots, error):
     return result
 
 
-def _process(path: Path, executable: str, arguments: list[str], *, timeout: int = 300) -> subprocess.CompletedProcess:
+def _process(path: Path, executable: str, arguments: list[str], *, timeout: int = 300,
+             stdout_limit: int = 32 * 1024**2) -> subprocess.CompletedProcess:
     with _file(path) as stream:
         input_path = f"/proc/self/fd/{stream.fileno()}" if sys.platform == "linux" else str(path)
         command = [executable, "-v", "error", "-protocol_whitelist", "file,pipe", "-format_whitelist", "mp3,flac,mov,aac,ogg,wav,aiff,ape,wv,asf,matroska,dsf,iff,ac3", "-i", input_path, *arguments]
@@ -304,14 +305,14 @@ def _process(path: Path, executable: str, arguments: list[str], *, timeout: int 
                             process.kill()
                             process.wait()
                             raise MediaError("media_timeout", "Media verification exceeded its time limit")
-                        if os.fstat(output.fileno()).st_size > 32 * 1024**2 or os.fstat(errors.fileno()).st_size > 1024**2:
+                        if os.fstat(output.fileno()).st_size > stdout_limit or os.fstat(errors.fileno()).st_size > 1024**2:
                             process.kill()
                             process.wait()
                             raise MediaError("verification_too_large", "Verification output exceeded its safety limit")
                         time.sleep(0.05)
                     if process.returncode:
                         raise MediaError("invalid_audio", "Media decoding or packet verification failed")
-                    if os.fstat(output.fileno()).st_size > 32 * 1024**2 or os.fstat(errors.fileno()).st_size > 1024**2:
+                    if os.fstat(output.fileno()).st_size > stdout_limit or os.fstat(errors.fileno()).st_size > 1024**2:
                         raise MediaError("verification_too_large", "Verification output exceeded its safety limit")
                     output.seek(0)
                     errors.seek(0)
@@ -325,30 +326,27 @@ def _process(path: Path, executable: str, arguments: list[str], *, timeout: int 
 
 
 def audio_identity(path: str | Path) -> str:
-    result = _process(Path(path), "ffprobe", ["-select_streams", "a", "-show_packets", "-show_streams", "-show_entries", "packet=stream_index,data_hash:stream=index,codec_name,sample_rate,channels,extradata_hash", "-show_data_hash", "sha256", "-of", "json"])
+    path = Path(path)
+    # ffprobe writes packets before streams. Read only the bounded stream
+    # identity first so multistream ordinals can be hashed without retaining
+    # the packet array. The packet pass must report exactly the same identity.
+    fields = 'index,codec_name,sample_rate,channels,extradata_hash'
+    result = _process(path, 'ffprobe', ['-select_streams', 'a', '-show_streams', '-show_entries',
+        'stream='+fields, '-show_data_hash', 'sha256', '-of', 'json'], timeout=30,
+        stdout_limit=packetstream.VALUE_BYTES)
     try:
-        payload = json.loads(result.stdout)
-    except (ValueError, UnicodeError) as exc:
-        raise MediaError("invalid_audio", "Invalid packet verification result") from exc
-    packets = payload.get("packets", [])
-    if not packets or any(not re.fullmatch(r"SHA256:[0-9a-fA-F]{64}", packet.get("data_hash", "")) for packet in packets):
-        raise MediaError("invalid_audio", "No verifiable audio packets found")
-    streams = payload.get('streams', [])
-    stream_ids = {stream.get('index') for stream in streams}
-    if not streams or None in stream_ids or {packet.get('stream_index') for packet in packets} != stream_ids:
-        raise MediaError('invalid_audio', 'Not every declared audio stream has verifiable packets')
-    # Side data includes encoder delay/padding. A compact text parser could omit
-    # precisely those packets; JSON preserves every selected packet and its data.
-    identity = {"packets": [{"hash": packet["data_hash"], "side_data": packet.get("side_data_list", [])} for packet in packets],
-                "streams": [{key: stream[key] for key in ("codec_name", "sample_rate", "channels", "extradata_hash") if key in stream} for stream in streams]}
-    if len(streams) > 1:
-        # Bind each packet to its declared stream. Ordinals exclude unrelated
-        # video/cover stream indexes; the single-stream v1 hash stays compatible.
-        ordinals = {stream['index']:ordinal for ordinal,stream in enumerate(streams)}
-        identity['scheme'] = 'encoded_audio_packets_v2_all_streams'
-        for packet, original in zip(identity['packets'], packets):
-            packet['stream'] = ordinals[original['stream_index']]
-    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        streams = packetstream.stream_header(result.stdout)
+        with _file(path) as stream:
+            input_path = f'/proc/self/fd/{stream.fileno()}' if sys.platform == 'linux' else str(path)
+            command = ['ffprobe', '-v', 'error', '-protocol_whitelist', 'file,pipe', '-format_whitelist',
+                'mp3,flac,mov,aac,ogg,wav,aiff,ape,wv,asf,matroska,dsf,iff,ac3', '-i', input_path,
+                '-select_streams', 'a', '-show_packets', '-show_streams', '-show_entries',
+                'packet=stream_index,data_hash:stream='+fields, '-show_data_hash', 'sha256', '-of', 'json']
+            with packetstream.process_chunks(command, pass_fds=(stream.fileno(),) if sys.platform == 'linux' else (),
+                                             timeout=300) as chunks:
+                return packetstream.identity(chunks, streams)
+    except packetstream.PacketStreamError as exc:
+        raise MediaError(exc.code, exc.message) from exc
 
 
 def _decoder_diagnostics(stderr):
@@ -373,10 +371,14 @@ def _decoder_diagnostics(stderr):
 def audit_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
     path = _validate(path, roots)
     digest = sha256_file(path)
+    failure_stage = 'header'
     try:
         info = probe_audio(path)
+        failure_stage = 'packets'
         identity = audio_identity(path)
+        failure_stage = 'decode'
         decoded = _process(path, "ffmpeg", ["-nostdin", "-v", "warning", "-xerror", "-map", "0:a", "-f", "null", "-"], timeout=1800)
+        failure_stage = None
         # Diagnostics are a separate, bounded pass. A missing filter or an
         # unparseable diagnostic must not turn successful decoding into damage.
         try:
@@ -395,10 +397,10 @@ def audit_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                 'audio_identity_scheme':'encoded_audio_packets_v2_all_streams' if info['audio_stream_count']>1 else 'encoded_audio_packets_v1',
                 'hash_verified_at':datetime.now(timezone.utc).isoformat(timespec='milliseconds'),
                 'duration':info['duration'], 'audio_streams':info['audio_streams'], 'audio_stream_count':info['audio_stream_count'],
-                "error": None, "warnings": warnings, 'notes':notes, "signal": signal}
+                "error": None, "failure_stage": None, "warnings": warnings, 'notes':notes, "signal": signal}
     except MediaError as exc:
         return {"state": "unsupported" if exc.code == "unsupported_format" else "failed", "sha256": digest,
-                "error": exc.code, "warnings": [], "message": exc.message}
+                "error": exc.code, "failure_stage": failure_stage, "warnings": [], "message": exc.message}
 
 
 def _audit_signal(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
