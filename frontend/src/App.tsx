@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, AudioLines, BookOpen, Check, CheckCheck, ChevronLeft, ChevronRight, CircleAlert, Clock3, Disc3, FolderCheck, FolderSearch, ImagePlus, Library, ListMusic, LoaderCircle, LockKeyhole, LogOut, Moon, Music2, Plus, RefreshCw, Save, Search, Settings2, ShieldCheck, SlidersHorizontal, Sun, Trash2, WandSparkles, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { api, messageFor, setSession } from './api';
+import { api, ApiError, messageFor, setSession } from './api';
 import { OperationsPanel } from './OperationsPanel';
 import { ProvidersPanel } from './ProvidersPanel';
 import { AutomationPanel } from './AutomationPanel';
@@ -19,6 +19,7 @@ import { JobsView } from './JobsView';
 import { readView } from './viewState';
 import type { Page } from './viewState';
 import { useViewPersistence } from './useViewPersistence';
+import { clearPlaybackSession, playbackSessionFor, readPlaybackSession, restorePlaybackSession, savePlaybackSession } from './playbackSession';
 import TimingReview from './TimingReview';
 import { TrackPolicyPanel } from './TrackPolicyPanel';
 import { SourcePriorityPanel } from './SourcePriorityPanel';
@@ -42,7 +43,7 @@ import type { ArtworkReceipt } from './ArtworkImport';
 import { reconcileImportedLines } from './lyrics-document';
 import type { Job, Session, Summary, Tags, Track, TrackPage, CueTrack } from './types';
 
-type Playback = { track: Track; cue?: CueTrack; autoPlay: boolean; initialPosition?: number; search: string; filter: string; serial: number };
+type Playback = { track: Track; cue?: CueTrack; autoPlay: boolean; initialPosition?: number; restored?: boolean; search: string; filter: string; serial: number };
 type Neighbors = { catalog_position: number | null; previous_id: string | null; next_id: string | null; position: number | null; total: number };
 const navigation: Array<{ id: Page; title: string; icon: LucideIcon }> = [
   { id: 'reports', title: 'Отчеты', icon: BookOpen }, { id: 'library', title: 'Коллекция', icon: Library }, { id: 'review', title: 'Проверка', icon: CheckCheck },
@@ -77,6 +78,8 @@ function Login({ onLogin, initialError }: { onLogin: () => Promise<void>; initia
 
 export default function App() {
   const initialView = useRef(readView()).current;
+  const initialPlayback = useRef(readPlaybackSession()).current;
+  const savedPlayback = useRef(initialPlayback);
   const [session, updateSession] = useState<Session | null>(null); const [sessionError, setSessionError] = useState('');
   const [page, setPage] = useState<Page>(initialView.page); const [summary, setSummary] = useState<Summary | null>(null);
   const [tracks, setTracks] = useState<TrackPage | null>(null); const [jobs, setJobs] = useState<Job[]>([]);
@@ -88,37 +91,92 @@ export default function App() {
   const [loading, setLoading] = useState(false); const [detailLoading, setDetailLoading] = useState(false); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false);
   const [theme, setTheme] = useState(() => { try { return localStorage.getItem('phonoteka-theme') || 'system'; } catch { return 'system'; } });
   const [playback, setPlayback] = useState<Playback | null>(null); const playbackRequests = useRef(0);
+  const authenticated = useRef(false); authenticated.current = !!session?.authenticated;
+  const currentPlayback = useRef(playback); currentPlayback.current = playback;
+  const playbackPosition = useRef(initialPlayback?.position || 0); const lastPlaybackWrite = useRef(0);
+  const audioReady = useRef(false);
+  const [restoringPlayback, setRestoringPlayback] = useState(!!initialPlayback);
   const [audioTime, setAudioTime] = useState(0); const [audioSupported, setAudioSupported] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [neighbors, setNeighbors] = useState<Neighbors | null>(null);
   const [pendingMove, setPendingMove] = useState<{ direction: -1 | 1; keepPlaying: boolean; id: string } | null>(null);
   const [playerNavigating, setPlayerNavigating] = useState(false); const navigationLock = useRef(false);
   const [restoringDetail, setRestoringDetail] = useState(!!initialView.selectedId && ['review', 'lyrics'].includes(initialView.page));
-  const saveCurrentView = useViewPersistence({ page, query: search, filter, pageNumber, selectedId }, initialView, !!tracks && !loading && !restoringDetail, !!session?.authenticated);
+  const saveCurrentView = useViewPersistence({ page, query: search, filter, pageNumber, selectedId }, initialView, !!tracks && !loading && !restoringDetail && !restoringPlayback, !!session?.authenticated);
+  function saveCurrentPlayback() {
+    const value = currentPlayback.current;
+    if (!authenticated.current || !value) return;
+    const position = audioReady.current && audioRef.current ? audioRef.current.currentTime : playbackPosition.current;
+    const saved = playbackSessionFor(value.track, position, value, value.cue);
+    if (saved) { savePlaybackSession(saved); lastPlaybackWrite.current = Date.now(); }
+  }
+  function rememberPlaybackPosition(seconds: number) {
+    playbackPosition.current = seconds; setAudioTime(seconds);
+    if (Date.now() - lastPlaybackWrite.current >= 1000) saveCurrentPlayback();
+  }
+  function forgetPlayback() {
+    ++playbackRequests.current; ++detailSequence.current; savedPlayback.current = null;
+    currentPlayback.current = null;
+    clearPlaybackSession(); audioRef.current?.pause(); audioReady.current = false;
+    setRestoringPlayback(false); setRestoringDetail(false); setDetailLoading(false); setPendingMove(null);
+    setPlayback(null); setAudioSupported(false); setAudioTime(0);
+  }
+  useEffect(() => {
+    if (!playback) return;
+    playbackPosition.current = playback.initialPosition ?? playback.cue?.start_seconds ?? 0;
+    saveCurrentPlayback();
+  }, [playback]);
+  useEffect(() => {
+    const remember = () => saveCurrentPlayback();
+    window.addEventListener('pagehide', remember);
+    return () => window.removeEventListener('pagehide', remember);
+  }, []);
   useEffect(() => {
     setNeighbors(null); if (!playback || playback.cue) return;
     let disposed = false;
-    void api<Neighbors>(`/tracks/${encodeURIComponent(playback.track.id)}/neighbors?search=${encodeURIComponent(playback.search)}&filter=${encodeURIComponent(playback.filter)}`).then(value => { if (!disposed) { setNeighbors(value); if (value.catalog_position && playback.search === query && playback.filter === filter && selectedId === playback.track.id) setPageNumber(Math.ceil(value.catalog_position / 30)); } }).catch(err => { if (!disposed) setError(messageFor(err)); });
+    void api<Neighbors>(`/tracks/${encodeURIComponent(playback.track.id)}/neighbors?search=${encodeURIComponent(playback.search)}&filter=${encodeURIComponent(playback.filter)}`).then(value => { if (!disposed) { setNeighbors(value); if (!playback.restored && value.catalog_position && playback.search === query && playback.filter === filter && selectedId === playback.track.id) setPageNumber(Math.ceil(value.catalog_position / 30)); } }).catch(err => { if (!disposed) setError(messageFor(err)); });
     return () => { disposed = true; };
   }, [playback?.track.id, playback?.track.sha256, playback?.cue?.number, playback?.search, playback?.filter]);
   function selectPlayback(track: Track, autoPlay = false, cue?: CueTrack, context = { search: query, filter }) {
+    savedPlayback.current = null; setRestoringPlayback(false); audioReady.current = false;
+    playbackPosition.current = cue?.start_seconds || 0;
     ++playbackRequests.current; setAudioSupported(false); setAudioTime(cue?.start_seconds || 0);
     setPlayback(previous => ({ track, cue, autoPlay, ...context, serial: (previous?.serial || 0) + 1 }));
   }
   const requestSequence = useRef(0); const detailSequence = useRef(0);
-  const refreshSession = useCallback(async () => { try { const value = await api<Session>('/auth/session'); setSession(value); updateSession(value); setSessionError(''); } catch (err) { setSessionError(messageFor(err)); } }, []);
+  const refreshSession = useCallback(async () => { try { const value = await api<Session>('/auth/session'); if (!value.authenticated) { authenticated.current = false; forgetPlayback(); } setSession(value); updateSession(value); setSessionError(''); } catch (err) { setSessionError(messageFor(err)); } }, []);
   useEffect(() => { void refreshSession(); }, [refreshSession]);
   useEffect(() => {
+    if (!session?.authenticated || !restoringPlayback) return;
+    const saved = savedPlayback.current;
+    if (!saved) { setRestoringPlayback(false); return; }
+    const current = ++playbackRequests.current; let disposed = false;
+    const controller = new AbortController(); const timeout = window.setTimeout(() => controller.abort(), 15000);
+    const isCurrent = () => !disposed && authenticated.current && current === playbackRequests.current;
+    void restorePlaybackSession(saved, id => api<Track>(`/tracks/${encodeURIComponent(id)}`, { signal: controller.signal }), isCurrent).then(value => {
+      if (!isCurrent()) return;
+      savedPlayback.current = null;
+      if (value) {
+        audioReady.current = false; setAudioSupported(false); playbackPosition.current = value.initialPosition; setAudioTime(value.initialPosition);
+        setPlayback(previous => ({ ...value, restored: true, serial: (previous?.serial || 0) + 1 }));
+      } else { clearPlaybackSession(); setNotice('Сохраненный трек или композиция CUE изменились. Откройте аудио заново.'); }
+    }).catch(err => {
+      if (!isCurrent()) return;
+      if (err instanceof ApiError && [404, 410].includes(err.status)) { savedPlayback.current = null; clearPlaybackSession(); }
+      setError(err instanceof DOMException && err.name === 'AbortError' ? 'Плеер не успел восстановиться. Проверьте соединение и откройте аудио заново.' : messageFor(err));
+    }).finally(() => { window.clearTimeout(timeout); if (!disposed) setRestoringPlayback(false); });
+    return () => { disposed = true; window.clearTimeout(timeout); controller.abort(); };
+  }, [session?.authenticated, restoringPlayback]);
+  useEffect(() => {
     if (!session?.authenticated || !restoringDetail) return;
-    let disposed = false; setDetailLoading(true);
+    let disposed = false; const current = ++detailSequence.current; setDetailLoading(true);
     void api<Track>(`/tracks/${encodeURIComponent(initialView.selectedId)}`).then(track => {
-      if (disposed) return;
+      if (disposed || current !== detailSequence.current || !authenticated.current) return;
       setSelected(track);
-      if (track.format !== 'cue' && !track.input_error && track.status !== 'missing') selectPlayback(track, false, undefined, { search: initialView.query, filter: initialView.filter });
-    }).catch(err => { if (!disposed) { setSelectedId(''); setError(messageFor(err)); } }).finally(() => { if (!disposed) { setRestoringDetail(false); setDetailLoading(false); } });
+    }).catch(err => { if (!disposed && current === detailSequence.current && authenticated.current) { setSelectedId(''); setError(messageFor(err)); } }).finally(() => { if (!disposed && current === detailSequence.current && authenticated.current) { setRestoringDetail(false); setDetailLoading(false); } });
     return () => { disposed = true; };
   }, [session?.authenticated, restoringDetail, initialView]);
-  useEffect(() => { const expired = () => { setPlayback(null); updateSession({ authenticated: false }); setSession({ authenticated: false }); setSessionError('Сессия завершилась. Войдите снова.'); }; window.addEventListener('session-expired', expired); return () => window.removeEventListener('session-expired', expired); }, []);
+  useEffect(() => { const expired = () => { authenticated.current = false; forgetPlayback(); updateSession({ authenticated: false }); setSession({ authenticated: false }); setSessionError('Сессия завершилась. Войдите снова.'); }; window.addEventListener('session-expired', expired); return () => window.removeEventListener('session-expired', expired); }, []);
   useEffect(() => { document.documentElement.dataset.theme = theme; try { localStorage.setItem('phonoteka-theme', theme); } catch { /* Theme still works without storage. */ } }, [theme]);
   useEffect(() => { const timer = window.setTimeout(() => { if (search !== query) { setQuery(search); setPageNumber(1); } }, 300); return () => clearTimeout(timer); }, [search, query]);
   useEffect(() => { const beforeUnload = (event: BeforeUnloadEvent) => { if (dirty || policyDirty || reviewDirty || settingsDirty) { event.preventDefault(); event.returnValue = ''; } }; window.addEventListener('beforeunload', beforeUnload); return () => window.removeEventListener('beforeunload', beforeUnload); }, [dirty, policyDirty, reviewDirty, settingsDirty]);
@@ -143,6 +201,7 @@ export default function App() {
   function navigate(next: Page) { if (next === page || ((page === 'review' || page === 'lyrics') && (next === 'review' || next === 'lyrics')) || clearDirty()) { if (next !== 'settings') setSettingsDirty(false); setPage(next); setError(''); if (next !== 'review' && next !== 'lyrics') { setDirty(false); setPolicyDirty(false); setReviewDirty(false); setSelected(null); setSelectedId(''); } if (next === 'ready') { setFilter('published'); setPageNumber(1); } else if (page === 'ready') { setFilter('all'); setPageNumber(1); } } }
   async function openTrack(track: Track, target: Page = 'review', options: { autoPlay?: boolean; context?: { search: string; filter: string }; confirmed?: boolean; preservePlayback?: boolean } = {}) {
     if (!options.confirmed && !clearDirty()) return false;
+    savedPlayback.current = null; setRestoringPlayback(false); setRestoringDetail(false);
     const current = ++detailSequence.current; ++playbackRequests.current; setDetailLoading(true); setError('');
     try {
       const result = await api<Track>(`/tracks/${encodeURIComponent(track.id)}`);
@@ -178,7 +237,7 @@ export default function App() {
     setBusy(true); setError('');
     try { const job = await api<Job>('/jobs', { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ kind, track_ids: ids, params }) }); setNotice(`${jobNames[kind] || kind}: задача добавлена в очередь.`); await loadStatus(); return job; } catch (err) { setError(messageFor(err)); return null; } finally { setBusy(false); }
   }
-  async function logout(all = false) { if (!clearDirty()) return; try { await api(all ? '/auth/logout-all' : '/auth/logout', { method: 'POST' }); setSession({ authenticated: false }); updateSession({ authenticated: false }); setPlayback(null); setSelected(null); setTracks(null); setSummary(null); setDirty(false); setPolicyDirty(false); setReviewDirty(false); setSettingsDirty(false); } catch (err) { setError(messageFor(err)); } }
+  async function logout(all = false) { if (!clearDirty()) return; try { await api(all ? '/auth/logout-all' : '/auth/logout', { method: 'POST' }); authenticated.current = false; forgetPlayback(); setSession({ authenticated: false }); updateSession({ authenticated: false }); setSelected(null); setTracks(null); setSummary(null); setDirty(false); setPolicyDirty(false); setReviewDirty(false); setSettingsDirty(false); } catch (err) { setError(messageFor(err)); } }
   if (!session) return <><PwaStatus showInstall={false} /><main className="loading-page"><div className="brand"><AudioLines />Фонотека</div>{sessionError ? <ErrorBox message={sessionError} retry={() => void refreshSession()} /> : <Spinner label="Подключаемся к фонотеке" />}</main></>;
   if (!session.authenticated) return <><PwaStatus /><Login onLogin={refreshSession} initialError={sessionError} /></>;
   const activeJobs = jobs.filter(job => activeStates.includes(job.state));
@@ -188,7 +247,7 @@ export default function App() {
   const previousAvailable = playback?.cue ? cueIndex > 0 : !!neighbors?.previous_id;
   const nextAvailable = playback?.cue ? cueIndex >= 0 && cueIndex < cueItems.length - 1 : !!neighbors?.next_id;
   const headings: Record<Page, [string, string]> = { reports: ['Коллекция в деталях', 'Ошибки, дубликаты, альбомы и результаты подготовки.'], library: ['Все, что звучит', 'Ваша коллекция, по одному треку за раз.'], review: ['Внимание к деталям', 'Проверьте изменения перед записью в файл.'], lyrics: ['Слова в нужный момент', 'Построчная синхронизация с полным аудиофайлом.'], jobs: ['Работа идет', 'Независимые задачи и понятный результат каждой.'], ready: ['Готово к прослушиванию', 'Опубликованные версии хранятся отдельно от рабочей копии.'], settings: ['Под вашим контролем', 'Состояние экземпляра и возможности этой версии.'] };
-  return <div className={`app-shell ${playback ? 'has-player' : ''}`}><a className="skip-link" href="#main-content">Перейти к содержимому</a><aside className="sidebar"><a className="brand" href="#" onClick={event => { event.preventDefault(); navigate('library'); }}><span className="brand-mark"><AudioLines size={25} /></span><span>Фонотека</span></a><span className="sidebar-label">МОЯ БИБЛИОТЕКА</span><nav aria-label="Основная навигация">{navigation.map(item => <button key={item.id} aria-label={item.title} onClick={() => navigate(item.id)} aria-current={page === item.id ? 'page' : undefined}><item.icon size={21} /><span>{item.title}</span>{item.id === 'jobs' && activeJobs.length > 0 && <span className="nav-count">{activeJobs.length}</span>}</button>)}</nav><div className="sidebar-bottom"><div className="sidebar-account"><div className="avatar">{(session.username || 'В')[0].toUpperCase()}</div><div><strong>{session.username || 'Владелец'}</strong><span>Личный экземпляр</span></div><button className="icon-button" aria-label="Выйти" title="Выйти" onClick={() => void logout()}><LogOut size={18} /></button></div></div></aside><div className="main-shell"><header className="topbar"><span className="breadcrumb">Моя фонотека<span>/</span>{navigation.find(item => item.id === page)?.title}</span><div className="topbar-actions"><Badge>{summary?.version || 'Alpha'}</Badge><button className="icon-button" title="Сменить тему" aria-label="Сменить светлую или темную тему" onClick={() => setTheme(theme === 'dark' ? 'light' : theme === 'light' ? 'dark' : matchMedia('(prefers-color-scheme: dark)').matches ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}</button></div></header><PwaStatus beforeUpdate={clearDirty} onBeforeReload={saveCurrentView} /><main id="main-content" tabIndex={-1}><div className="page-heading"><div><div className="eyebrow">{page === 'library' ? 'МУЗЫКА, КОТОРУЮ ВЫ СОБРАЛИ' : navigation.find(item => item.id === page)?.title.toUpperCase()}</div><h1>{headings[page][0]}</h1><p>{headings[page][1]}</p></div>{page === 'library' && <button className="button primary" onClick={() => void submitJob('scan')} disabled={busy || activeJobs.some(job => job.kind === 'scan')}><FolderSearch size={19} />{activeJobs.some(job => job.kind === 'scan') ? 'Сканирование идет' : 'Сканировать коллекцию'}</button>}</div>{error && <ErrorBox message={error} retry={() => { setError(''); void loadTracks(); void loadStatus(); }} />}{notice && <div className="notice success" role="status"><Check size={20} /><span>{notice}</span><button className="icon-button" aria-label="Закрыть сообщение" onClick={() => setNotice('')}><X size={17} /></button></div>}{summary?.read_only && <div className="notice warning"><LockKeyhole size={20} /><span>Хранилище открыто для чтения. Запись и публикация недоступны. Причина и режим показаны в настройках.</span></div>}
+  return <div className={`app-shell ${playback ? 'has-player' : ''}`}><a className="skip-link" href="#main-content">Перейти к содержимому</a><aside className="sidebar"><a className="brand" href="#" onClick={event => { event.preventDefault(); navigate('library'); }}><span className="brand-mark"><AudioLines size={25} /></span><span>Фонотека</span></a><span className="sidebar-label">МОЯ БИБЛИОТЕКА</span><nav aria-label="Основная навигация">{navigation.map(item => <button key={item.id} aria-label={item.title} onClick={() => navigate(item.id)} aria-current={page === item.id ? 'page' : undefined}><item.icon size={21} /><span>{item.title}</span>{item.id === 'jobs' && activeJobs.length > 0 && <span className="nav-count">{activeJobs.length}</span>}</button>)}</nav><div className="sidebar-bottom"><div className="sidebar-account"><div className="avatar">{(session.username || 'В')[0].toUpperCase()}</div><div><strong>{session.username || 'Владелец'}</strong><span>Личный экземпляр</span></div><button className="icon-button" aria-label="Выйти" title="Выйти" onClick={() => void logout()}><LogOut size={18} /></button></div></div></aside><div className="main-shell"><header className="topbar"><span className="breadcrumb">Моя фонотека<span>/</span>{navigation.find(item => item.id === page)?.title}</span><div className="topbar-actions"><Badge>{summary?.version || 'Alpha'}</Badge><button className="icon-button" title="Сменить тему" aria-label="Сменить светлую или темную тему" onClick={() => setTheme(theme === 'dark' ? 'light' : theme === 'light' ? 'dark' : matchMedia('(prefers-color-scheme: dark)').matches ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}</button></div></header><PwaStatus beforeUpdate={clearDirty} onBeforeReload={() => { saveCurrentPlayback(); saveCurrentView(); }} /><main id="main-content" tabIndex={-1}><div className="page-heading"><div><div className="eyebrow">{page === 'library' ? 'МУЗЫКА, КОТОРУЮ ВЫ СОБРАЛИ' : navigation.find(item => item.id === page)?.title.toUpperCase()}</div><h1>{headings[page][0]}</h1><p>{headings[page][1]}</p></div>{page === 'library' && <button className="button primary" onClick={() => void submitJob('scan')} disabled={busy || activeJobs.some(job => job.kind === 'scan')}><FolderSearch size={19} />{activeJobs.some(job => job.kind === 'scan') ? 'Сканирование идет' : 'Сканировать коллекцию'}</button>}</div>{error && <ErrorBox message={error} retry={() => { setError(''); void loadTracks(); void loadStatus(); }} />}{notice && <div className="notice success" role="status"><Check size={20} /><span>{notice}</span><button className="icon-button" aria-label="Закрыть сообщение" onClick={() => setNotice('')}><X size={17} /></button></div>}{summary?.read_only && <div className="notice warning"><LockKeyhole size={20} /><span>Хранилище открыто для чтения. Запись и публикация недоступны. Причина и режим показаны в настройках.</span></div>}
       {page === 'library' && <><div className="library-tools"><button className="button secondary" disabled={busy || !summary?.capabilities.metadata_search || activeJobs.some(job => job.kind === 'analyze')} onClick={() => void submitJob('analyze', [], {scope:'all'})}><WandSparkles size={18}/>Подготовить всю коллекцию</button><button className="button secondary" disabled={busy || !summary?.capabilities.recognition || activeJobs.some(job => job.kind === 'recognize')} onClick={() => void submitJob('recognize', [], {scope:'all'})}>Распознать всю коллекцию</button><button className="button subtle" disabled={busy || !summary?.capabilities.metadata_search || activeJobs.some(job => job.kind === 'analyze')} onClick={() => void submitJob('analyze', [], {scope:'pending'})}>Повторить недоступные источники</button><button className="button subtle" disabled={busy || !summary?.capabilities.recognition || activeJobs.some(job => job.kind === 'recognize')} onClick={() => void submitJob('recognize', [], {scope:'pending'})}>Продолжить распознавание</button><span className="muted small">Результаты сохраняются как предложения</span></div><section className="stats" aria-label="Состояние коллекции"><Stat label="Записей в коллекции" value={summary?.total} icon={Music2} accent /><Stat label="Без обложки" value={summary?.missing_art} icon={ImagePlus} /><Stat label="Без текста" value={summary?.missing_lyrics} icon={ListMusic} /><Stat label="Нужно проверить" value={summary?.needs_review} icon={CheckCheck} /></section><section className="panel collection-panel"><div className="panel-heading"><div><h2>Ваша музыка</h2><span className="muted small">Теги, обложки и тексты вашей коллекции{summary?.cue_sheets ? ` · CUE: ${summary.cue_sheets} альбомов, ${summary.cue_tracks} композиций` : ''}</span></div><button className="icon-button" aria-label="Обновить коллекцию" onClick={() => { void loadTracks(); void loadStatus(); }}><RefreshCw size={18} /></button></div><TrackFilters search={search} onSearch={setSearch} filter={filter} onFilter={value => { setFilter(value); setPageNumber(1); }} /><TrackList tracks={tracks} loading={loading} selectedId={selectedId} onSelect={track => void openTrack(track)} /><Pagination tracks={tracks} page={pageNumber} onPage={setPageNumber} loading={loading} /></section><div className="quiet-note"><ShieldCheck size={17} />Изменения сначала сохраняются как предложение. Запись в файл запускается отдельным действием.</div></>}
       {isEditor && <div className={`editor-layout ${selected ? 'has-selection' : ''}`}><section className="panel track-queue"><div className="panel-heading"><h2>Треки</h2><span className="muted small">{countOf(tracks?.total)}</span></div><TrackFilters compact search={search} onSearch={setSearch} filter={filter} onFilter={value => { setFilter(value); setPageNumber(1); }} /><div className="queue-tracks">{tracks?.items.map(track => <button key={track.id} className={`queue-track ${selectedId === track.id ? 'selected' : ''}`} onClick={() => void openTrack(track, page)}><Cover track={track} /><span><strong>{titleOf(track)}</strong><small>{textTag(track.tags, 'artist') || 'Исполнитель не указан'}</small><span className="queue-meta">{track.format.toUpperCase()}{track.proposal?.input_sha256 === track.sha256 ? ' · Предложение' : ''}</span></span>{track.proposal && <span className="proposal-dot" aria-label="Есть предложение" />}</button>)}{loading && <Spinner />}{!loading && tracks?.items.length === 0 && <div className="empty compact"><Search size={25} /><p>Треков не найдено</p></div>}</div><Pagination compact tracks={tracks} page={pageNumber} onPage={setPageNumber} loading={loading} /></section><section className="editor-content" inert={detailLoading || undefined}>{selected?.cue_sheets?.length ? <div className="notice info cue-links"><Disc3 size={20} /><div>{selected.cue_album_image && <p>Это альбомный образ. Изменение и публикация файла заблокированы, чтобы сохранить все композиции.</p>}{selected.cue_sheets.map(sheet => <button className="button subtle" key={sheet.id} onClick={() => { void api<Track>(`/tracks/${encodeURIComponent(sheet.id)}`).then(item => openTrack(item, page)).catch(err => setError(messageFor(err))); }}>Открыть CUE: {sheet.title} ({sheet.track_count})</button>)}</div></div> : null}{detailLoading && !selected ? <div className="panel empty"><Spinner label="Открываем карточку" /></div> : selected ? selected.format === 'cue' ? <CueView selectedNumber={playback?.track.id === selected.id ? playback.cue?.number : undefined} onPlay={item => selectPlayback(selected, true, item)} enabled={!!summary?.capabilities.cue_export} busy={busy} onExtract={() => void submitJob('extract_cue', [selected.id])} key={`${selected.id}:${selected.sha256}:${selected.revision}`} track={selected} onBack={() => { setSelected(null); setSelectedId(''); }} onRefresh={() => { void openTrack(selected, page); }} /> : <><details className="panel policy-details"><summary>Закрепленные поля и источники</summary><TrackPolicyPanel key={selected.id+selected.sha256} track={selected} disabled={busy || dirty || reviewDirty} onDirtyChange={setPolicyDirty} onChanged={() => { void loadTracks(); }} /></details><details className="panel policy-details"><summary>Приемка текста и профиль публикации</summary><LyricsReviewPanel key={selected.id+selected.sha256} track={selected} disabled={busy || dirty || policyDirty} onDirtyChange={setReviewDirty} onSeek={audioSupported && playback?.track.id === selected.id && !playback.cue ? seconds => { if (audioRef.current) audioRef.current.currentTime = seconds; } : undefined} onChanged={() => { void loadTracks(); }} /></details><details className="panel policy-details"><summary>План Ready и откат публикации</summary><PublicationPanel trackId={selected.id} disabled={busy || dirty || policyDirty || reviewDirty || settingsDirty} onJobQueued={() => { void loadStatus(); }} /><SidecarPublicationPanel ids={[selected.id]} disabled={busy || dirty || policyDirty || reviewDirty || !summary?.capabilities.publish} onQueued={() => { void loadStatus(); }} /></details><TrackEditor editingBlocked={policyDirty || reviewDirty} audioRef={audioRef} audioTime={audioTime} audioSupported={audioSupported && playback?.track.id === selected.id && !playback.cue} key={`${selected.id}:${selected.proposal?.id || ''}:${selected.sha256}:${selected.lyrics_document?.version || 0}`} track={selected} page={page} summary={summary} busy={busy} onDirty={setDirty} onTab={setPage} onBack={() => { if (clearDirty()) { setSelected(null); setSelectedId(''); setDirty(false); setPolicyDirty(false); setReviewDirty(false); } }} onRefresh={() => { void openTrack(selected, page); }} onSave={async body => { await api(`/tracks/${encodeURIComponent(selected.id)}/proposal`, { method: 'POST', headers: { 'If-Match': `"${selected.sha256}"` }, body: JSON.stringify(body) }); setDirty(false); const result = await api<Track>(`/tracks/${encodeURIComponent(selected.id)}`); setSelected(result); setNotice('Предложение сохранено. Файл пока не изменен.'); void loadTracks(); }} onJob={async (kind, params) => { const job = await submitJob(kind, [selected.id], params); if (job) { setNotice(`${jobNames[kind]}: задача принята. Результат появится в разделе «Обработка».`); } }} /></> : <div className="panel empty editor-empty"><div className="icon-surface"><SlidersHorizontal size={30} /></div><h2>Выберите трек</h2><p>Откройте карточку слева, чтобы проверить теги,<br />обложку и синхронизированный текст.</p></div>}</section></div>}
       {page === 'jobs' && <JobsView jobs={jobs} refresh={loadStatus} onCancel={async id => { try { await api(`/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }); setNotice('Запрошена отмена. Текущая запись файла завершится безопасно. Уже завершенные изменения сохранятся.'); await loadStatus(); } catch (err) { setError(messageFor(err)); } }} />}
@@ -201,10 +260,10 @@ export default function App() {
       title={playback.cue?.title || titleOf(playback.track)} subtitle={playback.cue?.performer || textTag(playback.track.tags, 'artist') || 'Исполнитель не указан'}
       cover={playback.track.has_art ? `/api/tracks/${encodeURIComponent(playback.track.id)}/art?v=${playback.track.sha256}` : undefined}
       initialPosition={playback.initialPosition} duration={playback.track.duration} start={playback.cue?.start_seconds} end={playback.cue?.end_seconds} autoPlay={playback.autoPlay}
-      onPosition={setAudioTime} onReady={setAudioSupported} navigationBusy={playerNavigating || detailLoading}
+      onPosition={rememberPlaybackPosition} onReady={ready => { audioReady.current = ready; setAudioSupported(ready); }} navigationBusy={playerNavigating || detailLoading}
       navigationLabel={playback.cue ? `CUE · ${cueIndex + 1} из ${cueItems.length}` : neighbors?.position ? `${neighbors.position} из ${neighbors.total} в списке` : 'Текущая версия файла'}
       onPrevious={previousAvailable ? keepPlaying => void movePlayback(-1, keepPlaying) : undefined} onNext={nextAvailable ? keepPlaying => void movePlayback(1, keepPlaying) : undefined}
-      onOpen={() => { if (selectedId === playback.track.id && selected) setPage('review'); else void openTrack(playback.track, 'review', { preservePlayback: true }); }} onClose={() => { ++playbackRequests.current; ++detailSequence.current; setDetailLoading(false); setPendingMove(null); setPlayback(null); }} />}{pendingMove && <PlayerDiscardDialog onStay={() => setPendingMove(null)} onDiscard={() => { const pending = pendingMove; setPendingMove(null); if (playback?.track.id === pending.id) void movePlayback(pending.direction, pending.keepPlaying, true); }} />}</div>;
+      onOpen={() => { if (selectedId === playback.track.id && selected) setPage('review'); else void openTrack(playback.track, 'review', { preservePlayback: true }); }} onClose={forgetPlayback} />}{pendingMove && <PlayerDiscardDialog onStay={() => setPendingMove(null)} onDiscard={() => { const pending = pendingMove; setPendingMove(null); if (playback?.track.id === pending.id) void movePlayback(pending.direction, pending.keepPlaying, true); }} />}</div>;
 }
 
 function Stat({ label, value, icon: Icon, accent }: { label: string; value?: number; icon: LucideIcon; accent?: boolean }) { return <div className={`stat ${accent ? 'accent' : ''}`}><div><span>{label}</span><strong>{countOf(value)}</strong></div><span className="stat-icon"><Icon size={23} /></span></div>; }
