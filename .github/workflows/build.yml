@@ -14,6 +14,12 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_id: ${{ steps.candidate.outputs.image_id }}
+      image_digest: ${{ steps.candidate.outputs.image_digest }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -47,26 +53,44 @@ jobs:
             -t phonoteka:ci .
       - name: Container smoke and isolation
         run: python3 tests/container_smoke.py
-      - name: Save tested image
+      - name: Push exact tested image candidate
+        if: github.event_name != 'pull_request'
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          docker save phonoteka:ci | gzip > phonoteka-image.tar.gz
-          sha256sum phonoteka-image.tar.gz > phonoteka-image.sha256
-          docker inspect phonoteka:ci --format '{{.Id}}' > image-id.txt
-          printf '%s\n' "$GITHUB_SHA" > revision.txt
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        with:
-          name: tested-amd64-image
-          path: |
-            phonoteka-image.tar.gz
-            phonoteka-image.sha256
-            image-id.txt
-            revision.txt
-          retention-days: 7
+          set -euo pipefail
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          candidate="$image:ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          image_id="$(docker inspect phonoteka:ci --format '{{.Id}}')"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$(docker inspect phonoteka:ci --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" == "$GITHUB_SHA" ]]
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag phonoteka:ci "$candidate"
+          docker push "$candidate"
+          digest_ref=''
+          while IFS= read -r reference; do
+            if [[ "$reference" == "$image@sha256:"* ]]; then digest_ref="$reference"; break; fi
+          done < <(docker inspect "$candidate" --format '{{range .RepoDigests}}{{println .}}{{end}}')
+          [[ "${digest_ref#"$image@"}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$digest_ref" == "$image@sha256:"* ]]
+          printf 'image_id=%s\nimage_digest=%s\n' "$image_id" "$digest_ref" >> "$GITHUB_OUTPUT"
+          printf 'Tested app: `%s`\nConfig image ID: `%s`\n' "$digest_ref" "$image_id" >> "$GITHUB_STEP_SUMMARY"
   inference:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_id: ${{ steps.candidate.outputs.image_id }}
+      image_digest: ${{ steps.candidate.outputs.image_digest }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
       - name: Build pinned CPU inference image
         run: |
           docker build -f Dockerfile.inference --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" --label "org.opencontainers.image.revision=$GITHUB_SHA" -t phonoteka-inference:ci .
@@ -75,61 +99,86 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y espeak
           python3 tests/inference_smoke.py
-      - name: Save tested inference image
+      - name: Push exact tested inference candidate
+        if: github.event_name != 'pull_request'
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          docker save phonoteka-inference:ci | gzip > inference-image.tar.gz
-          sha256sum inference-image.tar.gz > inference-image.sha256
-          docker inspect phonoteka-inference:ci --format '{{.Id}}' > inference-image-id.txt
-          printf '%s\n' "$GITHUB_SHA" > inference-revision.txt
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        with:
-          name: tested-inference-image
-          path: |
-            inference-image.tar.gz
-            inference-image.sha256
-            inference-image-id.txt
-            inference-revision.txt
-          retention-days: 7
+          set -euo pipefail
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-inference"
+          candidate="$image:ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          image_id="$(docker inspect phonoteka-inference:ci --format '{{.Id}}')"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$(docker inspect phonoteka-inference:ci --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" == "$GITHUB_SHA" ]]
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag phonoteka-inference:ci "$candidate"
+          docker push "$candidate"
+          digest_ref=''
+          while IFS= read -r reference; do
+            if [[ "$reference" == "$image@sha256:"* ]]; then digest_ref="$reference"; break; fi
+          done < <(docker inspect "$candidate" --format '{{range .RepoDigests}}{{println .}}{{end}}')
+          [[ "${digest_ref#"$image@"}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$digest_ref" == "$image@sha256:"* ]]
+          printf 'image_id=%s\nimage_digest=%s\n' "$image_id" "$digest_ref" >> "$GITHUB_OUTPUT"
+          printf 'Tested inference: `%s`\nConfig image ID: `%s`\n' "$digest_ref" "$image_id" >> "$GITHUB_STEP_SUMMARY"
   publish:
     needs: [verify, inference]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write
       packages: write
-      actions: read
     steps:
-      - name: Load tested image
+      - name: Verify, promote and package exact tested images
         env:
           GH_TOKEN: ${{ github.token }}
+          APP_DIGEST: ${{ needs.verify.outputs.image_digest }}
+          APP_IMAGE_ID: ${{ needs.verify.outputs.image_id }}
+          INFERENCE_DIGEST: ${{ needs.inference.outputs.image_digest }}
+          INFERENCE_IMAGE_ID: ${{ needs.inference.outputs.image_id }}
         run: |
-          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n tested-amd64-image
-          sha256sum -c phonoteka-image.sha256
-          gzip -dc phonoteka-image.tar.gz | docker load
-          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n tested-inference-image
-          sha256sum -c inference-image.sha256
-          gzip -dc inference-image.tar.gz | docker load
-          test "$(docker inspect phonoteka-inference:ci --format '{{.Id}}')" = "$(cat inference-image-id.txt)"
-          test "$(docker inspect phonoteka:ci --format '{{.Id}}')" = "$(cat image-id.txt)"
-      - name: Publish immutable revision
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          inference_image="$image-inference"
+          [[ "$APP_DIGEST" == "$image@sha256:"* && "${APP_DIGEST#"$image@"}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$INFERENCE_DIGEST" == "$inference_image@sha256:"* && "${INFERENCE_DIGEST#"$inference_image@"}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$APP_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ && "$INFERENCE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker tag phonoteka:ci "$image:sha-$GITHUB_SHA"
+          docker pull "$APP_DIGEST"
+          docker pull "$INFERENCE_DIGEST"
+          [[ "$(docker inspect "$APP_DIGEST" --format '{{.Id}}')" == "$APP_IMAGE_ID" ]]
+          [[ "$(docker inspect "$INFERENCE_DIGEST" --format '{{.Id}}')" == "$INFERENCE_IMAGE_ID" ]]
+          [[ "$(docker inspect "$APP_DIGEST" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" == "$GITHUB_SHA" ]]
+          [[ "$(docker inspect "$INFERENCE_DIGEST" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" == "$GITHUB_SHA" ]]
+          docker tag "$APP_DIGEST" "$image:sha-$GITHUB_SHA"
           docker push "$image:sha-$GITHUB_SHA"
-          docker inspect "$image:sha-$GITHUB_SHA" --format '{{index .RepoDigests 0}}' > image-digest.txt
-          docker tag phonoteka-inference:ci "$image-inference:sha-$GITHUB_SHA"
-          docker push "$image-inference:sha-$GITHUB_SHA"
-          docker inspect "$image-inference:sha-$GITHUB_SHA" --format '{{index .RepoDigests 0}}' > inference-digest.txt
-          cat inference-digest.txt >> "$GITHUB_STEP_SUMMARY"
-          cat image-digest.txt >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        with:
-          name: image-digest
-          path: |
-            image-digest.txt
-            inference-digest.txt
-          retention-days: 90
+          docker tag "$INFERENCE_DIGEST" "$inference_image:sha-$GITHUB_SHA"
+          docker push "$inference_image:sha-$GITHUB_SHA"
+          docker tag "$APP_DIGEST" phonoteka:ci
+          docker tag "$INFERENCE_DIGEST" phonoteka-inference:ci
+          docker save phonoteka:ci | gzip > phonoteka-image.tar.gz
+          sha256sum phonoteka-image.tar.gz > phonoteka-image.sha256
+          printf '%s\n' "$APP_IMAGE_ID" > image-id.txt
+          printf '%s\n' "$GITHUB_SHA" > revision.txt
+          docker save phonoteka-inference:ci | gzip > inference-image.tar.gz
+          sha256sum inference-image.tar.gz > inference-image.sha256
+          printf '%s\n' "$INFERENCE_IMAGE_ID" > inference-image-id.txt
+          printf '%s\n' "$GITHUB_SHA" > inference-revision.txt
+          assets=(phonoteka-image.tar.gz phonoteka-image.sha256 image-id.txt revision.txt inference-image.tar.gz inference-image.sha256 inference-image-id.txt inference-revision.txt)
+          for asset in "${assets[@]}"; do
+            size="$(stat -c %s "$asset")"
+            (( size > 0 && size < 2000000000 ))
+          done
+          release_tag="build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'Internal CI delivery candidate. Draft only; not a published release.\n\nSource: %s\nWorkflow run: https://github.com/%s/actions/runs/%s/attempts/%s\nApp: %s\nApp config ID: %s\nInference: %s\nInference config ID: %s\n\nBoth exact images passed their build and smoke jobs. The eight assets contain those pulled images and their checksums, config IDs and source revision.\n' \
+            "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$APP_DIGEST" "$APP_IMAGE_ID" "$INFERENCE_DIGEST" "$INFERENCE_IMAGE_ID" > delivery-notes.md
+          gh release create "$release_tag" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --draft --prerelease --title "CI delivery $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT" \
+            --notes-file delivery-notes.md "${assets[@]}"
+          cat delivery-notes.md >> "$GITHUB_STEP_SUMMARY"
