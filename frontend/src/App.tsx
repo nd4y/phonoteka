@@ -23,6 +23,7 @@ import { useOwnerActivity } from './ownerActivity';
 import { JobsView } from './JobsView';
 import { clearView, readView } from './viewState';
 import { AppBackContext, useAppHistory, useBackLayer } from './useAppHistory';
+import { navigationKey } from './appHistory';
 import type { Page, ViewState } from './viewState';
 import { useViewPersistence } from './useViewPersistence';
 import { clearPlaybackSession, playbackSessionFor, readPlaybackSession, restorePlaybackSession, savePlaybackSession } from './playbackSession';
@@ -264,9 +265,11 @@ export default function App() {
     savedPlayback.current = null; setRestoringPlayback(false); setRestoringDetail(false);
     ++playbackRequests.current; setDetailLoading(true); setError('');
     return loadLatestDetail(detailSequence, () => api<Track>(`/tracks/${encodeURIComponent(track.id)}`), result => {
-      navigationHistory.push({ ...before, page: target, selectedId: result.id, query: options.context?.search ?? search, filter: options.context?.filter ?? filter, scroll: 0, queueScroll: 0 }, undefined, before);
+      const next = { ...before, page: target, selectedId: result.id, query: options.context?.search ?? search, filter: options.context?.filter ?? filter, scroll: 0, queueScroll: 0 };
+      navigationHistory.push(next, undefined, before);
+      if (navigationKey(before) !== navigationKey(next)) saveCurrentView.restore(next);
       if (options.context) { setSearch(options.context.search); setQuery(options.context.search); setFilter(options.context.filter); }
-      setPage(target); setSelectedId(result.id); setSelected(result); setDirty(false); setPolicyDirty(false); setReviewDirty(false);
+      setPage(target); setSelectedId(result.id); setSelected(result); setDirty(false); setPolicyDirty(false); setReviewDirty(false); setSettingsDirty(false);
       if (!options.preservePlayback && result.format !== 'cue' && !result.input_error && result.status !== 'missing') {
         const context = options.context ?? (tracks?.items.some(item => item.id === result.id) ? { search: query, filter } : { search: '', filter: 'all' });
         selectPlayback(result, !!options.autoPlay, undefined, context);
