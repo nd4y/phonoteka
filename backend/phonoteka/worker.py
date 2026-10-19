@@ -161,7 +161,7 @@ class Worker:
             except sqlite3.OperationalError as exc:
                 if not sqlite_busy(exc):
                     raise
-                log('worker_database_busy', logging.WARNING, stage='heartbeat')
+                log('worker_database_busy', logging.WARNING, operation='heartbeat')
                 delay = DB_BUSY_RETRY_SECONDS
             await asyncio.sleep(delay)
 
@@ -1015,7 +1015,7 @@ class Worker:
                         # The transaction context rolled back and closed its
                         # connection. Retry a fresh poll after a bounded await;
                         # never acknowledge or restart a partially claimed job.
-                        log('worker_database_busy', logging.WARNING, stage='scheduler')
+                        log('worker_database_busy', logging.WARNING, operation='scheduler')
                         await asyncio.sleep(DB_BUSY_RETRY_SECONDS)
                         continue
                     if job:
@@ -1069,6 +1069,9 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try: asyncio.run(worker.run(args.once))
+    except Exception:
+        LOG.exception('Worker failed', extra={'event':'worker_failed'})
+        return 1
     finally:
         if server: server.shutdown(); server.server_close()
         log('worker_stopped')

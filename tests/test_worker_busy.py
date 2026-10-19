@@ -2,9 +2,12 @@
 import asyncio
 import hashlib
 import json
+import logging
 import sqlite3
+import sys
 import threading
 import wave
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -219,3 +222,67 @@ def test_busy_classifier_accepts_only_contention_primary_codes(code):
     assert not sqlite_busy(failure)
     assert not sqlite_busy(sqlite3.OperationalError('database is locked'))
     assert not sqlite_busy(RuntimeError('database is locked'))
+
+
+def test_main_failure_is_private_json_stdout_and_nonzero_exit(settings, monkeypatch, capsys):
+    cfg = replace(settings, metrics_token_file=settings.state_dir / 'generated-scrape-token')
+    worker = Worker(cfg)
+    secret = 'synthetic-secret-that-must-never-reach-logs'
+    private_path = '/private/collection/never-print-this-song.flac'
+
+    async def fail_run(once=False):
+        raise sqlite3.OperationalError(secret + ' ' + private_path)
+
+    class Server:
+        def __init__(self):
+            self.calls = []
+
+        def shutdown(self):
+            self.calls.append('shutdown')
+
+        def server_close(self):
+            self.calls.append('close')
+
+    server = Server()
+    monkeypatch.setattr(worker, 'run', fail_run)
+    monkeypatch.setattr(worker_module, 'Worker', lambda config: worker)
+    monkeypatch.setattr(worker_module.Settings, 'from_env', lambda: cfg)
+    monkeypatch.setattr(worker_module, 'worker_server', lambda *args: server)
+    monkeypatch.setattr(worker_module.signal, 'signal', lambda *args: None)
+    monkeypatch.setattr(sys, 'argv', ['phonoteka-worker', '--once'])
+    monkeypatch.setenv('LOG_LEVEL', 'INFO')
+    # configure_logging intentionally replaces root handlers and normalizes
+    # third-party loggers. Restore every touched logger after this real main()
+    # invocation, including pytest's capture handlers and disabled flags.
+    names = ('', 'uvicorn', 'uvicorn.error', 'uvicorn.access', 'httpx', 'httpcore',
+             'faster_whisper', 'shazamio', 'asyncio')
+    saved = {}
+    for name in names:
+        logger = logging.getLogger(name)
+        saved[name] = (list(logger.handlers), logger.level, logger.propagate, logger.disabled)
+    try:
+        assert worker_module.main() == 1
+        captured = capsys.readouterr()
+        assert captured.err == ''
+        assert secret not in captured.out and private_path not in captured.out
+        assert str(cfg.work_root) not in captured.out
+        rows = [json.loads(line) for line in captured.out.splitlines() if line.strip()]
+        assert [row['event'] for row in rows] == ['worker_starting', 'worker_failed', 'worker_stopped']
+        failure = rows[1]
+        assert failure['level'] == 'error' and failure['service'] == 'worker'
+        assert failure['error_type'] == 'OperationalError'
+        assert failure['stack'] and any(frame['function'] == 'fail_run' for frame in failure['stack'])
+        assert all(set(frame) == {'module', 'function', 'line'} for frame in failure['stack'])
+        assert all('/' not in frame['module'] and '\\' not in frame['module'] for frame in failure['stack'])
+        assert server.calls == ['shutdown', 'close']
+    finally:
+        for handler in logging.getLogger().handlers:
+            if handler not in saved[''][0]:
+                handler.close()
+        for name, (handlers, level, propagate, disabled) in saved.items():
+            logger = logging.getLogger(name)
+            logger.handlers[:] = handlers
+            logger.setLevel(level)
+            logger.propagate = propagate
+            logger.disabled = disabled
+        worker.pool.shutdown(wait=True)
