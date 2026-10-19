@@ -196,14 +196,40 @@ def launch_demo(snapshot, source, manifest, image, reports, baseline, verified_r
     data.mkdir(mode=0o700, exist_ok=True)
     old = inspect(DEMO)
     previous = None
-    if old:
-        if old['Config'].get('Labels', {}).get(LABEL) != 'build01':
-            raise RuntimeError('Refusing to replace a container owned by another process')
-        previous = f'{DEMO}-previous-{int(time.time())}'
-        capture(DOCKER + ['rename', DEMO, previous])
-        capture(DOCKER + ['stop', '--time', '20', previous], timeout=35)
+    stop_issued = False
+    replacement_attempt = f'{snapshot}:{time.time_ns()}'
+
+    def stopped(row):
+        state = row['State']
+        return (not state['Running'] and not state.get('Restarting') and not state.get('Dead')
+                and state['Status'] in {'exited', 'created'} and state.get('Pid') == 0)
+
+    def owned_old():
+        row = inspect(old['Id'])
+        if (not row or row['Id'] != old['Id'] or row['Config'].get('Labels', {}).get(LABEL) != 'build01'
+                or row['Name'] not in {'/' + DEMO, '/' + previous}):
+            raise RuntimeError('Previous demo identity could not be verified; nothing else stopped')
+        return row
+
+    if old and old['Config'].get('Labels', {}).get(LABEL) != 'build01':
+        raise RuntimeError('Refusing to replace a container owned by another process')
     try:
+        if old:
+            previous = f'{DEMO}-previous-{time.time_ns()}'
+            capture(DOCKER + ['rename', old['Id'], previous])
+            stop_issued = True
+            try:
+                # Keep Docker's 20s grace; allow time for daemon response/cleanup.
+                capture(DOCKER + ['stop', '--time', '20', old['Id']], timeout=90)
+            except subprocess.TimeoutExpired:
+                if not stopped(owned_old()):
+                    raise
+                emit(stage='demo-previous-stop', state='confirmed-stopped-after-cli-timeout',
+                     container_id=old['Id'])
+            if not stopped(owned_old()):
+                raise RuntimeError('Previous demo is not confirmed stopped')
         capture(DOCKER + ['run', '-d', '--name', DEMO, '--label', f'{LABEL}=build01',
+               '--label', f'io.phonoteka.demo_replacement={replacement_attempt}',
                '--label', f'io.phonoteka.snapshot={snapshot}', '--restart', 'unless-stopped',
                '--cpus', '1', '--memory', '512m', '--user', uid, '--read-only',
                '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
@@ -220,17 +246,37 @@ def launch_demo(snapshot, source, manifest, image, reports, baseline, verified_r
         else:
             raise RuntimeError('Demo health did not become ready')
     except Exception:
-        failed = inspect(DEMO)
-        if failed and failed['Config'].get('Labels', {}).get(LABEL) == 'build01':
-            logs = capture(DOCKER + ['logs', '--tail', '100', DEMO], required=False)
-            (reports/'demo-startup-failed.log').write_text(logs.stdout+logs.stderr)
-            capture(DOCKER + ['rm', '-f', DEMO], required=False)
-        if previous:
-            capture(DOCKER + ['rename', previous, DEMO])
-            capture(DOCKER + ['start', DEMO])
+        # Rollback failure must preserve the original controller failure. A
+        # pending daemon stop is not permission to force-kill/restart another ID.
+        try:
+            failed = inspect(DEMO)
+            if failed and (not old or failed['Id'] != old['Id']):
+                labels = failed['Config'].get('Labels', {})
+                if labels.get(LABEL) != 'build01' or labels.get('io.phonoteka.demo_replacement') != replacement_attempt:
+                    raise RuntimeError('DEMO belongs to another attempt; rollback left it untouched')
+                try:
+                    logs = capture(DOCKER + ['logs', '--tail', '100', failed['Id']], timeout=10, required=False)
+                    (reports/'demo-startup-failed.log').write_text(logs.stdout+logs.stderr)
+                except Exception as log_error:
+                    emit(stage='demo-rollback-log', state='unavailable', error_type=type(log_error).__name__)
+                capture(DOCKER + ['rm', '-f', failed['Id']])
+            if old:
+                row = owned_old()
+                if row['Name'] != '/' + DEMO:
+                    capture(DOCKER + ['rename', old['Id'], DEMO])
+                if old['State']['Running'] and stopped(row):
+                    capture(DOCKER + ['start', old['Id']], timeout=90)
+                elif old['State']['Running'] and stop_issued:
+                    emit(stage='demo-rollback', state='uncertain-shutdown-in-progress',
+                         container_id=old['Id'])
+        except Exception as rollback_error:
+            emit(stage='demo-rollback', state='unverified', error_type=type(rollback_error).__name__)
         raise
-    if previous:
-        capture(DOCKER + ['rm', previous])
+    if old:
+        if not stopped(owned_old()):
+            raise RuntimeError('Previous demo changed state; refusing cleanup')
+        capture(DOCKER + ['rm', old['Id']])
+
     after = inventory()
     unrelated_changes = {key: value for key, value in baseline.items()
                          if value['name'] != '/' + DEMO and after.get(key) != value}
