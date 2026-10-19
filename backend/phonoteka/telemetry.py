@@ -23,7 +23,7 @@ CONTEXT = ContextVar('telemetry_context', default={})
 FIELDS = {'request_id','job_id','track_id','event_id','kind','state','code','action','provider','operation','status','method','route','duration_seconds','count','completed','failed','total','retry_at','error_type','attempt','port'}
 ITEM_ACTIONS = {'preflight','fingerprint_sample','fingerprint_lookup','metadata_lookup','decode','write_tags','commit','rollback','publication','cue_extract','asr','align','normalize','sidecars'}
 KINDS = ('scan','audit','apply','rollback','publish','rollback_ready','analyze','recognize','transcribe','align','extract_cue','replaygain','replaygain_album','export_ready','normalize_audio','youtube','release_audit','publish_sidecars')
-STATES = ('queued','running','paused','succeeded','failed','completed_with_errors','interrupted','cancelled','cancelled_partial','conflict','needs_review')
+STATES = ('queued','running','paused','waiting_authorization','succeeded','failed','completed_with_errors','interrupted','cancelled','cancelled_partial','conflict','needs_review')
 PROVIDERS = ('musicbrainz','lrclib','coverartarchive','shazam','youtube','acoustid','theaudiodb','discogs')
 POLICY_OPERATIONS = ('fetch','cache','embed','export','derived_analysis')
 _POLICY_DENIALS = {}

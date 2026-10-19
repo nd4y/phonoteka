@@ -354,7 +354,7 @@ def install(app, settings):
             state = ensure(conn, row); document = effective(conn, row, state)
             if body.base_version != state['version']:
                 raise security.error(412, 'lyrics_document_conflict', 'Документ изменился в другой сессии')
-            pending = conn.execute("SELECT 1 FROM jobs j,json_each(j.payload,'$.items') i WHERE j.kind IN ('apply','rollback','publish','rollback_ready') AND j.state IN ('queued','running','paused','interrupted') AND json_extract(i.value,'$.track_id')=? LIMIT 1", (track_id,)).fetchone()
+            pending = conn.execute("SELECT 1 FROM jobs j,json_each(j.payload,'$.items') i WHERE j.kind IN ('apply','rollback','publish','rollback_ready') AND j.state IN ('queued','running','paused','waiting_authorization','interrupted') AND json_extract(i.value,'$.track_id')=? LIMIT 1", (track_id,)).fetchone()
             if pending:
                 raise security.error(409, 'track_mutation_pending', 'Дождитесь завершения изменения файла')
             indexed = {line['line_id']: line for line in document['lines']}

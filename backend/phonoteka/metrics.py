@@ -52,7 +52,7 @@ class DatabaseCollector:
         for r in jobs:
             kind = bounded(r['kind'],KINDS); state = bounded(r['state'],STATES)
             counts[kind,state] = counts.get((kind,state),0)+1
-            if state in {'queued','running','paused'}:
+            if state in {'queued','running','paused','waiting_authorization'}:
                 remaining[kind] = remaining.get(kind,0)+max(0,r['total']-r['completed']-r['failed'])
             if state in {'queued','running','paused'} and r['stage']=='waiting_provider':
                 waiting[kind] = max(waiting.get(kind,0),max(0,(r['retry_at'] or 0)-now))
@@ -65,7 +65,7 @@ class DatabaseCollector:
                 from datetime import datetime
                 age = max(0,now-datetime.fromisoformat(r['created_at']).timestamp()); oldest[kind]=max(oldest.get(kind,0),age)
         result.append(gauge('jobs','Persisted jobs by kind/state',[((k,s),counts.get((k,s),0)) for k in (*KINDS,'other') for s in (*STATES,'other')],['kind','state']))
-        for name,help,values in [('queue_items_remaining','Unfinished items in queued/running/paused jobs',remaining),('provider_retry_wait_seconds','Provider retry wait remaining',waiting),('oldest_queued_age_seconds','Age of oldest queued job, including provider waits',oldest)]:
+        for name,help,values in [('queue_items_remaining','Unfinished items in open jobs, including authorization waits',remaining),('provider_retry_wait_seconds','Provider retry wait remaining',waiting),('oldest_queued_age_seconds','Age of oldest queued job, including provider waits',oldest)]:
             result.append(gauge(name,help,[((k,),values.get(k,0)) for k in KINDS],['kind']))
         for name,help,values in [('storage_wait_jobs','Jobs waiting for safe storage reservation',storage_jobs),
                                  ('storage_wait_items_remaining','Unfinished items in storage-wait jobs',storage_remaining),

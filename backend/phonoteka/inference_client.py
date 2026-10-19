@@ -24,13 +24,26 @@ async def process(worker, job, item):
             provider_policy.require_payload(conn,row,{'lrc':item.get('reference_text',''),'field_sources':item.get('reference_sources',{})},'derived_analysis')
     token=(await worker.io(settings.inference_secret_file.read_text)).strip()
     body={'relative_path':item['relative_path'],'sha256':item['sha256'],'language':params.get('language') or None,'generation':item.get('generation',params.get('generation',0)),'reference_text':item.get('reference_text') if job['kind']=='align' else None}
+    worker.authorize_grant(job)
     async with httpx.AsyncClient(base_url=settings.inference_url,timeout=15,headers={'Authorization':'Bearer '+token}) as client:
         health=await client.get('/health');health.raise_for_status();model=health.json()['model'];revision=health.json()['model_revision']
         if health.json().get('contract')!='transcribe-v3' or not health.json().get('profile_revision'): raise media.MediaError('inference_contract','Update app and inference to compatible versions')
         remote_id=hashlib.sha256(json.dumps([body,model,revision,health.json()['profile_revision'],'transcribe-v3'],sort_keys=True).encode()).hexdigest()
-        worker.item_result(job['id'],item['track_id'],'running',{'inference_job_id':remote_id,'model':model})
+        previous=await worker.io(db.fetchone,settings.db_path,'SELECT result FROM job_items WHERE job_id=? AND item_key=?',(job['id'],item['track_id']))
+        prior=json.loads(previous['result']) if previous else {}
+        existing=prior.get('inference_job_id')
+        if existing and existing!=remote_id:
+            raise media.MediaError('inference_unknown_outcome','Model/profile changed; reconcile the previously submitted inference request')
+        joined=False
+        if existing:
+            status=await client.get('/jobs/'+existing)
+            if status.status_code==200:joined=True
+            elif status.status_code!=404:status.raise_for_status()
+        worker.item_result(job['id'],item['track_id'],'running',{'inference_job_id':remote_id,'model':model,
+            'model_revision':revision,'profile_revision':health.json()['profile_revision']})
         # The remote API deduplicates by the complete input contract, including model and generation.
-        for attempt in range(2):
+        for attempt in range(0 if joined else 2):
+            worker.authorize_grant(job)
             try:
                 submitted=await client.post('/jobs',json=body);submitted.raise_for_status()
                 if submitted.json()['id']!=remote_id: raise media.MediaError('inference_contract','Remote job identity mismatch')
@@ -49,9 +62,13 @@ async def process(worker, job, item):
                 except media.MediaError:
                     await client.delete('/jobs/'+remote_id)
                     raise
-            if worker.cancelled(job['id']):
+            if worker.user_cancelled(job['id']):
                 await client.delete('/jobs/'+remote_id)
                 raise media.MediaError('cancelled','ASR result was not accepted')
+            # Expired/revoked authority stops polling and accepting effects,
+            # but never claims an already submitted remote operation cancelled.
+            # Reapproval joins the same deterministic remote ID/generation.
+            worker.authorize_grant(job)
             try:
                 response=await client.get('/jobs/'+remote_id);response.raise_for_status();state=response.json()
             except httpx.HTTPError:
@@ -66,8 +83,7 @@ async def process(worker, job, item):
     if result.get('input_sha256')!=item['sha256']: raise media.MediaError('inference_contract','Wrong audio revision')
     aligned=result.pop('alignment',None)
     if job['kind']=='align' and not aligned: raise media.MediaError('inference_contract','Alignment result missing')
-    if worker.cancelled(job['id']) or int(db.setting(settings.db_path,'auth_epoch','0'))!=job['auth_epoch']:
-        raise media.MediaError('authorization_revoked','Analysis authorization revoked')
+    worker.authorize_grant(job)
     with db.transaction(settings.db_path) as conn:
         current=conn.execute('SELECT sha256 FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
         if not current or current['sha256']!=item['sha256']: raise media.MediaError('conflict','File revision changed')

@@ -238,7 +238,7 @@ def install(app, settings):
             current = current_review(row, saved)
             if body.base_version != saved['version'] or body.document_revision != current['document_revision']:
                 raise security.error(412, 'lyrics_review_conflict', 'Текст, времена или проверка изменились. Обновите карточку')
-            busy = conn.execute("SELECT 1 FROM jobs j,json_each(j.payload,'$.items') i WHERE j.kind IN ('apply','rollback','publish') AND j.state IN ('queued','running','paused','interrupted') AND json_extract(i.value,'$.track_id')=? LIMIT 1", (track_id,)).fetchone()
+            busy = conn.execute("SELECT 1 FROM jobs j,json_each(j.payload,'$.items') i WHERE j.kind IN ('apply','rollback','publish') AND j.state IN ('queued','running','paused','waiting_authorization','interrupted') AND json_extract(i.value,'$.track_id')=? LIMIT 1", (track_id,)).fetchone()
             if busy:
                 raise security.error(409, 'track_mutation_pending', 'Дождитесь завершения операции с файлом')
             indexed = {line['line_id']: line for line in current['lines']}

@@ -69,6 +69,8 @@ def actor_snapshot(conn, active):
     epoch = int((conn.execute("SELECT value FROM settings WHERE key='auth_epoch'").fetchone() or {'value': '0'})['value'])
     result = {'auth_epoch': active.get('auth_epoch'), 'current_auth_epoch': epoch,
               'token_id': active.get('api_token_id'), 'write_authorized': active.get('auth_epoch') == epoch}
+    if active.get('auth_limited') or active.get('api_token_id') and 'auth_scopes' in active:
+        result['write_authorized']=bool(result['write_authorized'] and automation.has_scope(active.get('auth_scopes'),'files:write'))
     if active.get('api_token_id'):
         token = conn.execute('SELECT auth_epoch,revoked,expires,scopes FROM api_tokens WHERE id=?', (active['api_token_id'],)).fetchone()
         if token:
@@ -342,8 +344,11 @@ def assert_frozen(settings, row, item, job):
     if not frozen:
         raise media.MediaError('automatic_quality_freeze_missing', 'Отсутствует серверный snapshot автоматического принятия')
     active = {'auth_epoch': job['auth_epoch']}
-    token = json.loads(job['payload']).get('auth_token_id')
+    payload=json.loads(job['payload'])
+    token = payload.get('auth_token_id')
     if token: active['api_token_id'] = token
+    if 'auth_scopes' in payload:active['auth_scopes']=payload['auth_scopes']
+    if payload.get('auth_limited'):active['auth_limited']=True
     with db.connect(settings.db_path) as conn:
         fresh = conn.execute('SELECT * FROM tracks WHERE id=? AND is_current=1', (row['id'],)).fetchone()
         proposal = conn.execute('SELECT * FROM proposals WHERE id=? AND track_id=?', (item.get('proposal_id'), row['id'])).fetchone()

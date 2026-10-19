@@ -204,7 +204,7 @@ def test_worker_checks_live_and_accepted_grants_and_legacy_unsnapshotted_jobs(se
                 conn.execute('UPDATE api_tokens SET scopes=? WHERE id=?', (db.encode(['jobs:create', 'publish:write']), token['id']))
             with pytest.raises(media.MediaError) as error:
                 worker.authorize(row)
-            assert error.value.code == 'cancelled'
+            assert error.value.code == 'authorization_scope_denied'
             assert not automation.token_grant_allowed(cfg, token_id=token['id'], auth_epoch=row['auth_epoch'], kind='publish', granted_scopes=['jobs:create', 'files:write'])
             assert not automation.token_grant_allowed(cfg, token_id=token['id'], auth_epoch=row['auth_epoch'], kind='publish')
             legacy, _ = issue(client, owner, ['jobs:analysis'])
@@ -215,18 +215,18 @@ def test_worker_checks_live_and_accepted_grants_and_legacy_unsnapshotted_jobs(se
         assert media.sha256_file(cfg.work_root / 'a.mp3') == sha
 
 
-def test_owner_resume_reapproves_remaining_effects_without_token_grant(settings):
+def test_owner_resume_preserves_the_original_token_grant(settings):
     with TestClient(create_app(settings), base_url=settings.app_url) as client:
         owner = authenticated(client, settings)
         tid, _ = seed(settings)
-        _, auth = issue(client, owner, ['jobs:create'])
+        token, auth = issue(client, owner, ['jobs:create'])
         queued = enqueue(client, auth, 'audit', [tid]).json()
         paused = client.post('/api/jobs/' + queued['id'] + '/pause', headers=auth)
         assert paused.status_code == 200, paused.text
         resumed = client.post('/api/jobs/' + queued['id'] + '/resume', headers=owner)
         assert resumed.status_code == 200, resumed.text
         payload = json.loads(db.fetchone(settings.db_path, 'SELECT payload FROM jobs WHERE id=?', (queued['id'],))['payload'])
-        assert 'auth_token_id' not in payload and 'auth_scopes' not in payload
+        assert payload['auth_token_id']==token['id'] and payload['auth_scopes']==['jobs:create']
         assert resumed.json()['completed'] == 0 and resumed.json()['total'] == 1
 
 

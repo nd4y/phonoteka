@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { etaText, jobTone, mergeActivityEvents } from './jobs';
+import { etaText, isActiveJob, jobTone, mergeActivityEvents, needsJobAuthorization } from './jobs';
 import type { ActivityEvent, LiveJob } from './jobs';
 
 const job: LiveJob = { id: 'test', kind: 'recognize', state: 'running', stage: 'recognize', total: 10, completed: 2, failed: 0,
@@ -23,6 +23,18 @@ describe('job progress presentation', () => {
     expect(etaText({ ...job, eta_seconds: null, eta_reason: 'insufficient_samples' })).toBe('Собираем данные для ETA');
     expect(etaText({ ...job, eta_seconds: 125 })).toBe('Осталось около 3 мин');
     expect(etaText({ ...job, eta_seconds: Infinity })).toBe('Собираем данные для ETA');
+  });
+  it('keeps authorization waiting active and distinct from pause, provider wait and cancellation', () => {
+    const waiting = { ...job, state: 'waiting_authorization', stage: 'waiting_authorization', eta_seconds: 125, pause_requested: true };
+    expect(isActiveJob(waiting)).toBe(true);
+    expect(jobTone(waiting)).toBe('authorization');
+    expect(etaText(waiting)).toBe('ETA после подтверждения владельца');
+    expect(jobTone({ ...waiting, cancel_requested: true })).toBe('cancelled');
+    expect(etaText({ ...waiting, cancel_requested: true })).toBe('Завершаем текущие операции');
+    expect(jobTone({ ...waiting, state: 'cancelled' })).toBe('cancelled');
+    expect(needsJobAuthorization({ ...waiting, state: 'running' })).toBe(true);
+    expect(needsJobAuthorization({ ...waiting, state: 'completed' })).toBe(false);
+    expect(jobTone({ ...waiting, state: 'completed' })).toBe('success');
   });
   it('deduplicates replay after reconnect, orders events, and bounds memory to 200 lines', () => {
     const previous = Array.from({ length: 200 }, (_, index) => event(index + 1));

@@ -30,7 +30,7 @@ from . import webhooks,provider_attempts
 from .config import Settings
 from . import publication
 from . import retention, export_leases
-from . import album_gain_policy, api_facades, audit_status, recording_review, input_readiness
+from . import album_gain_policy, api_facades, audit_status, recording_review, input_readiness, automation
 
 
 class LoginInput(BaseModel):
@@ -147,8 +147,10 @@ def public_job(settings: Settings, row: dict, detail=False, activity=None):
     result = {key: row[key] for key in ("id", "kind", "state", "stage", "total", "completed", "failed", "cancel_requested", "created_at", "updated_at", "error")}
     result["progress"] = round(100 * (row["completed"] + row["failed"]) / total) if total else 0
     result["cancel_requested"] = bool(row["cancel_requested"])
-    result['retry_at']=json.loads(row['payload']).get('retry_at') if row['stage'] in {'waiting_provider','waiting_storage'} else None
-    result['pause_requested']=bool(json.loads(row['payload']).get('pause_requested'))
+    payload=json.loads(row['payload'])
+    result['retry_at']=payload.get('retry_at') if row['stage'] in {'waiting_provider','waiting_storage'} else None
+    result['pause_requested']=bool(payload.get('pause_requested'))
+    result['authorization']=automation.public_authorization(row,payload)
     result.update(activity if activity is not None else job_activity.summaries(settings, [row])[row['id']])
     if detail:
         items = db.fetchall(settings.db_path, "SELECT item_key,state,result FROM job_items WHERE job_id=? ORDER BY item_key LIMIT 10000", (row["id"],))
@@ -265,21 +267,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/auth/session")
     def auth_session(request: Request):
         active = security.session(request, settings)
-        return {"authenticated": bool(active), "csrf_token": active["csrf"] if active else None,
-                "username": settings.owner_username if active else None}
+        return security.public_session(settings, active)
+
+    @app.post('/api/auth/activity')
+    def auth_activity(request: Request, body: dict):
+        if body:
+            raise security.error(422, 'validation_error', 'User activity accepts an empty object')
+        return security.public_session(settings, security.record_activity(request, settings))
 
     @app.post("/api/auth/login")
     def auth_login(request: Request, response: Response, body: LoginInput):
         token, csrf = security.login(request, settings, body.username, body.password)
+        active = security.session_by_hash(settings, security.token_hash(token))
+        if not active:
+            raise security.error(401, 'authentication_required', 'Session changed; sign in again')
         response.set_cookie(security.cookie_name(settings), token, httponly=True, secure=settings.secure_cookie,
-                            samesite="strict", path="/", max_age=settings.session_hours * 3600)
-        return {"authenticated": True, "csrf_token": csrf, "username": settings.owner_username}
+                            samesite="strict", path="/", max_age=settings.session_absolute_seconds)
+        return security.public_session(settings, active)
 
     @app.post("/api/auth/logout")
     def auth_logout(request: Request, response: Response):
         active = security.require_session(request, settings, True)
         with db.transaction(settings.db_path) as conn:
-            conn.execute("DELETE FROM sessions WHERE token_hash=?", (active["token_hash"],))
+            security.revoke_sessions(conn, active['token_hash'])
         response.delete_cookie(security.cookie_name(settings), path="/", secure=settings.secure_cookie, httponly=True, samesite="strict")
         return {"authenticated": False, "csrf_token": None, "username": None}
 
@@ -288,7 +298,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         security.require_session(request, settings, True)
         with db.transaction(settings.db_path) as conn:
             count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-            conn.execute("DELETE FROM sessions")
+            security.revoke_sessions(conn)
             db.event(conn, "owner_sessions_revoked", payload={"sessions": count})
         response.delete_cookie(security.cookie_name(settings), path="/", secure=settings.secure_cookie, httponly=True, samesite="strict")
         return {"authenticated": False, "csrf_token": None, "username": None}
@@ -311,7 +321,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
           COALESCE(SUM(fmt<>'cue' AND COALESCE(json_extract(metadata,'$.publication.sha256')=sha256,0)),0) AS published
           FROM catalog""")
         formats = {row['format']:row['n'] for row in db.fetchall(settings.db_path,"SELECT COALESCE(json_extract(metadata,'$.format'),'unknown') AS format,COUNT(*) AS n FROM tracks WHERE is_current=1 GROUP BY format")}
-        active = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs WHERE state IN ('queued','running','paused','waiting','waiting_provider','deferred','interrupted')")["n"]
+        active = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs WHERE state IN ('queued','running','paused','waiting_authorization','waiting','waiting_provider','deferred','interrupted')")["n"]
         heartbeat = json.loads(db.setting(settings.db_path, "worker_heartbeat", "{}"))
         recovery=db.setting(settings.db_path,'recovery_required','false')=='true';writable=settings.writable and not recovery
         return {**count, "formats": formats, "active_jobs": active, "read_only": not writable,'recovery_required':recovery,
@@ -741,8 +751,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             automation.check_job(active,row['kind'])
             if row['state']!='queued' or row['stage']!='waiting_storage' or row['cancel_requested']:
                 raise security.error(409,'job_not_waiting_storage','Задача не ожидает свободного места')
-            if row['auth_epoch']!=int(db.setting(settings.db_path,'auth_epoch','0')):
-                raise security.error(409,'authorization_revoked','Авторизация исходной задачи отозвана; создайте новую задачу')
+            control=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(job_id,)).fetchone()
+            if automation.grant_reason(conn,control):
+                raise security.error(409,'authorization_required','Сначала владелец должен подтвердить новые права задания')
             payload=json.loads(row['payload']);payload['retry_at']=0
             conn.execute("UPDATE jobs SET stage='pending',payload=?,updated_at=? WHERE id=?",(db.encode(payload),db.utcnow(),job_id))
             db.event(conn,'job_resume',{'job_id':job_id,'reason':'storage_recheck'})
@@ -753,6 +764,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def pause_resume(request:Request,job_id:str):
         action=request.url.path.rsplit('/',1)[-1]
         active=security.require_session(request,settings,True)
+        denied=False
         with db.transaction(settings.db_path) as conn:
             row=conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
             if not row:raise security.error(404,'job_not_found','Задание не найдено')
@@ -760,20 +772,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if row['kind'] in {'scan','export_ready','replaygain_album','release_audit','publish_sidecars'}:raise security.error(409,'pause_unsupported','Этот этап выполняется одной согласованной операцией')
             payload=json.loads(row['payload'])
             if action=='pause':
-                if row['state'] not in {'queued','running','paused'}:raise security.error(409,'job_not_active','Задание уже завершено')
+                if row['state'] not in {'queued','running','paused','waiting_authorization'}:raise security.error(409,'job_not_active','Задание уже завершено')
                 payload['pause_requested']=True
-                state='paused' if row['state'] in {'queued','paused'} else 'running'
+                state='paused' if row['state'] in {'queued','paused'} else row['state']
                 stage='paused' if state=='paused' else row['stage']
             else:
+                if row['state']=='waiting_authorization':raise security.error(409,'authorization_required','Ожидается явное подтверждение прав владельцем')
                 if row['state']!='paused':raise security.error(409,'job_not_paused','Задание не приостановлено')
                 if db.setting(settings.db_path,'recovery_required','false')=='true':raise security.error(409,'recovery_required','Сначала завершите восстановление')
-                payload['pause_requested']=False;payload.pop('auth_token_id',None);payload.pop('auth_scopes',None)
-                if active.get('api_token_id'):
-                    payload['auth_token_id']=active['api_token_id']
-                    payload['auth_scopes']=sorted(active['scopes'])
+                control=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(job_id,)).fetchone()
+                reason=automation.grant_reason(conn,control)
+                if reason:
+                    automation.wait_for_authorization(conn,job_id,reason)
+                    denied=True
+                payload['pause_requested']=False
                 state='queued';stage=('waiting_storage' if payload.get('wait_reason')=='storage' else 'waiting_provider') if payload.get('retry_at',0)>time.time() else 'pending'
-            conn.execute('UPDATE jobs SET payload=?,state=?,stage=?,auth_epoch=?,updated_at=? WHERE id=?',(db.encode(payload),state,stage,active['auth_epoch'],db.utcnow(),job_id))
-            db.event(conn,'job_'+action,{'job_id':job_id})
+            if not denied:
+                # Resume only continues the already accepted grant. It cannot
+                # replace a token, change the epoch or broaden past powers.
+                conn.execute('UPDATE jobs SET payload=?,state=?,stage=?,updated_at=? WHERE id=?',(db.encode(payload),state,stage,db.utcnow(),job_id))
+                db.event(conn,'job_'+action,{'job_id':job_id})
+        if denied:raise security.error(409,'authorization_required','Ожидается явное подтверждение прав владельцем')
+        return public_job(settings,db.fetchone(settings.db_path,'SELECT * FROM jobs WHERE id=?',(job_id,)))
+
+    @app.post('/api/jobs/{job_id}/reauthorize')
+    def reauthorize(request:Request,job_id:str,body:automation.ReauthorizeInput):
+        active=security.require_session(request,settings,True,owner_only=True)
+        with db.transaction(settings.db_path) as conn:
+            row=conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+            if not row:raise security.error(404,'job_not_found','Задание не найдено')
+            if row['state']!='waiting_authorization' or row['cancel_requested']:
+                raise security.error(409,'job_not_waiting_authorization','Задание не ожидает новых прав или еще завершает текущую операцию')
+            if db.setting(settings.db_path,'recovery_required','false')=='true':raise security.error(409,'recovery_required','Сначала завершите восстановление')
+            epoch=int((conn.execute("SELECT value FROM settings WHERE key='auth_epoch'").fetchone() or {'value':'0'})['value'])
+            if active['auth_epoch']!=epoch:raise security.error(409,'authorization_epoch_changed','Авторизация владельца изменилась')
+            required=automation.required_scopes(row['kind'])
+            if not required or len(body.scopes)!=len(set(body.scopes)) or set(body.scopes)!=set(required):
+                raise security.error(422,'invalid_scopes','Явно выберите только необходимые права этого задания')
+            payload=json.loads(row['payload'])
+            if body.authorization_version!=payload.get('authorization_version',0):
+                raise security.error(409,'authorization_version_conflict','Ожидание прав изменилось; обновите задание')
+            previous={'token_id':payload.pop('auth_token_id',None),'auth_epoch':row['auth_epoch']}
+            payload.update(auth_scopes=sorted(body.scopes),auth_limited=True,authorization_version=body.authorization_version+1)
+            payload.pop('authorization_wait',None)
+            state='paused' if payload.get('pause_requested') else 'queued'
+            stage='paused' if state=='paused' else (
+                ('waiting_storage' if payload.get('wait_reason')=='storage' else 'waiting_provider')
+                if payload.get('retry_at',0)>time.time() else 'pending')
+            conn.execute('UPDATE jobs SET payload=?,state=?,stage=?,auth_epoch=?,error=NULL,updated_at=? WHERE id=?',
+                         (db.encode(payload),state,stage,epoch,db.utcnow(),job_id))
+            db.event(conn,'job_reauthorized',{'job_id':job_id,'state':state,'scopes':sorted(body.scopes),
+                     'authorization_version':payload['authorization_version'],'previous_grant':previous,'actor':'owner'})
         return public_job(settings,db.fetchone(settings.db_path,'SELECT * FROM jobs WHERE id=?',(job_id,)))
 
     @app.post("/api/jobs/{job_id}/cancel")
@@ -784,9 +833,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not row:
                 raise security.error(404, "job_not_found", "Задание не найдено")
             automation.check_job(active,row['kind'])
-            if row["state"] in {"queued", "waiting", "paused"}:
+            if row["state"] in {"queued", "waiting", "paused", "waiting_authorization"}:
                 state = 'cancelled_partial' if row['completed'] or row['failed'] else 'cancelled'
-                conn.execute("UPDATE jobs SET state=?,stage=?,cancel_requested=1,updated_at=? WHERE id=?", (state,state,db.utcnow(),job_id))
+                conn.execute("UPDATE jobs SET state=?,stage=?,cancel_requested=1,error='cancelled',updated_at=? WHERE id=?", (state,state,db.utcnow(),job_id))
             elif row["state"] == "running":
                 conn.execute("UPDATE jobs SET cancel_requested=1,updated_at=? WHERE id=?", (db.utcnow(),job_id))
             db.event(conn, "job_cancel_requested", {"job_id": job_id})

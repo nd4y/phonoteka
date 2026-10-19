@@ -1,7 +1,8 @@
 """Bounded asynchronous public metadata providers. Results are proposals, not truth."""
 import asyncio
 import base64
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from difflib import SequenceMatcher
 import hashlib
 import json
@@ -20,6 +21,15 @@ USER_AGENT = 'Phonoteka/0.2 (https://github.com/nd4y/phonoteka; personal music c
 HOSTS = {'www.youtube.com','beta.musicbrainz.org','musicbrainz.org','lrclib.net','coverartarchive.org','archive.org','api.acoustid.org','www.theaudiodb.com','r2.theaudiodb.com','api.discogs.com'}
 INTERVAL = {'youtube':3.0,'musicbrainz':1.1,'lrclib':.5,'coverartarchive':1.1,'acoustid':.4,'shazam':10.0,'theaudiodb':2.1,'discogs':1.1}
 GET_DEADLINE_SECONDS = 90
+REQUEST_AUTHORIZATION=ContextVar('provider_request_authorization',default=None)
+
+
+@contextmanager
+def authorization(authorize):
+    """Keep a job's grant attached to nested adapters and async retries."""
+    token=REQUEST_AUTHORIZATION.set(authorize)
+    try:yield
+    finally:REQUEST_AUTHORIZATION.reset(token)
 
 
 def normalized(value):
@@ -86,6 +96,8 @@ class Providers:
         async with lock:
             delay=self.next.get(provider,0)-time.monotonic()
             if delay>0: await asyncio.sleep(delay)
+            authorize=REQUEST_AUTHORIZATION.get()
+            if authorize:await asyncio.to_thread(authorize)
             interval=INTERVAL.get(provider,1)
             if provider=='shazam':interval=max(interval,float(await asyncio.to_thread(db.setting,self.settings.db_path,'provider_interval:shazam','10')))
             self.intervals[provider]=interval
@@ -114,11 +126,14 @@ class Providers:
             try:
                 data_type='metadata' if operation=='fingerprint' else operation
                 await asyncio.to_thread(provider_policy.check,self.settings,provider,data_type,'fetch')
+                authorize=authorize or REQUEST_AUTHORIZATION.get()
                 if authorize:await asyncio.to_thread(authorize)
                 await asyncio.to_thread(provider_attempts.mark_sent,self.settings,attempt['id']);sent=True
                 async with self.client.stream(method,url,**kwargs) as response:yield response
             except (ProviderError,ValueError,media.MediaError) as exc:
                 code='invalid_response' if isinstance(exc,ValueError) else 'response_too_large' if getattr(exc,'code',None)=='response_too_large' else 'rate_limited' if getattr(exc,'code',None)=='rate_limited' else 'provider_rejected' if getattr(exc,'code',None)=='provider_unauthorized' else 'provider_error'
+                if not sent and isinstance(exc,media.MediaError) and (exc.code.startswith('authorization_') or exc.code=='cancelled'):
+                    code='not_sent'
                 await asyncio.shield(asyncio.to_thread(provider_attempts.finish,self.settings,attempt['id'],'failed',code,response.status_code if response else None))
                 raise
             except BaseException as exc:

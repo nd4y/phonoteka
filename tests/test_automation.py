@@ -28,7 +28,8 @@ def test_scopes_token_hash_only_and_revocation(settings):
             assert client.post('/api/tokens',json={'name':'new','scopes':['jobs:write']},headers=auth).status_code==403
             assert owner.delete('/api/tokens/'+token['id'],headers=headers).status_code==200
             assert client.get('/api/tracks',headers=auth).status_code==401
-            assert owner.get('/api/jobs/'+jid).json()['state']=='cancelled'
+            state=owner.get('/api/jobs/'+jid).json()
+            assert state['state']=='waiting_authorization' and not state['cancel_requested']
 
 
 def test_expiry_stops_pending_worker_effects_and_cross_origin(settings):
@@ -47,7 +48,7 @@ def test_expiry_stops_pending_worker_effects_and_cross_origin(settings):
         assert owner.get('/api/tracks',headers=auth).status_code==401
 
 
-def test_revocation_releases_queued_and_paused_notification_reservations_atomically(client,settings):
+def test_revocation_retains_nonterminal_notification_reservations_atomically(client,settings):
     headers=authenticated(client,settings);tid,_=seed(settings)
     # The app was started with notifications disabled, so its sender cannot
     # transmit. Only durable enqueue policy is enabled for this synthetic test.
@@ -65,13 +66,17 @@ def test_revocation_releases_queued_and_paused_notification_reservations_atomica
         conn.execute("UPDATE jobs SET state='running',stage='audit' WHERE id=?",(ids[2],))
     assert webhooks.status(cfg)['reserved_jobs']==3
     assert client.delete('/api/tokens/'+token['id'],headers=headers).status_code==200
-    assert client.get('/api/jobs/'+ids[0]).json()['state']=='cancelled'
-    assert client.get('/api/jobs/'+ids[1]).json()['state']=='cancelled_partial'
-    assert client.get('/api/jobs/'+ids[2]).json()['cancel_requested']
+    assert client.get('/api/jobs/'+ids[0]).json()['state']=='waiting_authorization'
+    assert client.get('/api/jobs/'+ids[1]).json()['state']=='waiting_authorization'
+    running=client.get('/api/jobs/'+ids[2]).json()
+    assert running['state']=='running' and running['stage']=='waiting_authorization' and not running['cancel_requested']
     status=webhooks.status(cfg)
-    assert status['reserved_jobs']==1 and status['counts']['pending']==2
+    assert status['reserved_jobs']==3 and status['counts']['pending']==0
     with db.connect(settings.db_path) as conn:
         documents=[json.loads(row['payload']) for row in conn.execute('SELECT payload FROM webhook_outbox')]
-    assert {item['job']['state'] for item in documents}=={'cancelled','cancelled_partial'}
-    assert all(item['job']['code']=='authorization_revoked' for item in documents)
+    assert not documents
+    # Only a subsequent explicit user cancellation is terminal and consumes
+    # the reservation, with cancellation separate from grant withdrawal.
+    assert client.post('/api/jobs/'+ids[0]+'/cancel',headers=headers).status_code==200
+    assert webhooks.status(cfg)['reserved_jobs']==2
     assert token['token'] not in json.dumps(documents)

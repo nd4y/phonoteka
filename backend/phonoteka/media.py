@@ -1095,6 +1095,41 @@ def publish_bytes(data: bytes, destination: str | Path, expected_sha256: str | N
                             roots=roots, authorize=authorize, action='publish_sidecar')
 
 
+def _authorization_intent_retired(document):
+    return (document.get('state')=='aborted' and document.get('reason')=='authorization_wait'
+            and document.get('authorization_before_verified') is True
+            and isinstance(document.get('authorization_reason'),str)
+            and document['authorization_reason'] in {'authorization_revoked','authorization_expired',
+                'authorization_epoch_changed','authorization_scope_denied','authorization_grant_invalid'})
+
+
+def retire_authorization_intent(journal_path: str | Path, roots: Mapping[str, Any], reason: str) -> bool:
+    """Retire only a prepared intent whose target still has its exact before.
+
+    This never changes audio or resumes a staged write. Replacing/uncertain
+    journals retain the ordinary interrupted recovery path. The durable marker
+    prevents a later new authorized attempt from replaying this old intent.
+    """
+    if reason not in {'authorization_revoked','authorization_expired','authorization_epoch_changed',
+                      'authorization_scope_denied','authorization_grant_invalid'}:return False
+    journal_path=_absolute(journal_path)
+    with _file(journal_path) as stream:
+        if os.fstat(stream.fileno()).st_size>65536:return False
+        document=json.load(stream)
+    if document.get('schema')!=1 or document.get('operation') not in {'replace','create'}:return False
+    if _authorization_intent_retired(document):return True
+    if document.get('state')!='prepared':return False
+    target=_validate(document['target'],roots,write=True,missing=True)
+    actual=sha256_file(target) if target.exists() else None
+    if document['operation']=='replace':
+        if actual is None or actual!=document.get('before_sha256'):return False
+    elif actual is not None or document.get('before_sha256') is not None:return False
+    document.update(state='aborted',reason='authorization_wait',authorization_reason=reason,
+                    authorization_before_verified=True)
+    _journal(journal_path,document)
+    return True
+
+
 def recover(journal_path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
     """Reconcile only. Never resume a prepared write without a new authorization."""
     _mutation_supported()
@@ -1105,6 +1140,7 @@ def recover(journal_path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any
         document = json.load(stream)
     if document.get("schema") != 1 or document.get("operation") not in {"replace", "create"}:
         raise MediaError("invalid_journal", "Unknown journal schema")
+    if _authorization_intent_retired(document):return document
     target = _validate(document["target"], roots, write=True, missing=True)
     actual = sha256_file(target) if target.exists() else None
     if actual == document["after_sha256"]:

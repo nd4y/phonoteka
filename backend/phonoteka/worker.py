@@ -139,6 +139,7 @@ class Worker:
         self.normal_task = None
         self.metrics = Metrics('worker')
         self.item_started = {}
+        self.authorization_cursor = ''
         # Keep a group's file rename and subsequent catalog/history commit in
         # one lane. Other workers cannot observe our own half-persisted SHA.
         # Storage/scheduler guards already restrict this domain to one Worker.
@@ -167,49 +168,85 @@ class Worker:
 
     def claim_job(self):
         with db.transaction(self.settings.db_path) as conn:
+            # Rotate a bounded projection through queued/paused jobs, including
+            # provider waits not yet due. Expired grants cannot stay silently
+            # paused or cause another scheduled job to overtake this job.
+            rows=conn.execute(f"SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE state IN ('queued','paused') AND id>? ORDER BY id LIMIT 64",(self.authorization_cursor,)).fetchall()
+            if not rows:
+                self.authorization_cursor=''
+                rows=conn.execute(f"SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE state IN ('queued','paused') ORDER BY id LIMIT 64").fetchall()
+            for control in rows:
+                self.authorization_cursor=control['id']
+                reason=automation.grant_reason(conn,control)
+                if reason:automation.wait_for_authorization(conn,control['id'],reason)
             busy = bool(self.inference_task and not self.inference_task.done())
             ordinary_busy = bool(self.normal_task and not self.normal_task.done())
-            row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND COALESCE(json_extract(payload,'$.retry_at'),0)<=? AND (?=0 OR kind NOT IN ('transcribe','align')) AND (?=0 OR kind IN ('transcribe','align')) ORDER BY created_at,id LIMIT 1",(time.time(),int(busy),int(ordinary_busy))).fetchone()
-            if not row:
-                return None
-            conn.execute("UPDATE jobs SET state='running',stage=?,heartbeat=?,updated_at=? WHERE id=?", (row["kind"],time.time(),db.utcnow(),row["id"]))
-            db.event(conn, "job_started", {"job_id": row["id"]})
-            return dict(row)
+            for _ in range(64):
+                row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND COALESCE(json_extract(payload,'$.retry_at'),0)<=? AND (?=0 OR kind NOT IN ('transcribe','align')) AND (?=0 OR kind IN ('transcribe','align')) ORDER BY created_at,id LIMIT 1",(time.time(),int(busy),int(ordinary_busy))).fetchone()
+                if not row:return None
+                control=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(row['id'],)).fetchone()
+                reason=automation.grant_reason(conn,control)
+                if reason:
+                    automation.wait_for_authorization(conn,row['id'],reason)
+                    continue
+                conn.execute("UPDATE jobs SET state='running',stage=?,heartbeat=?,updated_at=? WHERE id=?", (row["kind"],time.time(),db.utcnow(),row["id"]))
+                db.event(conn, "job_started", {"job_id": row["id"]})
+                return dict(row)
+            return None
 
     def job_control(self, job_id):
         # Do not transfer/decode the full immutable 10,000-item payload for
         # every admission check. Only these mutable controls leave SQLite.
-        return db.fetchone(self.settings.db_path, """SELECT cancel_requested,auth_epoch,
-            json_extract(payload,'$.pause_requested') AS pause_requested,
-            json_extract(payload,'$.auth_token_id') AS auth_token_id,kind,
-            json_extract(payload,'$.auth_scopes') AS auth_scopes
-            FROM jobs WHERE id=?""", (job_id,))
+        return db.fetchone(self.settings.db_path, f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?', (job_id,))
+
+    def authorization_reason(self, job_id):
+        with db.connect(self.settings.db_path) as conn:
+            row=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(job_id,)).fetchone()
+            return automation.grant_reason(conn,row) if row else 'authorization_grant_invalid'
+
+    def user_cancelled(self, job_id):
+        row=self.job_control(job_id)
+        return self.stopping or not row or bool(row['cancel_requested'])
 
     def control_cancelled(self, row):
         if self.stopping or not row or bool(row['cancel_requested']):return True
-        epoch=int(db.setting(self.settings.db_path,'auth_epoch','0'))
-        if row['auth_epoch'] != epoch:return True
-        token_id=row['auth_token_id']
-        if token_id:
-            return not automation.token_grant_allowed(self.settings, token_id=token_id,
-                auth_epoch=row['auth_epoch'], kind=row['kind'], granted_scopes=row['auth_scopes'])
-        return False
+        with db.connect(self.settings.db_path) as conn:
+            return bool(automation.grant_reason(conn,row))
 
     def cancelled(self, job_id):
         return self.stopping or self.control_cancelled(self.job_control(job_id))
+
+    def authorize_grant(self, job):
+        if self.user_cancelled(job['id']):
+            raise media.MediaError('cancelled','Job was cancelled before its next effect')
+        reason=self.authorization_reason(job['id'])
+        if reason:raise media.MediaError(reason,'Owner approval is required before the next effect')
 
     def authorize(self, job):
         if db.setting(self.settings.db_path,'recovery_required','false')=='true':
             raise media.MediaError('recovery_required','Сначала завершите сверку восстановленного состояния')
         if not self.settings.writable:
             raise media.MediaError("read_only", "Music writes are disabled")
-        if int(db.setting(self.settings.db_path, "auth_epoch", "0")) != job["auth_epoch"]:
-            raise media.MediaError("authorization_revoked", "Owner authorization has been revoked")
-        if self.cancelled(job["id"]):
-            raise media.MediaError("cancelled", "Job was cancelled before its next effect")
+        self.authorize_grant(job)
 
     def item_result(self, job_id, key, state, result):
         with db.transaction(self.settings.db_path) as conn:
+            previous=conn.execute('SELECT state,result FROM job_items WHERE job_id=? AND item_key=?',(job_id,key)).fetchone()
+            if previous:
+                saved=json.loads(previous['result'])
+                # A grant renewal joins the same submitted inference request;
+                # neither a running checkpoint nor a denial loses its handle.
+                result={**{name:saved[name] for name in ('inference_job_id','model','model_revision','profile_revision') if name in saved},**result}
+            control=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(job_id,)).fetchone()
+            reason=automation.grant_reason(conn,control) if control and not control['cancel_requested'] else None
+            # An unbegun effect denied by its grant remains pending. A real
+            # media/provider failure and an interrupted journal remain facts.
+            if reason and (result.get('code') in automation.AUTHORIZATION_REASONS|{'cancelled','media_cancelled'} or state=='cancelled'):
+                if state!='interrupted' and not result.get('recovery_required'):
+                    if previous and previous['state'] in {'succeeded','failed','conflict','needs_review'}:return
+                    result={**(json.loads(previous['result']) if previous else {}),**result,'code':reason}
+                    state='deferred'
+                    automation.wait_for_authorization(conn,job_id,reason)
             conn.execute("INSERT INTO job_items VALUES(?,?,?,?) ON CONFLICT(job_id,item_key) DO UPDATE SET state=excluded.state,result=excluded.result", (job_id,key,state,db.encode(result)))
             completed = conn.execute("SELECT COUNT(*) FROM job_items WHERE job_id=? AND state='succeeded'", (job_id,)).fetchone()[0]
             failed = conn.execute("SELECT COUNT(*) FROM job_items WHERE job_id=? AND state IN ('failed','conflict','needs_review')", (job_id,)).fetchone()[0]
@@ -236,6 +273,18 @@ class Worker:
 
     def finish(self, job_id, state, error=None):
         with db.transaction(self.settings.db_path) as conn:
+            row=conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+            control=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(job_id,)).fetchone()
+            reason=automation.grant_reason(conn,control) if control and not control['cancel_requested'] else None
+            if reason and state!='interrupted':
+                if not row['total'] or row['completed']+row['failed']<row['total']:
+                    automation.wait_for_authorization(conn,job_id,reason,drained=True)
+                    log('job_waiting_authorization',job_id=job_id,state='waiting_authorization',code=reason)
+                    return
+                # All actual outcomes were already committed before the grant
+                # changed. Do not label those effects as cancelled.
+                if state in {'cancelled','cancelled_partial'}:
+                    state='completed_with_errors' if row['failed'] else 'succeeded'
             conn.execute("UPDATE jobs SET state=?,stage=?,error=?,updated_at=? WHERE id=?", (state,state,error,db.utcnow(),job_id))
             db.event(conn, "job_finished", {"job_id": job_id, "state": state})
         log('job_finished',logging.ERROR if state in {'failed','interrupted'} else logging.INFO,job_id=job_id,state=state)
@@ -391,6 +440,7 @@ class Worker:
         if not previous:
             db.set_setting(self.settings.db_path, "work_root_identity", db.encode(identity))
         paths, errors = await self.io(enumerate_audio, self.settings.work_root)
+        done={r['item_key'] for r in db.fetchall(self.settings.db_path,"SELECT item_key FROM job_items WHERE job_id=? AND state IN ('succeeded','failed','conflict','needs_review')",(job['id'],))}
         with db.transaction(self.settings.db_path) as conn:
             conn.execute("UPDATE jobs SET total=? WHERE id=?", (len(paths),job["id"]))
         halted=False
@@ -402,11 +452,12 @@ class Worker:
             if stop_admission():
                 return
             try:
+                self.authorize_grant(job)
                 result = await self.io(self.scan_one, relative, job["id"])
                 self.item_result(job["id"], relative, "failed" if result.get("input_error") else "succeeded", result)
             except Exception as exc:
                 self.item_result(job["id"], relative, "failed", self.failure(exc))
-        await self.bounded_items(paths, one, should_stop=stop_admission)
+        await self.bounded_items((path for path in paths if path not in done), one, should_stop=stop_admission)
         stats = db.fetchone(self.settings.db_path, "SELECT * FROM jobs WHERE id=?", (job["id"],))
         final_identity = await self.io(root_identity, self.settings.work_root)
         await self.io(self.confirm_scan_inputs,job['id'],not errors and not self.cancelled(job['id']) and final_identity == identity)
@@ -855,6 +906,11 @@ class Worker:
         return None
 
     async def process(self, job):
+        from .providers import authorization
+        with authorization(lambda:self.authorize_grant(job)):
+            return await self._process(job)
+
+    async def _process(self, job):
         self.state = job["kind"]
         if job["kind"] == "scan":
             return await self.scan(job)
@@ -956,6 +1012,17 @@ class Worker:
                 result = self.failure(exc)
                 journals = self.settings.state_dir / "backups" / key / job["id"]
                 has_intent = job["kind"] in {"apply", "rollback", "publish", "rollback_ready"} and journals.exists() and any(journals.glob("*.json"))
+                reason=self.authorization_reason(job['id']) if not self.user_cancelled(job['id']) else None
+                if has_intent and reason and result['code'] in automation.AUTHORIZATION_REASONS:
+                    try:
+                        # Only a proven unbegun prepared write can wait for a
+                        # fresh grant. An uncertain rename/fsync remains recovery.
+                        retired=[await self.io(media.retire_authorization_intent,path,self.settings.roots,reason)
+                                 for path in journals.glob('*.json')]
+                        has_intent=not retired or not all(retired)
+                    except Exception:
+                        LOG.exception('Could not prove an unbegun authorization-denied intent',extra={'event':'authorization_intent_reconciliation_failed'})
+                        has_intent=True
                 if result['code']=='insufficient_space' and not has_intent:
                     # Only a failed reservation before any journal/effect may
                     # resume automatically. ENOSPC after intent stays recovery.

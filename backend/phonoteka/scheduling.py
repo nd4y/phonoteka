@@ -33,9 +33,9 @@ def install(app,settings):
         with db.transaction(settings.db_path) as conn:
             conn.execute("INSERT INTO settings VALUES('schedule',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(db.encode(state),))
             if not body.enabled:
-                jobs=conn.execute("SELECT id,state,completed FROM jobs WHERE json_extract(payload,'$.trigger')='schedule' AND state IN ('queued','running','paused')").fetchall()
+                jobs=conn.execute("SELECT id,state,completed FROM jobs WHERE json_extract(payload,'$.trigger')='schedule' AND state IN ('queued','running','paused','waiting_authorization')").fetchall()
                 for job in jobs:
-                    terminal=job['state'] in {'queued','paused'}
+                    terminal=job['state'] in {'queued','paused','waiting_authorization'}
                     outcome=('cancelled_partial' if job['completed'] else 'cancelled') if terminal else job['state']
                     conn.execute('UPDATE jobs SET cancel_requested=1,state=?,stage=CASE WHEN ? THEN ? ELSE stage END,error=CASE WHEN ? THEN ? ELSE error END,updated_at=? WHERE id=?',
                                  (outcome,terminal,outcome,terminal,'schedule_disabled',db.utcnow(),job['id']))
@@ -55,7 +55,7 @@ def tick(settings,now=None):
         if state.get('auth_epoch')!=epoch:
             state.update(enabled=False,remaining=[],disabled_reason='authorization_changed')
             conn.execute("UPDATE settings SET value=? WHERE key='schedule'",(db.encode(state),));return
-        if conn.execute("SELECT 1 FROM jobs WHERE state IN ('queued','running') LIMIT 1").fetchone():return
+        if conn.execute("SELECT 1 FROM jobs WHERE state IN ('queued','running','paused','waiting_authorization') LIMIT 1").fetchone():return
         if not state.get('remaining'):
             if state.get('next_run',now)>now:return
             state['remaining']=list(state['steps']);state['last_run']=now

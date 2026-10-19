@@ -365,7 +365,7 @@ def cleanup_cache(settings):
                     if 'lrc' not in reference:item.pop('reference_text',None);omitted=True
             if original!=cleaned:
                 conn.execute('UPDATE jobs SET payload=? WHERE id=?',(db.encode(cleaned),row['id']))
-                if omitted and row['state'] in {'queued','paused'}:
+                if omitted and row['state'] in {'queued','paused','waiting_authorization'}:
                     conn.execute("UPDATE jobs SET state=?,stage='cancelled',cancel_requested=1,error='provider_policy_expired',updated_at=? WHERE id=?",('cancelled_partial' if row['completed'] else 'cancelled',db.utcnow(),row['id']))
                     db.event(conn,'job_cancel_requested',{'job_id':row['id'],'code':'provider_policy_expired'})
         _clean_release_reviews(conn)

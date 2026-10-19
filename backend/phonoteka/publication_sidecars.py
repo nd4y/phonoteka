@@ -225,7 +225,7 @@ def validate_enqueue(conn, plan_id, ids, job_id):
             raise media.MediaError('conflict', 'Рабочая ревизия плана sidecar устарела')
     if plan.get('job_id'):
         previous = conn.execute('SELECT state FROM jobs WHERE id=?', (plan['job_id'],)).fetchone()
-        if previous and previous['state'] in {'queued', 'running', 'paused', 'waiting'}:
+        if previous and previous['state'] in {'queued', 'running', 'paused', 'waiting', 'waiting_authorization'}:
             raise media.MediaError('sidecar_plan_busy', 'План уже выполняется или ожидает сверки worker')
     plan['job_id'] = job_id
     put(conn, 'sidecar_plan:' + plan_id, plan)

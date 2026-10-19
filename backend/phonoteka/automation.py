@@ -20,6 +20,17 @@ ANALYSIS_JOBS={'scan','audit','analyze','recognize','transcribe','align','replay
 # permitted export_ready but no other publication or delivery operation.
 LEGACY_WRITE_JOBS=FILE_JOBS|{'publish','rollback_ready','publish_sidecars'}
 LEGACY_ANALYSIS_JOBS=ANALYSIS_JOBS|{'export_ready'}
+OPEN_STATES={'queued','running','paused','waiting_authorization'}
+AUTHORIZATION_REASONS={'authorization_revoked','authorization_expired','authorization_epoch_changed',
+                       'authorization_scope_denied','authorization_grant_invalid'}
+# A small projection is used on the worker's hot admission path, rather than
+# decoding the immutable (possibly 10,000-item) payload for every check.
+CONTROL_COLUMNS="""id,kind,state,stage,cancel_requested,auth_epoch,
+    json_extract(payload,'$.pause_requested') AS pause_requested,
+    json_extract(payload,'$.auth_token_id') AS auth_token_id,
+    json_extract(payload,'$.auth_scopes') AS auth_scopes,
+    json_extract(payload,'$.auth_limited') AS auth_limited,
+    json_extract(payload,'$.authorization_wait.reason') AS authorization_reason"""
 
 
 class TokenInput(BaseModel):
@@ -27,6 +38,12 @@ class TokenInput(BaseModel):
     name:str=Field(min_length=1,max_length=80)
     scopes:list[str]=Field(min_length=1,max_length=7)
     days:int=Field(default=30,ge=1,le=365)
+
+
+class ReauthorizeInput(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    scopes:list[str]=Field(min_length=1,max_length=2)
+    authorization_version:int=Field(ge=0,strict=True)
 
 
 def scope_set(value):
@@ -73,6 +90,67 @@ def token_grant_allowed(settings,*,token_id,auth_epoch,kind,granted_scopes=None)
     current=scope_set(token['scopes'])
     accepted=scope_set(granted_scopes) if granted_scopes is not None else current&LEGACY_SCOPES
     return job_scope_allowed(current,kind) and job_scope_allowed(accepted,kind)
+
+
+def required_scopes(kind):
+    if kind in FILE_JOBS:return ['files:write','jobs:create']
+    if kind in PUBLICATION_JOBS:return ['jobs:create','publish:write']
+    if kind in ANALYSIS_JOBS:return ['jobs:create']
+    return []
+
+
+def grant_reason(conn,row):
+    """The accepted grant and its live authority must both remain valid.
+
+    A recorded wait is sticky: restoring/expanding a token never resumes a
+    previously stopped job. Only the interactive owner's explicit new grant
+    removes that marker. Historical interactive-owner jobs retain their
+    original full authority, bounded by the authentication epoch.
+    """
+    if row['authorization_reason']:
+        return row['authorization_reason'] if row['authorization_reason'] in AUTHORIZATION_REASONS else 'authorization_grant_invalid'
+    epoch=int((conn.execute("SELECT value FROM settings WHERE key='auth_epoch'").fetchone() or {'value':'0'})['value'])
+    if row['auth_epoch']!=epoch:return 'authorization_epoch_changed'
+    accepted=scope_set(row['auth_scopes'])
+    if row['auth_limited'] and not job_scope_allowed(accepted,row['kind']):return 'authorization_scope_denied'
+    if not row['auth_token_id']:return None
+    token=conn.execute('SELECT scopes,revoked,expires,auth_epoch FROM api_tokens WHERE id=?',(row['auth_token_id'],)).fetchone()
+    if not token or token['revoked']:return 'authorization_revoked'
+    if token['auth_epoch']!=epoch:return 'authorization_epoch_changed'
+    if token['expires']<=time.time():return 'authorization_expired'
+    current=scope_set(token['scopes'])
+    accepted=accepted if row['auth_scopes'] is not None else current&LEGACY_SCOPES
+    if not job_scope_allowed(current,row['kind']) or not job_scope_allowed(accepted,row['kind']):
+        return 'authorization_scope_denied'
+    return None
+
+
+def wait_for_authorization(conn,job_id,reason,*,drained=False):
+    """Park an accepted job without cancelling items or releasing reservations."""
+    row=conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+    if not row or row['state'] not in OPEN_STATES or row['cancel_requested']:return False
+    payload=json.loads(row['payload'])
+    first=not payload.get('authorization_wait')
+    if first:
+        version=payload.get('authorization_version',0)
+        payload['authorization_version']=(version if type(version) is int and version>=0 else 0)+1
+        payload['authorization_wait']={'reason':reason,'at':db.utcnow()}
+    state='running' if row['state']=='running' and not drained else 'waiting_authorization'
+    changed=first or row['state']!=state or row['stage']!='waiting_authorization'
+    conn.execute("UPDATE jobs SET state=?,stage='waiting_authorization',payload=?,error=?,updated_at=? WHERE id=?",
+                 (state,db.encode(payload),reason,db.utcnow(),job_id))
+    if changed:db.event(conn,'job_authorization_required',{'job_id':job_id,'state':state,'code':reason})
+    return True
+
+
+def public_authorization(row,payload):
+    wait=payload.get('authorization_wait')
+    reason=wait.get('reason') if isinstance(wait,dict) else None
+    version=payload.get('authorization_version',0)
+    return {'reason':reason if isinstance(reason,str) and reason in AUTHORIZATION_REASONS else None,
+            'version':version if type(version) is int and version>=0 else 0,
+            'required_scopes':required_scopes(row['kind']),'allowed_scopes':required_scopes(row['kind']),
+            'reauthorize_allowed':row['state']=='waiting_authorization' and not row['cancel_requested']}
 
 
 def check_scope(active,required,message='Недостаточно прав API-токена'):
@@ -141,14 +219,8 @@ def install(app,settings):
         with db.transaction(settings.db_path) as conn:
             if not conn.execute('SELECT id FROM api_tokens WHERE id=?',(token_id,)).fetchone():raise security.error(404,'token_not_found','Токен не найден')
             conn.execute('UPDATE api_tokens SET revoked=1 WHERE id=?',(token_id,))
-            jobs=conn.execute("SELECT id,state,completed FROM jobs WHERE json_extract(payload,'$.auth_token_id')=? AND state IN ('queued','running','paused')",(token_id,)).fetchall()
+            jobs=conn.execute("SELECT id FROM jobs WHERE json_extract(payload,'$.auth_token_id')=? AND state IN ('queued','running','paused','waiting_authorization')",(token_id,)).fetchall()
             for job in jobs:
-                terminal=job['state'] in {'queued','paused'}
-                state=('cancelled_partial' if job['completed'] else 'cancelled') if terminal else job['state']
-                conn.execute('UPDATE jobs SET cancel_requested=1,state=?,stage=CASE WHEN ? THEN ? ELSE stage END,error=CASE WHEN ? THEN ? ELSE error END,updated_at=? WHERE id=?',
-                             (state,terminal,state,terminal,'authorization_revoked',db.utcnow(),job['id']))
-                # The state transition and durable result notification consume
-                # the accepted job's outbox reservation in this transaction.
-                db.event(conn,'job_cancel_requested',{'job_id':job['id'],'code':'authorization_revoked'})
+                wait_for_authorization(conn,job['id'],'authorization_revoked')
             db.event(conn,'api_token_revoked',{'id':token_id})
         return {'revoked':True}

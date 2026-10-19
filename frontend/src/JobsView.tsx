@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Activity, ArrowDown, CheckCheck, ChevronDown, CircleAlert, Clock3, FileAudio, LoaderCircle, Pause, Play, RefreshCw, Square, Wifi, WifiOff, X } from 'lucide-react';
+import { Activity, ArrowDown, CheckCheck, ChevronDown, CircleAlert, Clock3, FileAudio, LoaderCircle, Pause, Play, RefreshCw, ShieldCheck, Square, Wifi, WifiOff, X } from 'lucide-react';
 import { api, messageFor } from './api';
-import { etaText, isActiveJob, jobNames, jobStates, jobTone, mergeActivityEvents } from './jobs';
+import { etaText, isActiveJob, jobNames, jobStates, jobTone, mergeActivityEvents, needsJobAuthorization } from './jobs';
+import { JobAuthorizationPanel, reauthorizationMessage, reauthorizationRequest } from './JobAuthorization';
 import type { ActivityEvent, JobActivity, LiveJob } from './jobs';
 import type { Job } from './types';
 import './JobsView.css';
@@ -60,7 +61,7 @@ function ActivityLog({ events }: { events: ActivityEvent[] }) {
   }
   return <div className="job-log-wrap">
     <ol className="job-event-log" role="log" aria-label="События задачи" aria-live="off" tabIndex={0} ref={ref} onScroll={scroll}>
-      {events.length ? events.map(event => <li key={event.id} className={['failed', 'conflict', 'needs_review', 'interrupted'].includes(event.state || '') ? 'event-error' : ''}>
+      {events.length ? events.map(event => <li key={event.id} className={event.state === 'waiting_authorization' ? 'event-authorization' : ['failed', 'conflict', 'needs_review', 'interrupted'].includes(event.state || '') ? 'event-error' : ''}>
         <time dateTime={event.created_at} title={dateOf(event.created_at)}>{timeOf(event.created_at)}</time>
         <div><span>{event.message}</span>{event.filename && <strong title={event.filename}>{event.filename}</strong>}
           {event.code && <small>Код: {event.code}</small>}
@@ -150,9 +151,17 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
       if (action === 'cancel') await onCancel(job.id);
       else await api(`/jobs/${encodeURIComponent(job.id)}/${action}`, { method: 'POST' });
       await refresh(); if (selectedId === job.id) await refreshSelected.current?.();
-    } catch (err) { setControlError(messageFor(err)); }
+    } catch (err) { setControlError(reauthorizationMessage(err)); }
     finally { setPending(''); }
   }, [onCancel, refresh, selectedId]);
+  async function reauthorize(job: Job, scopes: string[]) {
+    const request = reauthorizationRequest(job, scopes);
+    if (!request) return;
+    setPending(job.id); setControlError('');
+    try { await api(`/jobs/${encodeURIComponent(job.id)}/reauthorize`, request); await refresh(); if (selectedId === job.id) await refreshSelected.current?.(); }
+    catch (err) { setControlError(reauthorizationMessage(err)); }
+    finally { setPending(''); }
+  }
   async function reload() {
     setRefreshing(true); setControlError('');
     try { await refresh(); await refreshSelected.current?.(); }
@@ -168,15 +177,15 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
     {!jobs.length ? <div className="empty"><div className="icon-surface"><Activity size={30} /></div><h3>Здесь пока тихо</h3><p>После запуска сканирования или обработки здесь появятся задачи, прогресс и события.</p></div>
       : <div className="jobs-list">{jobs.map(original => {
         const job = (activity?.job.id === original.id ? activity.job : original) as LiveJob;
-        const active = isActiveJob(job); const tone = jobTone(job); const expanded = selectedId === job.id;
+        const active = isActiveJob(job); const tone = jobTone(job); const expanded = selectedId === job.id; const authorizationWaiting = needsJobAuthorization(job);
         const processed = job.processed ?? Math.min(job.total, job.completed + job.failed);
         const percent = job.total > 0 ? Math.max(0, Math.min(100, Math.round(processed / job.total * 100))) : 0;
-        const Icon = tone === 'cancelled' ? X : tone === 'error' ? CircleAlert : tone === 'paused' ? Pause : tone === 'success' ? CheckCheck : tone === 'waiting' ? Clock3 : LoaderCircle;
+        const Icon = tone === 'cancelled' ? X : tone === 'authorization' ? ShieldCheck : tone === 'error' ? CircleAlert : tone === 'paused' ? Pause : tone === 'success' ? CheckCheck : tone === 'waiting' ? Clock3 : LoaderCircle;
         return <article className={`job-card job-card--${tone} ${expanded ? 'job-expanded' : ''}`} key={job.id}>
-          <div className="job-top"><div className="job-icon"><Icon className={job.state === 'running' && !job.pause_requested && !job.cancel_requested ? 'spin' : ''} size={22} aria-hidden="true" /></div>
+          <div className="job-top"><div className="job-icon"><Icon className={job.state === 'running' && !authorizationWaiting && !job.pause_requested && !job.cancel_requested ? 'spin' : ''} size={22} aria-hidden="true" /></div>
             <div className="job-title"><h3>{jobNames[job.kind] || job.kind}</h3><time className="muted small" dateTime={job.created_at}>{dateOf(job.created_at)}</time></div>
-            <span className="badge job-status">{job.cancel_requested && active ? 'Отмена запрошена' : active && jobStates[job.stage] && ['waiting_provider','waiting_storage'].includes(job.stage) ? jobStates[job.stage] : jobStates[job.state] || job.state}</span>
-            <div className="job-controls">{active && job.stage === 'waiting_storage' && <button className="button subtle" disabled={pending === job.id || job.cancel_requested} onClick={() => void control(job, 'retry-storage')}><RefreshCw size={15}/>Проверить место</button>}{active && !['scan', 'export_ready', 'replaygain_album', 'release_audit', 'publish_sidecars'].includes(job.kind) && <button className="button subtle" disabled={job.cancel_requested || !!job.pause_requested && job.state !== 'paused' || pending === job.id} onClick={() => void control(job, job.state === 'paused' ? 'resume' : 'pause')}>
+            <span className="badge job-status">{job.cancel_requested && active ? 'Отмена запрошена' : authorizationWaiting ? jobStates.waiting_authorization : active && jobStates[job.stage] && ['waiting_provider','waiting_storage'].includes(job.stage) ? jobStates[job.stage] : jobStates[job.state] || job.state}</span>
+            <div className="job-controls">{active && job.stage === 'waiting_storage' && <button className="button subtle" disabled={pending === job.id || job.cancel_requested} onClick={() => void control(job, 'retry-storage')}><RefreshCw size={15}/>Проверить место</button>}{active && !authorizationWaiting && !['scan', 'export_ready', 'replaygain_album', 'release_audit', 'publish_sidecars'].includes(job.kind) && <button className="button subtle" disabled={job.cancel_requested || !!job.pause_requested && job.state !== 'paused' || pending === job.id} onClick={() => void control(job, job.state === 'paused' ? 'resume' : 'pause')}>
               {job.state === 'paused' ? <Play size={15} /> : <Pause size={15} />}{job.state === 'paused' ? 'Продолжить' : job.pause_requested ? 'Ожидаем паузу' : 'Пауза'}</button>}
               {active && <button className="button subtle" disabled={job.cancel_requested || pending === job.id} onClick={() => void control(job, 'cancel')}><Square size={14} />Отменить</button>}</div>
           </div>
@@ -186,8 +195,9 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
             {active && <span className="job-eta"><Clock3 size={14} aria-hidden="true" />{etaText(job)}</span>}</div>
           <progress max={100} value={job.total || !active ? percent : undefined} aria-label={`Прогресс: ${jobNames[job.kind] || job.kind}`} aria-valuetext={job.total ? `${percent}%, ${processed} из ${job.total} попыток` : 'Объем определяется'} />
           <div className="job-current-action"><Activity size={15} aria-hidden="true" /><span>{job.current_action || jobStates[job.stage] || jobStates[job.state] || 'Подготовка'}{job.active_count ? ` · файлов одновременно: ${job.active_count}` : ''}</span></div>
-          {active && !!job.retry_at && <p className="muted small job-retry">Автоматический повтор после {dateOf(new Date(job.retry_at * 1000).toISOString())}. Выполненные попытки сохраняются.</p>}
-          {job.error && (job.error === 'partial_scan'
+          {active && !authorizationWaiting && !!job.retry_at && <p className="muted small job-retry">Автоматический повтор после {dateOf(new Date(job.retry_at * 1000).toISOString())}. Выполненные попытки сохраняются.</p>}
+          {authorizationWaiting && <JobAuthorizationPanel key={`${job.id}:${job.authorization?.version}`} job={job} pending={pending === job.id} onGrant={scopes => { void reauthorize(job, scopes); }}/>}
+          {job.error && !authorizationWaiting && (job.error === 'partial_scan'
             ? <p className="muted small job-retry">Сканирование завершилось не полностью. Обработанные записи сохранены.</p>
             : <ErrorNotice message={job.error} />)}
           {job.cancel_requested && <p className="muted small job-retry">Уже выполненные изменения сохраняются. Текущая операция с файлом завершается безопасно.</p>}

@@ -141,8 +141,8 @@ def restore(directory,destination):
             conn.execute("INSERT OR REPLACE INTO settings VALUES('schedule',?)",(db.encode({'enabled':False,'remaining':[]}),))
             conn.execute("INSERT OR REPLACE INTO settings VALUES('webhook_paused','true')")
             conn.execute("INSERT OR REPLACE INTO settings VALUES('webhook_event_epoch',?)",(str(uuid.uuid4()),))
-            cancelled=[row['id'] for row in conn.execute("SELECT id FROM jobs WHERE state IN ('running','queued','paused','interrupted')")]
-            conn.execute("UPDATE jobs SET state='cancelled',stage='cancelled',cancel_requested=1,error='state_restored' WHERE state IN ('running','queued','paused','interrupted')")
+            cancelled=[row['id'] for row in conn.execute("SELECT id FROM jobs WHERE state IN ('running','queued','paused','waiting_authorization','interrupted')")]
+            conn.execute("UPDATE jobs SET state='cancelled',stage='cancelled',cancel_requested=1,error='state_restored' WHERE state IN ('running','queued','paused','waiting_authorization','interrupted')")
             for identity in cancelled:db.event(conn,'job_finished',{'job_id':identity,'state':'cancelled','reason':'state_restored'})
             db.event(conn,'state_restored',{'version':manifest['version'],'music_restored':False,'recovery_required':True})
         media._sync_directory(stage);media._replace(stage,dest,no_replace=True);media._sync_directory(dest.parent)

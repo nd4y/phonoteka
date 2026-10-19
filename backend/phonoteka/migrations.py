@@ -177,8 +177,8 @@ def restore_checkpoint(settings,directory,destination,*,confirm_stopped=False):
                                   ('webhook_event_epoch',str(uuid.uuid4())),
                                   ('restored_migration_checkpoint',db.encode({'checkpoint_id':document['checkpoint_id'],'dependency_root':document['dependencies']['root']}))]:
                     conn.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',(key,value))
-                cancelled=[row['id'] for row in conn.execute("SELECT id FROM jobs WHERE state IN ('queued','running','paused','interrupted')")]
-                conn.execute("UPDATE jobs SET cancel_requested=1,state='cancelled',stage='cancelled',error='state_restored' WHERE state IN ('queued','running','paused','interrupted')")
+                cancelled=[row['id'] for row in conn.execute("SELECT id FROM jobs WHERE state IN ('queued','running','paused','waiting_authorization','interrupted')")]
+                conn.execute("UPDATE jobs SET cancel_requested=1,state='cancelled',stage='cancelled',error='state_restored' WHERE state IN ('queued','running','paused','waiting_authorization','interrupted')")
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='webhook_reservations'").fetchone():
                     for identity in cancelled:db.event(conn,'job_finished',{'job_id':identity,'state':'cancelled','reason':'state_restored'})
                 conn.commit()

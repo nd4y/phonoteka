@@ -109,7 +109,7 @@ def install(app, settings):
                 'SELECT id,sha256 FROM tracks WHERE is_current=1 AND id IN (%s)' % ','.join('?' for _ in ids), ids)}
             if current != body.revisions:
                 raise security.error(412, 'revision_conflict', 'Сравниваемые файлы изменились')
-            if conn.execute("SELECT 1 FROM jobs j,json_each(j.payload,'$.items') i WHERE j.kind IN ('apply','rollback','publish','normalize_audio','rollback_ready') AND j.state IN ('queued','running','paused','interrupted') AND json_extract(i.value,'$.track_id') IN (%s) LIMIT 1" % ','.join('?' for _ in ids), ids).fetchone():
+            if conn.execute("SELECT 1 FROM jobs j,json_each(j.payload,'$.items') i WHERE j.kind IN ('apply','rollback','publish','normalize_audio','rollback_ready') AND j.state IN ('queued','running','paused','waiting_authorization','interrupted') AND json_extract(i.value,'$.track_id') IN (%s) LIMIT 1" % ','.join('?' for _ in ids), ids).fetchone():
                 raise security.error(409, 'write_pending', 'Дождитесь завершения записей этой группы')
             superseded=[]
             for other in conn.execute('SELECT key,value FROM settings WHERE key LIKE ?', (PREFIX + '%',)):

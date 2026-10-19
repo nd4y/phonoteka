@@ -122,7 +122,7 @@ def test_ten_thousand_item_job_stops_admission_and_drains_then_resumes(settings,
         assert media.sha256_file(cfg.work_root/'09999.wav')==original_sha
 
 
-def test_live_token_revoke_stops_pending_admission_and_cannot_resume(settings):
+def test_live_token_revoke_drains_started_work_and_waits_for_explicit_owner_grant(settings):
     cfg=replace(settings,file_workers=4,io_threads=4)
     with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
         headers=authenticated(client,cfg);ids,_=native_catalog(cfg,512)
@@ -134,7 +134,8 @@ def test_live_token_revoke_stops_pending_admission_and_cannot_resume(settings):
             response=client.delete('/api/tokens/'+token['id'],headers=headers)
             assert response.status_code==200,response.text
         state,_=controlled_segment(cfg,client,headers,queued['id'],Counter(),revoke)
-        assert state['state']=='cancelled_partial' and state['completed']==4
+        assert state['state']=='waiting_authorization' and state['completed']==4
+        assert not state['cancel_requested'] and state['authorization']['reauthorize_allowed']
         assert client.get('/api/tracks',headers=token_headers).status_code==401
         assert client.post('/api/jobs/'+queued['id']+'/resume',headers=headers).status_code==409
 

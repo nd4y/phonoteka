@@ -200,7 +200,7 @@ def install(app, settings):
             current = load(conn, track_id)
             if body.base_version != current['version']:
                 raise security.error(412, 'policy_conflict', 'Закрепления изменились в другой сессии')
-            busy = conn.execute("SELECT 1 FROM jobs j,json_each(j.payload,'$.items') i WHERE j.kind IN ('apply','rollback') AND j.state IN ('queued','running','paused','interrupted') AND json_extract(i.value,'$.track_id')=? LIMIT 1", (track_id,)).fetchone()
+            busy = conn.execute("SELECT 1 FROM jobs j,json_each(j.payload,'$.items') i WHERE j.kind IN ('apply','rollback') AND j.state IN ('queued','running','paused','waiting_authorization','interrupted') AND json_extract(i.value,'$.track_id')=? LIMIT 1", (track_id,)).fetchone()
             if busy:
                 raise security.error(409, 'track_mutation_pending', 'Дождитесь завершения записи или отмените ее перед изменением закреплений')
             locks = {}

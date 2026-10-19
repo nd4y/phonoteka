@@ -16,7 +16,7 @@ from . import db
 EVENT_KINDS = {
     "job_action",
     "job_created", "job_started", "job_progress", "job_finished", "job_pause",
-    "job_paused", "job_resume", "job_waiting", "job_cancel_requested",
+    "job_paused", "job_resume", "job_waiting", "job_cancel_requested", "job_authorization_required", "job_reauthorized",
     "album_loudness_measured",
 }
 TERMINAL_ITEMS = {"succeeded", "failed", "conflict", "needs_review"}
@@ -122,6 +122,9 @@ def estimate(row, events, now=None):
     if row["cancel_requested"]:
         result["eta_reason"] = "cancelling"
         return result
+    if row['state']=='waiting_authorization' or row['stage']=='waiting_authorization':
+        result['eta_reason']='waiting_authorization'
+        return result
     if payload.get("pause_requested") or row["state"] == "paused":
         result["eta_reason"] = "paused"
         return result
@@ -151,7 +154,7 @@ def estimate(row, events, now=None):
             last_count = 0
         elif kind == "job_started":
             start, baseline, samples = stamp, last_count, []
-        elif kind in {"job_paused", "job_waiting", "job_resume", "job_finished"}:
+        elif kind in {"job_paused", "job_waiting", "job_resume", "job_finished", "job_authorization_required", "job_reauthorized"}:
             start, samples = None, []
         elif kind == "job_progress" and isinstance(data.get("state"), str) and data["state"] in TERMINAL_ITEMS:
             count = _number(data.get("completed")) + _number(data.get("failed"))
@@ -195,6 +198,10 @@ def action_for(row):
         }[row["state"]]
     if row["cancel_requested"]:
         return "Завершение текущих операций перед отменой"
+    if row['state']=='waiting_authorization':
+        return 'Ожидание явного подтверждения прав владельцем'
+    if row['stage']=='waiting_authorization':
+        return 'Завершение начатых операций перед ожиданием прав'
     if row["state"] == "paused":
         return "Обработка приостановлена"
     if payload.get("pause_requested"):
@@ -270,6 +277,8 @@ def safe_event(event, row, tracks, results):
             "job_paused": "Задача приостановлена", "job_resume": "Задача возвращена в очередь",
             "job_waiting": "Ожидание свободного места" if data.get("reason")=="storage" else "Ожидание сервиса перед повторной попыткой",
             "job_cancel_requested": "Запрошена отмена", "album_loudness_measured": "Громкость альбома измерена",
+            "job_authorization_required": "Ожидается подтверждение прав владельцем",
+            "job_reauthorized": "Владелец подтвердил новые ограниченные права задания",
         }.get(event["kind"], "Состояние задачи изменилось")
         if event['kind']=='job_cancel_requested' and data.get('code')=='provider_policy_expired':
             result['message']='Задача отменена: срок хранения или разрешение источника истекли'

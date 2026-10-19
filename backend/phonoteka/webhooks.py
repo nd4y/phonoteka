@@ -105,7 +105,7 @@ def configure(settings):
         conn.execute('INSERT OR IGNORE INTO settings VALUES(?,?)',('webhook_event_epoch',str(uuid.uuid4())))
         if config['enabled']:
             pending=conn.execute("SELECT COUNT(*) FROM webhook_outbox WHERE state IN ('pending','in_flight')").fetchone()[0]
-            active=conn.execute("SELECT id FROM jobs WHERE state IN ('queued','running','paused') AND id NOT IN (SELECT job_id FROM webhook_reservations)").fetchall()
+            active=conn.execute("SELECT id FROM jobs WHERE state IN ('queued','running','paused','waiting_authorization') AND id NOT IN (SELECT job_id FROM webhook_reservations)").fetchall()
             reserved=conn.execute('SELECT COUNT(*) FROM webhook_reservations').fetchone()[0]
             if pending+reserved+len(active)>settings.webhook_max_pending:
                 config.update(enabled=False,error='existing_queue_exceeds_capacity')
