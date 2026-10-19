@@ -29,7 +29,12 @@ export function AudioPlayer({ src, title = 'Прослушать аудио', su
   const container = useRef<HTMLElement>(null);
   useEffect(() => {
     if (!expanded) return;
-    const outside = (event: PointerEvent) => { if (!container.current?.contains(event.target as Node)) setExpanded(false); };
+    const outside = (event: PointerEvent) => {
+      // Back owns this click: closing on pointerdown would remove its layer
+      // before click, causing the same gesture to navigate one screen too far.
+      if (event.target instanceof Element && event.target.closest('[data-app-back]')) return;
+      if (!container.current?.contains(event.target as Node)) setExpanded(false);
+    };
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);
   }, [expanded]);

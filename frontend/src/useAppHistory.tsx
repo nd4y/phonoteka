@@ -25,10 +25,11 @@ export function useAppHistory(options: { authenticated: boolean; view: Omit<View
   } }).current;
   function dismiss() {
     const active = [...closers.current.values()].reverse().sort((a, b) => b.priority - a.priority)[0];
-    if (active) { active.dismiss(); return true; }
+    if (active && active.priority > 0) { active.dismiss(); return true; }
     disclosures.current = disclosures.current.filter(element => element.isConnected && element.open);
     const last = disclosures.current.pop();
     if (last) { last.open = false; changed(); return true; }
+    if (active) { active.dismiss(); return true; }
     return false;
   }
   const dismissRef = useRef(dismiss); dismissRef.current = dismiss;

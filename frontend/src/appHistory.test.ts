@@ -3,6 +3,7 @@ import { AppHistory, appHistoryKey, historyMarker, readAppHistory } from './appH
 import type { HistoryMarker } from './appHistory';
 import { emptyView } from './viewState';
 import type { ViewState } from './viewState';
+import { acceptDetailNavigation, loadLatestDetail } from './detailNavigation';
 
 function fixture(initial = { ...emptyView }, available = true) {
   const values = new Map<string, string>();
@@ -37,6 +38,20 @@ function fixture(initial = { ...emptyView }, available = true) {
 }
 
 describe('application Back navigation', () => {
+  it('a newer catalog action cancels pending details without rewriting that action in history', async () => {
+    const f = fixture(), sequence = { current: 0 };
+    let resolve!: (track: string) => void;
+    const response = new Promise<string>(yes => { resolve = yes; });
+    const pending = loadLatestDetail(sequence, () => response,
+      id => f.push({ page: 'review', selectedId: id }), vi.fn(), vi.fn());
+    acceptDetailNavigation(sequence, () => true);
+    f.push({ filter: 'missing_lyrics', pageNumber: 2 });
+    resolve('late-track'); expect(await pending).toBe(false);
+    expect(f.view).toMatchObject({ page: 'library', filter: 'missing_lyrics', pageNumber: 2, selectedId: '' });
+    f.back(); expect(f.view).toEqual(emptyView);
+    f.forward(); expect(f.view).toMatchObject({ filter: 'missing_lyrics', pageNumber: 2 });
+  });
+
   it('returns through a selected track, filters and the collection without replacing playback', () => {
     const f = fixture({ ...emptyView, scroll: 480, queueScroll: 120 });
     f.push({ filter: 'missing_lyrics', pageNumber: 3, scroll: 620 });

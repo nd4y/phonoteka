@@ -6,6 +6,7 @@ import { JobAuthorizationPanel, reauthorizationMessage, reauthorizationRequest }
 import type { ActivityEvent, JobActivity, LiveJob } from './jobs';
 import type { Job } from './types';
 import './JobsView.css';
+import { useBackLayer } from './useAppHistory';
 
 type Props = { jobs: Job[]; refresh: () => Promise<void>; onCancel: (id: string) => Promise<void> };
 type Connection = 'connecting' | 'live' | 'reconnecting' | 'offline';
@@ -79,6 +80,8 @@ function ActivityLog({ events }: { events: ActivityEvent[] }) {
 
 export function JobsView({ jobs, refresh, onCancel }: Props) {
   const [selectedId, setSelectedId] = useState(() => jobs.find(job => job.id === rememberedJob())?.id || jobs.find(isActiveJob)?.id || jobs[0]?.id || '');
+  const [manualActivity, setManualActivity] = useState(false);
+  useBackLayer(manualActivity && !!selectedId, () => { setSelectedId(''); setManualActivity(false); });
   const [activity, setActivity] = useState<JobActivity | null>(null);
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [connection, setConnection] = useState<Connection>('connecting');
@@ -201,7 +204,7 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
             ? <p className="muted small job-retry">Сканирование завершилось не полностью. Обработанные записи сохранены.</p>
             : <ErrorNotice message={job.error} />)}
           {job.cancel_requested && <p className="muted small job-retry">Уже выполненные изменения сохраняются. Текущая операция с файлом завершается безопасно.</p>}
-          <button className="button subtle job-activity-toggle" aria-expanded={expanded} aria-controls={`job-activity-${job.id}`} onClick={() => setSelectedId(expanded ? '' : job.id)}><ChevronDown className={expanded ? 'is-expanded' : ''} size={17} />{expanded ? 'Скрыть действия и события' : 'Действия и события'}</button>
+          <button className="button subtle job-activity-toggle" aria-expanded={expanded} aria-controls={`job-activity-${job.id}`} onClick={() => { setSelectedId(expanded ? '' : job.id); setManualActivity(!expanded); }}><ChevronDown className={expanded ? 'is-expanded' : ''} size={17} />{expanded ? 'Скрыть действия и события' : 'Действия и события'}</button>
           {expanded && <div className="job-activity" id={`job-activity-${job.id}`}>
             <div className="job-activity-heading"><h4>Текущие действия</h4><span className={`job-connection connection-${connection}`} role="status">{connection === 'live' ? <Wifi size={14} /> : connection === 'offline' ? <WifiOff size={14} /> : <LoaderCircle className="spin" size={14} />}
               {connection === 'live' ? 'В реальном времени' : connection === 'offline' ? 'Нет сети' : connection === 'connecting' ? 'Подключение' : 'Переподключение'}</span></div>
