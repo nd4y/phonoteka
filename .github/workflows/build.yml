@@ -130,7 +130,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 18
     permissions:
-      contents: read
+      contents: write
       packages: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -164,12 +164,20 @@ jobs:
             --output "$RUNNER_TEMP/phonoteka-asr19"
       - name: Preserve generated acceptance evidence on success or failure
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: generated-asr19-ordinary7-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/phonoteka-asr19/
-          if-no-files-found: warn
-          retention-days: 14
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f "$RUNNER_TEMP/phonoteka-asr19/result.json" ]]; then
+            echo 'No generated acceptance report: the profile did not reach its reporting stage.'
+            exit 0
+          fi
+          archive="$RUNNER_TEMP/generated-acceptance.tar.gz"
+          python3 tests/package_acceptance_reports.py "$RUNNER_TEMP/phonoteka-asr19" "$archive"
+          tag="acceptance-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          gh release create "$tag" "$archive" "$archive.sha256" --draft --target "$GITHUB_SHA" \
+            --title "Generated ASR acceptance $GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT" \
+            --notes 'Generated test data and resource measurements only. Profile outcome is recorded in result.json; this draft is not deployment admission.'
   publish:
     needs: [verify, inference, inference-acceptance]
     if: github.event_name != 'pull_request'
