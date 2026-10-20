@@ -124,8 +124,54 @@ jobs:
           [[ "$digest_ref" == "$image@sha256:"* ]]
           printf 'image_id=%s\nimage_digest=%s\n' "$image_id" "$digest_ref" >> "$GITHUB_OUTPUT"
           printf 'Tested inference: `%s`\nConfig image ID: `%s`\n' "$digest_ref" "$image_id" >> "$GITHUB_STEP_SUMMARY"
-  publish:
+  inference-acceptance:
     needs: [verify, inference]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Pull the exact tested candidate pair
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_REF: ${{ needs.verify.outputs.image_digest }}
+          APP_ID: ${{ needs.verify.outputs.image_id }}
+          INFERENCE_REF: ${{ needs.inference.outputs.image_digest }}
+          INFERENCE_ID: ${{ needs.inference.outputs.image_id }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          [[ "$APP_REF" == "$image@sha256:"* && "${APP_REF#"$image@"}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$INFERENCE_REF" == "$image-inference@sha256:"* && "${INFERENCE_REF#"$image-inference@"}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$APP_ID" =~ ^sha256:[0-9a-f]{64}$ && "$INFERENCE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker pull "$APP_REF"
+          docker pull "$INFERENCE_REF"
+          [[ "$(docker inspect "$APP_REF" --format '{{.Id}}')" == "$APP_ID" ]]
+          [[ "$(docker inspect "$INFERENCE_REF" --format '{{.Id}}')" == "$INFERENCE_ID" ]]
+      - name: Real ASR, bounded model recovery and concurrent ordinary work
+        env:
+          APP_ID: ${{ needs.verify.outputs.image_id }}
+          INFERENCE_ID: ${{ needs.inference.outputs.image_id }}
+        run: |
+          python3 tests/inference_acceptance.py --revision "$GITHUB_SHA" \
+            --app-image "$APP_ID" --inference-image "$INFERENCE_ID" \
+            --output "$RUNNER_TEMP/phonoteka-asr19"
+      - name: Preserve generated acceptance evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: generated-asr19-ordinary7-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/phonoteka-asr19/
+          if-no-files-found: warn
+          retention-days: 14
+  publish:
+    needs: [verify, inference, inference-acceptance]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
