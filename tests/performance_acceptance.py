@@ -97,6 +97,40 @@ def seed(base, records, port, real_audio=False):
     return settings
 
 
+def cgroup_noncache_memory(current, memory_stat):
+    """Charged memory excluding only clean regular-file cache.
+
+    Total cgroup usage and its hard limit remain separate mandatory observations.
+    Tmpfs/shmem and dirty/writeback pages count towards the growth regression:
+    neither generated SQLite state nor pending writes can hide an anonymous leak.
+    Missing/inconsistent counters cannot produce a successful measurement.
+    """
+    keys = ('file', 'shmem', 'file_dirty', 'file_writeback')
+    if type(current) is not int or current < 0 or not isinstance(memory_stat, dict):
+        return None
+    if any(type(memory_stat.get(key)) is not int or memory_stat[key] < 0 for key in keys):
+        return None
+    if memory_stat['file'] > current or memory_stat['shmem'] > memory_stat['file']:
+        return None
+    clean_file_cache = max(0, memory_stat['file'] - memory_stat['shmem']
+                           - memory_stat['file_dirty'] - memory_stat['file_writeback'])
+    return current - clean_file_cache
+
+
+def cgroup_growth_within_budget(samples, limit, delta, allowance):
+    if type(limit) is not int or limit <= 0 or not samples:
+        return False
+    if type(delta) not in (int, float) or not math.isfinite(delta):
+        return False
+    if type(allowance) not in (int, float) or not math.isfinite(allowance) or allowance < 0:
+        return False
+    return delta <= allowance and all(
+        type(sample.get('cgroup_noncache_memory_bytes')) is int
+        and type(sample.get('cgroup_memory_current_bytes')) is int
+        and 0 <= sample['cgroup_noncache_memory_bytes'] <= sample['cgroup_memory_current_bytes'] <= limit
+        for sample in samples)
+
+
 def process_sample():
     """Linux /proc observations, including the server's observed high watermark."""
     values = {}
@@ -125,11 +159,19 @@ def process_sample():
         with suppress(OSError, ValueError):
             return int(Path('/sys/fs/cgroup', name).read_text().strip())
         return None
+    memory_stat = {}
+    with suppress(OSError, ValueError):
+        memory_stat = {key: int(value) for key, value in
+                       (line.split() for line in Path('/sys/fs/cgroup/memory.stat').read_text().splitlines())}
+    current = cgroup_integer('memory.current')
     return {"at": time.monotonic(), "rss_bytes": values.get("VmRSS"), "rss_high_water_bytes": values.get("VmHWM"),
             "threads": values.get("Threads"), "fd": parent_fd,
             "child_process_count": len(descendants), "child_rss_bytes": child_rss, "child_fd": child_fd,
             "combined_rss_bytes": (values.get("VmRSS") or 0) + child_rss, "combined_fd": parent_fd + child_fd,
-            "cgroup_memory_current_bytes": cgroup_integer('memory.current'),
+            "cgroup_memory_current_bytes": current,
+            "cgroup_noncache_memory_bytes": cgroup_noncache_memory(current, memory_stat),
+            "cgroup_memory_stat": {key: memory_stat.get(key) for key in
+                                   ('anon', 'file', 'shmem', 'file_dirty', 'file_writeback', 'slab')},
             "cgroup_memory_peak_bytes": cgroup_integer('memory.peak')}
 
 
@@ -480,15 +522,20 @@ async def exercise(base_url, password, args, process):
 def summarize(result, args):
     observations = result.pop("observations")
     samples = observations["resources"]
+    try:
+        cgroup_limit = int(result['environment']['cgroup_memory_max'])
+    except (KeyError, TypeError, ValueError):
+        cgroup_limit = 0
     window = max(1, min(30, len(samples) // 4))
     growth = {}
-    for name in ("rss_bytes", "fd", 'combined_rss_bytes', 'combined_fd', 'cgroup_memory_current_bytes'):
+    for name in ("rss_bytes", "fd", 'combined_rss_bytes', 'combined_fd', 'cgroup_memory_current_bytes', 'cgroup_noncache_memory_bytes'):
         values = [sample[name] for sample in samples if sample.get(name) is not None]
         growth[name] = {"first_window_mean": statistics.mean(values[:window]) if values else None,
                         "last_window_mean": statistics.mean(values[-window:]) if values else None,
                         "delta": statistics.mean(values[-window:]) - statistics.mean(values[:window]) if values else None,
                         "observed_peak": max(values) if values else None}
     result["resources"] = {"sample_interval_seconds": 1, "samples": samples, "growth": growth,
+                           "cgroup_memory_limit_bytes": cgroup_limit or None,
                            "rss_high_water_bytes": max((sample.get("rss_high_water_bytes") or 0 for sample in samples), default=None),
                            "async_tasks": distribution(observations["task_counts"]),
                            "server_child_processes_peak": max((sample["child_process_count"] for sample in samples), default=None),
@@ -529,12 +576,13 @@ def summarize(result, args):
         "fd_growth_within_configured_regression_limit": growth["fd"]["delta"] is not None and growth["fd"]["delta"] <= args.max_fd_growth,
         "combined_rss_growth_within_configured_regression_limit": growth['combined_rss_bytes']['delta'] is not None and growth['combined_rss_bytes']['delta'] <= args.max_rss_growth_mib * 1024**2,
         "combined_fd_growth_within_configured_regression_limit": growth['combined_fd']['delta'] is not None and growth['combined_fd']['delta'] <= args.max_fd_growth,
-        "cgroup_memory_growth_within_configured_regression_limit": growth['cgroup_memory_current_bytes']['delta'] is not None and growth['cgroup_memory_current_bytes']['delta'] <= args.max_rss_growth_mib * 1024**2,
+        "cgroup_noncache_memory_growth_within_configured_regression_limit": cgroup_growth_within_budget(samples, cgroup_limit, growth['cgroup_noncache_memory_bytes']['delta'], args.max_rss_growth_mib * 1024**2),
         "real_audio_concurrency_observed": not args.real_audio_workers or max_concurrent >= 4 and len({span['thread_id'] for span in observations['spans']})>=4,
         **result.pop("checks"),
     }
     result["passed_measured_checks"] = all(result["criteria"].values())
     result["limitations"] = ["Real audio background uses generated 2-second FLAC fixtures with the actual Worker/FFmpeg; external providers and inference are not part of this local API profile." if args.real_audio_workers else "Background workers are synthetic DB/event writers, not the real audio/provider pipeline; this does not close all AC-25/27.",
+                              "Cgroup growth excludes clean regular-file cache only; tmpfs/shmem, dirty/writeback and process memory remain counted. Raw total usage is reported and the caller must enforce a hard cgroup limit.",
                               "Observed API latencies exclude audio/external APIs; percentile units are milliseconds.",
                               "Finite RAM/fd observations and explicit regression limits do not prove the absence of every long-term leak.",
                               "Short runs do not satisfy the 15-minute API or 30-minute sustained-resource acceptance profile.",
