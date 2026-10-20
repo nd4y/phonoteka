@@ -75,3 +75,11 @@ an unchanged first stream with changed/corrupt second stream, full-read dates,
 copied rollback blobs and missing restored blobs. Their execution belongs to
 the build-01 test run; source implementation is not a physical power-loss or
 real-device acceptance result.
+
+ID3 writes preserve existing empty text frames as well as populated frames.
+Mutagen 1.47 normally omits empty `COMM` and `TDAT` on save; a local serializer
+hook retains those frames in the same ID3v2.3/v2.4 format. The hook affects only
+the tag object being saved and is removed afterward. It does not filter the
+unchanged-metadata signature or the native-slot preservation check. Removing
+even an empty unrelated frame still prevents the staged file from replacing
+the original. Explicitly clearing a requested field continues to remove it.

@@ -33,7 +33,7 @@ from mutagen.id3 import ID3, ID3NoHeaderError, APIC, SYLT, TXXX, UFID, Frames
 from mutagen.mp3 import MP3
 from mutagen.wave import WAVE
 from mutagen.aiff import AIFF
-from . import formats, intake, metadata_slots, packetstream
+from . import formats, intake, metadata_slots, packetstream, id3_preservation
 from PIL import Image, UnidentifiedImageError
 
 
@@ -650,7 +650,7 @@ def _edit(path: Path, tags: Mapping[str, Any], lrc: str | None, cover: bytes | N
                 if values:
                     audio.tags.add(TXXX(encoding=encoding, desc=description, text=values))
         metadata_slots.edit(audio, normalized, cover, cover_info, slot_selection)
-        audio.save(v2_version=version, v23_sep=None, **({} if isinstance(audio,AIFF) else {'v1':1}))
+        id3_preservation.save(audio, version, **({} if isinstance(audio,AIFF) else {'v1':1}))
     elif isinstance(audio, formats.PROFILES):
         try:
             formats.edit(audio, tags, None, None, None, _values)
