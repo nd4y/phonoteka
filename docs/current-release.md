@@ -2,9 +2,9 @@
 
 The application is a single-owner service. Original audio is mounted read-only. Changes are proposed, reviewed, atomically written to the separate working copy, audited, and published to a separate Ready directory. The current image is not a claim that all specification acceptance criteria have passed.
 
-Production revision on 2026-10-22: `f41bba90afe174fa2e386032833839ff7bd4b579`. All three installed containers were rechecked healthy with zero restarts/OOM. The reviewed live-update/cancellation fixes and security dependency updates have passed matched CI/build-01 gates and are deployed. Full product acceptance remains open. See [release readiness](production-readiness.md).
+Production revision verified on 2026-10-23 (Europe/Moscow): `d897c364b35f56267345ff01a0debeb01fa6f41a`. All three installed containers are healthy with zero restarts/OOM. [Review r2](production-review-2026-10-22-r2.md) fixes pending-job retry identity, selection beyond completed batches and visibility/reuse of older active jobs. Matched CI/build-01 gates passed: 616 backend / 210 frontend tests. Full product acceptance remains open. See [release readiness](production-readiness.md).
 
-The owner-authorized [Edge acceptance](browser-acceptance-2026-10-22.md) verified playback/CUE, Back, reload state, dirty-form protection, real audit cancellation/live logs and the four agreed responsive sizes. The owner separately confirmed PWA installation and launch as a separate application. Browser offline behavior and physical Android/Poweramp are not inferred from these checks.
+The owner-authorized [Edge acceptance](browser-acceptance-2026-10-22.md) verified playback/CUE, Back, reload state, dirty-form protection, real audit cancellation/live logs and the four agreed responsive sizes. The owner separately confirmed PWA installation and launch as a separate application. The later [guide review](collection-guide-review.md) verified a controlled origin outage with a cached public shell, reconnect and logout during playback. Physical network-offline Android/Poweramp is not inferred from these checks.
 
 ## Available
 
@@ -46,7 +46,7 @@ Scoped expiring bearer tokens, owner-only token management, a durable opt-in sca
 Jobs support pause/resume at file boundaries. Offline state backup/restore verifies artifacts, excludes active tokens/sessions/cache, starts recovery mode and requires an administrative work/Ready hash check before new effects. Scratch cleanup defaults to preview and keeps rollback/exports/music. See [maintenance](maintenance.md). Real-file edge cases include a zero native MP3 duration (FFprobe fallback) and an undecodable advertised tail (bounded sample from the beginning).
 
 
-## Approved guide/report candidate
+## Delivered guide/report
 
 [f41bba9 review](collection-guide-review.md): built and tested on build-01, 210 frontend/105 backend regressions, generated-data Edge checks of shared wizard/help history, immediate F5, responsive report, controlled origin502/cached public shell/reconnect and logout with playing WAV. The update has been delivered after full matched CI and deployment verification; operational details are kept separately. No external ASR, cloud source or OTLP feature was added.
 
