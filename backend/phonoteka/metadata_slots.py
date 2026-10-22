@@ -9,7 +9,7 @@ import json
 
 from mutagen.aiff import AIFF
 from mutagen.flac import FLAC, Picture
-from mutagen.id3 import APIC, SYLT
+from mutagen.id3 import APIC, SYLT, USLT
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4, MP4Cover
 from mutagen.wave import WAVE
@@ -35,6 +35,20 @@ def native(audio):
         result.append({'id': digest([kind, identity, digest(raw)]), 'kind': kind, 'native_identity': identity,
                        'sha256': digest(raw), 'size': len(raw), **values})
     if isinstance(audio, (MP3, WAVE, AIFF)):
+        # Poweramp's MP3 reader needs a textual LRC companion in USLT. Treat
+        # an exact same-description/language/text pair as one logical slot;
+        # different ordinary lyrics remain independent, preserved slots.
+        companions = {}
+        if isinstance(audio, MP3) and audio.tags:
+            from .media import serialize_lrc
+            for frame in audio.tags.getall('SYLT'):
+                if frame.format != 2 or frame.type != 1: continue
+                try: content = serialize_lrc([{'text': words, 'start_ms': stamp} for words, stamp in frame.text])
+                except Exception: continue
+                key = USLT(lang=frame.lang, desc=frame.desc).HashKey
+                companion = audio.tags.get(key)
+                if companion is not None and companion.text == content:
+                    companions[frame.HashKey] = companion
         for frame in audio.tags.values() if audio.tags else []:
             if isinstance(frame, APIC):
                 data_hash = digest(frame.data)
@@ -43,6 +57,7 @@ def native(audio):
                     description=frame.desc, mime=frame.mime, editable=frame.type == 3, _frame=frame,
                     data_sha256=data_hash, size=len(frame.data))
             elif frame.FrameID in {'USLT', 'SYLT'}:
+                if frame.FrameID == 'USLT' and any(frame is value for value in companions.values()): continue
                 timed = frame.FrameID == 'SYLT'
                 supported = timed and frame.format == 2 and frame.type == 1
                 text = str(frame.text) if not timed else ''
@@ -53,8 +68,11 @@ def native(audio):
                         # A malformed native frame stays readable as a slot,
                         # but cannot become a replacement target.
                         supported = False; text = str(frame.text)
-                add('lyrics', frame.HashKey, repr(frame), native_type=frame.FrameID, language=frame.lang,
-                    description=frame.desc, synchronized=timed, editable=supported, text=text, _frame=frame)
+                companion = companions.get(frame.HashKey)
+                content = repr(frame) if companion is None else repr(frame) + '\n' + repr(companion)
+                add('lyrics', frame.HashKey, content, native_type=frame.FrameID, language=frame.lang,
+                    description=frame.desc, synchronized=timed, editable=supported, text=text, _frame=frame,
+                    **({'compatibility_mirror': 'USLT', 'mirror_identity': companion.HashKey, '_mirror_frame': companion} if companion is not None else {}))
     elif isinstance(audio, FLAC):
         for index, picture in enumerate(audio.pictures):
             add('cover', 'picture:' + str(index), picture.write(), native_type='FLAC_PICTURE', picture_type=picture.type,
@@ -144,7 +162,10 @@ def preservation(audio, chosen):
 def planned_targets(audio, chosen):
     result = dict(chosen)
     for kind, target in chosen.items():
-        if target: continue
+        if target:
+            if kind == 'lyrics' and isinstance(audio, MP3):
+                result[kind] = {**target, 'mirror_identity': _mp3_mirror_identity(audio, target)}
+            continue
         if isinstance(audio, (MP3, WAVE, AIFF)):
             identity = SYLT(lang='und', desc='Phonoteka', format=2, type=1, text=[]).HashKey if kind == 'lyrics' else APIC(desc='Phonoteka front cover').HashKey
         elif kind == 'lyrics':
@@ -155,7 +176,18 @@ def planned_targets(audio, chosen):
             name = 'covr' if isinstance(audio, MP4) else 'metadata_block_picture'
             identity = name + ':' + str(len(audio.get(name, [])))
         result[kind] = {'native_identity': identity}
+        if kind == 'lyrics' and isinstance(audio, MP3):
+            result[kind]['mirror_identity'] = _mp3_mirror_identity(audio, target)
     return result
+
+
+def _mp3_mirror_identity(audio, target):
+    description, language = (target['description'], target['language']) if target else ('Phonoteka', 'und')
+    key = USLT(lang=language, desc=description).HashKey
+    existing = audio.tags.get(key) if audio.tags else None
+    if existing is not None and (not target or target.get('_mirror_frame') is not existing):
+        fail('lyrics_conflict', 'A different ordinary lyric slot owns the Poweramp companion identity')
+    return key
 
 
 def reference(slot):
@@ -185,6 +217,8 @@ def verify(audio, chosen, normalized, cover):
                    (item['native_identity'] == target['native_identity'] if target else True)]
         if kind == 'lyrics':
             valid = any(item.get('text') == normalized for item in matches) if normalized else not matches or any(not item.get('text') for item in matches)
+            if normalized and target and target.get('mirror_identity'):
+                valid = valid and any(item.get('mirror_identity') == target['mirror_identity'] for item in matches)
         else:
             valid = any(item.get('data_sha256', item['sha256']) == digest(cover) for item in matches)
         if not valid: fail('verification_failed', 'The selected native slot did not survive independent reopening')
@@ -197,6 +231,7 @@ def edit(audio, normalized, cover, cover_info, selection=None):
         if isinstance(audio, (MP3, WAVE, AIFF)):
             from .media import parse_lrc
             description, language = (target['description'], target['language']) if target else ('Phonoteka', 'und')
+            mirror_key = _mp3_mirror_identity(audio, target) if isinstance(audio, MP3) else None
             if target: audio.tags.delall(target['_frame'].HashKey)
             elif audio.tags.getall('SYLT') and any(frame.desc == description and frame.lang == language for frame in audio.tags.getall('SYLT')):
                 fail('lyrics_conflict', 'The new lyric slot identity already exists')
@@ -204,6 +239,12 @@ def edit(audio, normalized, cover, cover_info, selection=None):
             if parsed['lines']:
                 audio.tags.add(SYLT(encoding=1 if audio.tags.version[1] == 3 else 3, lang=language, format=2, type=1,
                                     desc=description, text=[(line['text'], line['start_ms']) for line in parsed['lines']]))
+            if mirror_key:
+                if normalized:
+                    audio.tags.add(USLT(encoding=1 if audio.tags.version[1] == 3 else 3, lang=language,
+                                        desc=description, text=normalized))
+                elif target and target.get('_mirror_frame') is not None:
+                    del audio.tags[mirror_key]
         else:
             name = target['_key'] if target else ('©lyr' if isinstance(audio, MP4) else 'lyrics')
             values = list(audio.get(name, []))

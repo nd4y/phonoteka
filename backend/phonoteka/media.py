@@ -491,6 +491,8 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                 millis = [frame for frame in timed if frame.format == 2 and frame.type == 1]
                 if millis:
                     lrc = serialize_lrc([{"text": words, "start_ms": timestamp} for words, timestamp in millis[0].text])
+                    if normal and normal[0].lang == millis[0].lang and normal[0].desc == millis[0].desc and normal[0].text == lrc:
+                        lyrics = None  # The Poweramp companion is the same synchronized text.
             version = existing.version if existing else (2, 4, 0)
             write_supported = version[1] in {3,4}
             reason = None if write_supported else "id3_version_not_supported"
@@ -699,6 +701,10 @@ def _untouched_signature(path: Path, tags: Mapping[str, Any], lrc: str | None, c
             excluded.update(f"TXXX:{_MB_DESCRIPTIONS[key]}" for key in tags if key in _CUSTOM_FIELDS and key != "musicbrainz_trackid")
             if "musicbrainz_trackid" in tags:
                 excluded.add("UFID:http://musicbrainz.org")
+            if lrc is not None and isinstance(audio, MP3):
+                mirror_identity = ((chosen_slots or {}).get('lyrics') or {}).get('mirror_identity')
+                if mirror_identity:
+                    excluded.add(mirror_identity)
             if not audio.tags:
                 return {"frames": {}, "unknown": [], **({"chunks":_chunk_signature(path)} if isinstance(audio,(WAVE,AIFF)) else {})}
             frames = {key: repr(frame) for key, frame in audio.tags.items()
