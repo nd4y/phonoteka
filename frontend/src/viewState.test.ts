@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { emptyView, parseView } from './viewState';
 
 describe('reload view state', () => {
+  it('restores a validated wizard step without persisting server data', () => {
+    expect(parseView('{"page":"guide","guideStep":"metadata"}')).toMatchObject({page:'guide',guideStep:'metadata'});
+    expect(parseView('{"page":"help","guideStep":"delete"}').guideStep).toBeUndefined();
+  });
   it.each(['audit_errors', 'audit_warnings', 'audit_unchecked', 'audit_passed'])('restores the %s catalog context without losing editor, query or list position', filter => {
     const state = { page: 'review', query: 'WEBM %_', filter, pageNumber: 4, selectedId: 'fixture-002', scroll: 813, queueScroll: 120 };
     expect(parseView(JSON.stringify(state))).toEqual(state);

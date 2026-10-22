@@ -3,26 +3,25 @@ import { ArrowLeft, ArrowRight, BookOpen, CircleHelp, FolderSearch, RefreshCw, S
 import { api, messageFor } from './api';
 import type { Job, Summary } from './types';
 import type { Page } from './viewState';
-import { useBackLayer } from './useAppHistory';
-import { activeGuideJob, backGuide, guideJobKind, guideSteps, moveGuide, readGuideState, recommendedGuideStep, saveGuideState } from './guideState';
+import { activeGuideJob, guideJobKind, guideSteps, recommendedGuideStep } from './guideState';
 import type { GuideStep } from './guideState';
 import { countValue } from './CollectionOverview';
 import './GettingStarted.css';
 
 const labels: Record<GuideStep, string> = { folder: 'Папка', scan: 'Каталог', recognize: 'Распознавание', metadata: 'Данные', review: 'Проверка и запись', ready: 'Готовая коллекция' };
 type Props = { summary: Summary | null; jobs: Job[]; busy: boolean; onNavigate: (page: Page) => void;
+  step: GuideStep; onStep: (step: GuideStep) => void; onBack: () => void; canBack: boolean;
   onStart: (kind: string, ids?: string[], params?: Record<string, unknown>) => Promise<Job | null> };
 
-export function GettingStarted({ summary, jobs, busy, onNavigate, onStart }: Props) {
-  const [state, setState] = useState(readGuideState), [counts, setCounts] = useState<Record<string, number> | null>(null);
+export function GettingStarted({ summary, jobs, busy, onNavigate, onStart, step, onStep, onBack, canBack }: Props) {
+  const [counts, setCounts] = useState<Record<string, number> | null>(null);
   const [loading, setLoading] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const request = useRef<AbortController | null>(null), actionLock = useRef(false), mounted = useRef(true);
   const stageTitle = useRef<HTMLHeadingElement>(null);
-  const step = state.step, index = guideSteps.indexOf(step), active = activeGuideJob(jobs, step);
-  useBackLayer(state.history.length > 0, () => setState(backGuide), 30);
+  const index = guideSteps.indexOf(step), active = activeGuideJob(jobs, step);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; request.current?.abort(); }; }, []);
-  useEffect(() => { saveGuideState(state); stageTitle.current?.focus({ preventScroll: true }); }, [state]);
+  useEffect(() => { stageTitle.current?.focus({ preventScroll: true }); }, [step]);
   async function load() {
     if (!mounted.current) return;
     request.current?.abort(); const controller = new AbortController(); request.current = controller; setLoading(true);
@@ -34,7 +33,7 @@ export function GettingStarted({ summary, jobs, busy, onNavigate, onStart }: Pro
   const jobStates = jobs.map(job => `${job.id}:${job.state}`).join('|');
   useEffect(() => { void load(); return () => request.current?.abort(); }, [jobStates]);
   const number = (key: string) => { const value = countValue(counts?.[key]); return value === null ? '-' : value.toLocaleString('ru-RU'); };
-  function change(next: GuideStep) { setState(current => moveGuide(current, next)); setNotice(''); }
+  function change(next: GuideStep) { onStep(next); setNotice(''); }
   async function start() {
     const kind = guideJobKind(step);
     if (!kind || active || actionLock.current || busy) return;
@@ -64,7 +63,7 @@ export function GettingStarted({ summary, jobs, busy, onNavigate, onStart }: Pro
       {step === 'review' && <><p className="guide-lead">Проверьте найденное на нескольких треках, сохраните предложение и только затем запишите его в файл.</p><ol className="guide-checklist"><li>Откройте трек и сравните теги с исходными значениями.</li><li>Выберите подходящую обложку и текст. Прослушайте, проверьте версию записи и таймкоды.</li><li>Сохраните предложение. Это еще не меняет аудио.</li><li>Запишите проверенные изменения. Предыдущая версия сохраняется для отката.</li></ol><p className="muted">Актуальных сохраненных предложений: {number('current_proposals')}. Нет обязательного требования принять сомнительное совпадение: оставьте такой файл для ручной проверки.</p><div className="button-row"><button className="button primary" onClick={() => onNavigate('review')}>Открыть проверку треков<ArrowRight size={18}/></button><button className="button secondary" onClick={() => onNavigate('reports')}>Посмотреть, чего не хватает</button></div>{summary?.read_only && <div className="notice warning">Запись отключена текущим режимом хранилища.</div>}</>}
       {step === 'ready' && <><p className="guide-lead">Опубликуйте проверенные версии в готовую коллекцию, затем подготовьте экспорт для устройства.</p><div className="guide-facts"><div><strong>{number('published_current')}</strong><span>опубликованных текущих версий</span></div></div><p className="muted">Откройте план публикации в карточке трека или раздел готовой коллекции. Приложение проверит ревизию, метаданные и приемку текста. Публикация не означает, что файл уже доставлен на телефон.</p><div className="button-row"><button className="button primary" onClick={() => onNavigate('ready')}>Открыть готовую коллекцию<ArrowRight size={18}/></button><button className="button secondary" onClick={() => onNavigate('reports')}>Отчет по оставшимся файлам</button></div></>}
       {guideJobKind(step) && <div className="guide-operation">{active ? <><p role="status">Этот этап уже есть в обработке. Новую копию задачи создавать не нужно; пауза, ожидание источника и отложенный повтор тоже сохраняют задачу.</p><button className="button primary" onClick={() => onNavigate('jobs')}>Открыть ход обработки<ArrowRight size={18}/></button></> : <><button className="button primary" disabled={busy || submitting || !!disabledReason || loading} onClick={() => void start()}>{submitting ? 'Добавляем задачу...' : step === 'scan' ? 'Сканировать папку' : step === 'recognize' ? 'Распознать необработанные файлы' : 'Найти недостающие результаты'}<ArrowRight size={18}/></button>{disabledReason && <p className="muted small">{disabledReason}</p>}<button className="button subtle" onClick={() => onNavigate('jobs')}>Посмотреть задачи</button></>}</div>}
-      <footer className="guide-footer"><button className="button secondary" disabled={!state.history.length} onClick={() => setState(backGuide)}><ArrowLeft size={17}/>Назад</button>{index < guideSteps.length-1 && <button className="button secondary" onClick={() => change(guideSteps[index+1])}>Следующий шаг<ArrowRight size={17}/></button>}</footer>
+      <footer className="guide-footer"><button className="button secondary" disabled={!canBack} onClick={onBack}><ArrowLeft size={17}/>Назад</button>{index < guideSteps.length-1 && <button className="button secondary" onClick={() => change(guideSteps[index+1])}>Следующий шаг<ArrowRight size={17}/></button>}</footer>
     </section><p className="quiet-note">Шаг мастера показывает, где вы находитесь в инструкции. Он не является процентом готовности коллекции.</p>
   </div>;
 }

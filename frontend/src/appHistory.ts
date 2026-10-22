@@ -13,7 +13,7 @@ type Options = {
 };
 const limit = 100;
 const clean = (view: ViewState) => parseView(JSON.stringify(view));
-export const navigationKey = (view: ViewState) => JSON.stringify([view.page, view.query, view.filter, view.pageNumber, view.selectedId]);
+export const navigationKey = (view: ViewState) => JSON.stringify([view.page, view.query, view.filter, view.pageNumber, view.selectedId, view.page === 'guide' ? view.guideStep || 'folder' : null]);
 
 export function historyMarker(value: unknown): HistoryMarker | null {
   if (!value || typeof value !== 'object') return null;

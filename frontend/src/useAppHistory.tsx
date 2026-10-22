@@ -71,7 +71,7 @@ export function useAppHistory(options: { authenticated: boolean; view: Omit<View
     return () => { window.removeEventListener('popstate', pop); window.removeEventListener('pagehide', remember);
       window.removeEventListener('scroll', remember, true); window.removeEventListener('keydown', keyboard); document.removeEventListener('toggle', toggle, true); document.removeEventListener('focusout', blur); };
   }, [options.authenticated]);
-  useLayoutEffect(() => { engine.current?.remember(callbacks.current.capture()); }, [options.view.page, options.view.query, options.view.filter, options.view.pageNumber, options.view.selectedId]);
+  useLayoutEffect(() => { engine.current?.remember(callbacks.current.capture()); }, [options.view.page, options.view.query, options.view.filter, options.view.pageNumber, options.view.selectedId, options.view.guideStep]);
   return { layers, canBack: !!engine.current?.canBack || !!closers.current.size || disclosures.current.some(element => element.isConnected && element.open),
     back: () => engine.current?.back(), endGroup: () => engine.current?.endGroup(),
     push: (next: ViewState, group?: string, before = callbacks.current.capture()) => engine.current?.push(before, next, group),

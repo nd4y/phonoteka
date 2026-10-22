@@ -38,6 +38,18 @@ function fixture(initial = { ...emptyView }, available = true) {
 }
 
 describe('application Back navigation', () => {
+  it('keeps wizard steps and help visits in the same action order across reload', () => {
+    const f = fixture();
+    f.push({page:'guide',guideStep:'folder'});
+    f.push({guideStep:'scan'}); f.push({guideStep:'recognize'});
+    f.push({page:'help'}); f.push({page:'guide'});
+    f.reload();
+    f.back(); expect(f.view.page).toBe('help');
+    f.nativeBack(); expect(f.view).toMatchObject({page:'guide',guideStep:'recognize'});
+    f.back(); expect(f.view).toMatchObject({page:'guide',guideStep:'scan'});
+    f.back(); expect(f.view).toMatchObject({page:'guide',guideStep:'folder'});
+    f.back(); expect(f.view.page).toBe('library');
+  });
   it('a newer catalog action cancels pending details without rewriting that action in history', async () => {
     const f = fixture(), sequence = { current: 0 };
     let resolve!: (track: string) => void;

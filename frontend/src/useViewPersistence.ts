@@ -37,7 +37,7 @@ export function useViewPersistence(view: Omit<ViewState, 'scroll' | 'queueScroll
     window.addEventListener('keydown', userAction, { once: true });
     return () => { observer.disconnect(); clearTimeout(timer); window.removeEventListener('pointerdown', userAction); window.removeEventListener('wheel', userAction); window.removeEventListener('keydown', userAction); };
   }, [ready, authenticated, restoreVersion]);
-  useEffect(() => { writeRef.current(); }, [view.page, view.query, view.filter, view.pageNumber, view.selectedId]);
+  useEffect(() => { writeRef.current(); }, [view.page, view.query, view.filter, view.pageNumber, view.selectedId, view.guideStep]);
   useEffect(() => {
     const remember = () => writeRef.current();
     window.addEventListener('scroll', remember, { passive: true, capture: true });
