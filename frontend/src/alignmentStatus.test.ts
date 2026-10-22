@@ -14,9 +14,11 @@ describe('ASR result explanation', () => {
     expect(alignmentStatus(analysis([{probability:.9}], [{start_ms:1000,reason:'requires_listening'}]))?.code).toBe('requires_listening');
   });
   it('warns about words proposed for an instrumental title without classifying the audio', () => {
-    expect(instrumentalTextConflict({tags:{title:['Example (Instrumental)']},proposal:{lrc:'words'}} as Track)).toBe(true);
-    expect(instrumentalTextConflict({tags:{title:'Example'},proposal:{lrc:'words'}} as Track)).toBe(false);
-    expect(instrumentalTextConflict({tags:{title:'Example (Instrumental)'}} as Track)).toBe(false);
-    expect(instrumentalTextConflict({tags:{title:'Пример (Инструментал)'},lyrics:'words'} as Track)).toBe(true);
+    const track = (values: Partial<Track>): Track => ({id:'test', relative_path:'test.mp3', sha256:'test', revision:'test', format:'mp3', tags:{}, has_art:false, status:'scanned', can_write:false, ...values});
+    const proposal = {id:'proposal',input_sha256:'test',tags:{},lrc:'words'};
+    expect(instrumentalTextConflict(track({tags:{title:['Example (Instrumental)']},proposal}))).toBe(true);
+    expect(instrumentalTextConflict(track({tags:{title:'Example'},proposal}))).toBe(false);
+    expect(instrumentalTextConflict(track({tags:{title:'Example (Instrumental)'}}))).toBe(false);
+    expect(instrumentalTextConflict(track({tags:{title:'Пример (Инструментал)'},lyrics:'words'}))).toBe(true);
   });
 });
