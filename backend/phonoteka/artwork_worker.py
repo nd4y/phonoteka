@@ -15,11 +15,11 @@ MAX_PIXELS = 25_000_000
 def transform(raw, options=None):
     if not isinstance(raw, bytes) or len(raw) > MAX_SOURCE_BYTES: raise ValueError('Source image exceeds 20 MiB')
     Image.MAX_IMAGE_PIXELS = MAX_PIXELS
-    with Image.open(io.BytesIO(raw)) as probe:
+    with Image.open(io.BytesIO(raw), formats=['JPEG', 'PNG']) as probe:
         if probe.format not in {'JPEG', 'PNG'} or probe.width * probe.height > MAX_PIXELS:
             raise ValueError('Only JPEG/PNG with at most 25 megapixels is supported')
         probe.verify()
-    with Image.open(io.BytesIO(raw)) as image:
+    with Image.open(io.BytesIO(raw), formats=['JPEG', 'PNG']) as image:
         if image.format not in {'JPEG', 'PNG'} or image.width * image.height > MAX_PIXELS:
             raise ValueError('Only JPEG/PNG with at most 25 megapixels is supported')
         if getattr(image, 'is_animated', False): raise ValueError('Animated artwork requires an explicit still-image conversion')

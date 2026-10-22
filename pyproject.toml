@@ -12,7 +12,7 @@ dependencies = [
   "uvicorn==0.42.0",
   "argon2-cffi==25.1.0",
   "mutagen==1.47.0",
-  "Pillow==12.3.0",
+  "Pillow==13.0.0",
   "httpx==0.28.1",
   "shazamio==0.8.1",
   "yt-dlp==2026.8.19",

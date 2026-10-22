@@ -3,7 +3,7 @@ import { AppHistory, appHistoryKey, historyMarker, readAppHistory } from './appH
 import type { HistoryMarker } from './appHistory';
 import { emptyView } from './viewState';
 import type { ViewState } from './viewState';
-import { acceptDetailNavigation, loadLatestDetail } from './detailNavigation';
+import { acceptDetailNavigation, loadLatestResult } from './detailNavigation';
 
 function fixture(initial = { ...emptyView }, available = true) {
   const values = new Map<string, string>();
@@ -42,7 +42,7 @@ describe('application Back navigation', () => {
     const f = fixture(), sequence = { current: 0 };
     let resolve!: (track: string) => void;
     const response = new Promise<string>(yes => { resolve = yes; });
-    const pending = loadLatestDetail(sequence, () => response,
+    const pending = loadLatestResult(sequence, () => response,
       id => f.push({ page: 'review', selectedId: id }), vi.fn(), vi.fn());
     acceptDetailNavigation(sequence, () => true);
     f.push({ filter: 'missing_lyrics', pageNumber: 2 });

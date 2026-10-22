@@ -2490,3 +2490,29 @@ UI/метрики/будущийOTel: отдельноqueue_wait/audio_prepare/u
 Качество не пройдено:54строки/0ASRwords/0aligned(languageen) и12строк/11ASRwords/0aligned(languagela),итог0из66. Обеalignmentpartially_aligned/coverage0/completefalse/automatic_acceptancefalse. Детектlanguageнеобъявляетсядоказательствомреальногоязыка или причиныошибки. Нельзяавтоматическивыбратьязык,выдуматьтаймкодыилиутверждатьготовностькараоке. Индикацияsucceededозначаетвыполненныйрасчет, а не провереннуюмузыку.
 
 ФизическиеSHAобоихаудиофайловпослепилотасовпалисзамороженнойselectionисcurrentcatalog; аудио/теги/LRCнеперезаписывались. Resultsосталисьчерновиками. OPSevidenceasr-pilot-proof-37abe011106b437ebf782120a73c62ab.json, timingandbaselineJSONsretainedбезтекстовпесен. HumanPoweramp/музыкальнаяприемкаостаетсяотложенной;внешниепровайдерынереализованы/невключены. Следующийразумныйшаг-пилотсравненияlocal/externalASR+forcedalignmentпоCHG040,послевыборапровайдера/ключа/бюджета/разрешенияаудиопередачи;массово74неотправлялись.
+
+
+## CHG-041 - 22.10.2026: ревью и готовность к эксплуатации без новых функций
+
+Владелец запросил ревью проделанной работы и доведение существующего продукта до Production Ready. Новые функции требуют отдельного согласования. Исправление выявленных дефектов, security patch, проверки и контролируемая поставка остаются в объеме. Внешний ASR/облачные источники/OTLP не включаются автоматически по этому запросу.
+
+Критерии готовности: сохранность оригиналов/версий, CAS/native packet/full decode, проверяемые cancel/restart/auth/expiry/live updates, совместимые зависимости без необработанных известных критических рисков, matched CI images/checkpoint/rollback и postflight, честный статус ASR и коллекции, закрытая финальная приемка согласованных сценариев. Результаты и конкретные причины незакрытых пунктов ведутся в docs/production-readiness.md. Alpha не переименовывать в stable ради формальной отметки.
+
+## CHECK-039 - 22.10.2026: промежуточное ревью существующего продукта
+
+Проверены исходники auth/API, очередь/UI/SSE, PWA build/cache policy, image parsing, документы и фактическая поставка. Повторная st1 read-only: установлен bb98d3e, все3 healthy/restart0/OOMfalse. Существующие CI/postflight artifacts перечитаны:610 backend/170 frontend,19/7/15,42target/19origin/63queries без ошибок. Старые docs, называвшие установленным0.6, а поставку будущей, актуализируются с сохранением исторических CHECK.
+
+Read-only внешний исполнитель проверил ограниченные frontend-файлы, без правок/shell/секретов,12шагов,4.536873487947371руб; статусneeds_review. Предварительные находки независимо сверены по backend cancel и frontend lifecycle. Подготовлены исправления CLOSED EventSource reconnect, привязки activity кjobID, cancelled без ложного red alert, проброса cancel failure, latest-generation status/track requests и инвалидации при logout/expiry. Первые6transport+2render regressions и весьfrontend gate наbuild-01 прошли178tests/30files/build/PWA. Этот запуск предшествует последнему latest-generation/security patch; повтор обязателен.
+
+Read-only GitHub Dependabot API ответилalerts disabled/403; токен/настройки не расширялись. npm advisory bulk API проверил146 package names и нашел2moderate @vitest/mocker4.1.11; OSVquerybatch61Pythonpins нашелcertifi2026.7.22 иPillow12.3.0. Первичные advisories и опубликованные исправленные версии проверены; подготовленыcertifi2026.10.19/Pillow13.0.0 и ограничение JPEG/PNG до image parser. GitHub/новыеобразы/st1 пока не объявлены обновленными. Полный OS/package image scan этим не выполнен.
+
+Build-01 сначала2229MiBavailable, первый gate66.366s/1CPU768MiB прошел. Следующая попытка остановилась до контейнера наinsufficient_test_headroom:foreignneko-field71-build потребляет~1.66GiB,available~650-750MiB. Это ресурсный admission отказ, не failed test. Чужая сборка не меняется; VM не перезапускается. Финальные browser/device/music acceptance остаются отложенными и не закрыты unit tests. Новые функции/аккаунты/аудиоegress/массовый ASR не запускались.
+
+
+## CHECK-040 - 22.10.2026: security patch candidate, advisory scan после правок
+
+Для существующего продукта подготовлены exact pins Pillow13.0.0/certifi2026.10.19 в обоих constraints иpyproject, Vitest4.1.12 вpackage/lock. Поскольку даже малый remote lockfile-only helper был остановлен до контейнера из-заavailable<768MiB, Vitest metadata/integrity для8пакетов получены изофициальногоnpmregistry легкимлокальнымчтением; графdependencies сравнен и неизменен с заменойточных4.1.11->4.1.12. Пакеты/компиляция/тесты на ноутбуке не запускались. Npmci наbuild-01 обязателен, ручнойlockdiff не объявлен принятойсборкой.
+
+Повторныйadvisoryscan 10:42:49UTC:146npm package names /61Pythonpins, npmfindings0/OSVfindings0. ОтдельныйOPSevidenceproduction-advisories-after-383952505cf746c6b2a2f69c85a497a1.json; прежниеположительные находки сохранены. Scan касаетсяподготовленныхpins, не ужеустановленногоbbimage/OSlayers. СуществующееизолированноеJPEG/PNG декодирование получаетformatsallowlist доparser; regression проверяет,чтоGIFparserневызывается. ПолныйCI иbuild-01 compatibility еще требуются, новыеобразы/st1 невыданызаготовые.
+
+R-04 уточнен:status snapshotsупорядочены поissued/committed, поэтомузапоздавшийстарыйответнеотменяетновый иslowHTTPневызываетвечногоподавленияprogressпричастомpoll. Logout/expiryставятбарьердлявсехужеотправленныхstatus/track/detail. Добавленыregressionsдляreversecompletion,slowpoll иauthreset; ещеожидаютremotegate. ProductionReady/полноеТЗнеобъявленывыполненными. Пользовательскиеновыефункции/интеграции/внешнийASRнет.

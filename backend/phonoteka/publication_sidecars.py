@@ -67,7 +67,7 @@ def content(settings, member, kind):
             data = raw
         else:
             # Explicit, frozen conversion profile, including the alpha background.
-            with Image.open(io.BytesIO(raw)) as image:
+            with Image.open(io.BytesIO(raw), formats=['JPEG', 'PNG']) as image:
                 rgba = image.convert('RGBA')
                 canvas = Image.new('RGB', rgba.size, 'white')
                 canvas.paste(rgba, mask=rgba.getchannel('A'))

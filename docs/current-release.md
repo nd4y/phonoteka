@@ -1,12 +1,14 @@
-# Current implementation: 0.6.0 alpha
+# Current implementation: 0.7.0 alpha
 
 The application is a single-owner service. Original audio is mounted read-only. Changes are proposed, reviewed, atomically written to the separate working copy, audited, and published to a separate Ready directory. The current image is not a claim that all specification acceptance criteria have passed.
+
+Production revision on 2026-10-22: `bb98d3e42534e59583237fb07237cf2ba38a8a94`. All three installed containers were rechecked healthy with zero restarts/OOM. New review fixes are candidates until matched CI artifacts and deployment are verified. See [release readiness](production-readiness.md).
 
 ## Available
 
 - Accessible audio preview controls shared by normal tracks and CUE: play/pause, stop, bounded seeking and 10-second jumps, exact time entry, volume/mute, 0.5x-2x speed and repeat. CUE controls show composition-relative time and remain within its boundaries. Lyrics editing uses the same media position. Volume, mute and speed are stored locally; keyboard shortcuts apply only inside the focused player and do not intercept editor inputs. Browser decoding support still determines playable formats.
 
-- Dedicated-token Prometheus metrics for API/worker/inference, aggregate SQLite queue/collection/provider gauges, process counters and duration histograms; JSON stdout logs with generated request IDs and no user file paths or secrets. A reproducible 47-panel Grafana dashboard includes metrics and VictoriaLogs. See [observability](observability.md).
+- Dedicated-token Prometheus metrics for API/worker/inference, aggregate SQLite queue/collection/provider gauges, process counters and duration histograms; JSON stdout logs with generated request IDs and no user file paths or secrets. A reproducible Grafana dashboard with 63 verified queries includes metrics and VictoriaLogs. See [observability](observability.md).
 
 - YouTube provenance from embedded URLs, yt-dlp filenames and bounded sidecars, inherited source links for derivatives, owner confirmation/unlink, public video metadata and up to three search candidates using pinned yt-dlp without media downloads/cookies. Search does not establish the exact original upload. See [YouTube provenance](youtube.md).
 
@@ -27,7 +29,7 @@ Track ReplayGain analysis produces gain/peak tag proposals and uses the existing
 
 Copy `.env.example`, configure disjoint local paths and the two immutable tested image digests. Create an owner password and a separate random inference key in protected files readable only by the configured UID, and create the state/inference directories owned by it. Set EXTERNAL_METADATA=true to permit public metadata requests. EXTERNAL_FINGERPRINTS=true separately enables ShazamIO fingerprint requests. MUSICBRAINZ_HOST accepts only musicbrainz.org (default) or the official beta.musicbrainz.org endpoint. The beta server uses the same live database with prerelease server code; see [MusicBrainz documentation](https://musicbrainz.org/doc/MusicBrainz_Server/Internationalization). HTTPS verification and shared provider request limits remain enforced. INFERENCE_URL=http://inference:8001 enables the local ASR service. Never expose port 8001; only app is published through the authenticated internal reverse proxy. The inference service has read-only access to the working collection, no original or publication mount, and no owner password.
 
-GitHub verifies real codecs, frontend, container behavior and real model inference before publishing either image. The model is included in the inference image; production does not download weights. Update only with idle jobs and a checked backup of state, secrets, storage guard and inference state. Restore the previous compose and matching checkpoint for rollback, preserving separate media history. Additive database tables retain schema 1 compatibility.
+GitHub verifies real codecs, frontend, container behavior and real model inference before publishing either image. The model is included in the inference image; production does not download weights. Update only with idle jobs and a checked backup of state, secrets, storage guard and inference state. Restore the previous compose and matching checkpoint for rollback, preserving separate media history. The deployed database uses schema 2. Follow the explicit offline migration/checkpoint procedure; old workers must not write to the migrated state.
 
 ## Remaining acceptance boundaries
 

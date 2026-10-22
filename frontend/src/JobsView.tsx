@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Activity, ArrowDown, CheckCheck, ChevronDown, CircleAlert, Clock3, FileAudio, LoaderCircle, Pause, Play, RefreshCw, ShieldCheck, Square, Wifi, WifiOff, X } from 'lucide-react';
 import { api, messageFor } from './api';
-import { etaText, isActiveJob, jobNames, jobStates, jobTone, mergeActivityEvents, needsJobAuthorization } from './jobs';
+import { etaText, isActiveJob, jobNames, jobStates, jobTone, needsJobAuthorization, jobErrorMessage } from './jobs';
+import { emptyActivityFeed, subscribeJobActivity } from './jobActivityFeed';
 import { JobAuthorizationPanel, reauthorizationMessage, reauthorizationRequest } from './JobAuthorization';
-import type { ActivityEvent, JobActivity, LiveJob } from './jobs';
+import type { ActivityEvent, LiveJob } from './jobs';
 import type { Job } from './types';
 import './JobsView.css';
 import { useBackLayer } from './useAppHistory';
 import { ProcessingStages } from './ProcessingStages';
 
 type Props = { jobs: Job[]; refresh: () => Promise<void>; onCancel: (id: string) => Promise<void> };
-type Connection = 'connecting' | 'live' | 'reconnecting' | 'offline';
 const dateOf = (value: string) => new Date(value).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
 const timeOf = (value: string) => new Date(value).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 const count = (value: number) => value.toLocaleString('ru-RU');
@@ -83,10 +83,8 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
   const [selectedId, setSelectedId] = useState(() => jobs.find(job => job.id === rememberedJob())?.id || jobs.find(isActiveJob)?.id || jobs[0]?.id || '');
   const [manualActivity, setManualActivity] = useState(false);
   useBackLayer(manualActivity && !!selectedId, () => { setSelectedId(''); setManualActivity(false); });
-  const [activity, setActivity] = useState<JobActivity | null>(null);
-  const [events, setEvents] = useState<ActivityEvent[]>([]);
-  const [connection, setConnection] = useState<Connection>('connecting');
-  const [error, setError] = useState('');
+  const [feedState, setFeedState] = useState(() => emptyActivityFeed(selectedId));
+  const { activity, events, connection, error } = feedState.jobId === selectedId ? feedState : emptyActivityFeed(selectedId);
   const [controlError, setControlError] = useState('');
   const [pending, setPending] = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -103,50 +101,9 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
 
   useEffect(() => {
     if (!selectedId) return;
-    let stopped = false;
-    let source: EventSource | undefined;
-    let fetchBusy = false;
-    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-    const controller = new AbortController();
-    setActivity(null); setEvents([]); setError(''); setConnection(navigator.onLine ? 'connecting' : 'offline');
-    async function load(initial = false) {
-      if (stopped || fetchBusy) return;
-      fetchBusy = true;
-      try {
-        const snapshot = await api<JobActivity>(`/jobs/${encodeURIComponent(selectedId)}/activity?limit=200`, { signal: controller.signal });
-        if (stopped) return;
-        setActivity(snapshot); setError('');
-        setEvents(previous => snapshot.resync_required ? snapshot.events : mergeActivityEvents(previous, snapshot.events));
-        if (initial) {
-          source = new EventSource(`/api/jobs/${encodeURIComponent(selectedId)}/events?after=${snapshot.cursor}`);
-          source.onopen = () => { if (!stopped) setConnection('live'); };
-          source.onerror = () => { if (!stopped) setConnection(navigator.onLine ? 'reconnecting' : 'offline'); };
-          source.addEventListener('job_activity', event => {
-            if (stopped) return;
-            try {
-              const incoming = JSON.parse((event as MessageEvent<string>).data) as ActivityEvent;
-              setEvents(previous => mergeActivityEvents(previous, [incoming]));
-              if (!refreshTimer) refreshTimer = setTimeout(() => {
-                refreshTimer = undefined; void load(); void currentRefresh.current().catch(() => undefined);
-              }, 350);
-            } catch { /* The periodic snapshot also recovers a malformed/interrupted event. */ }
-          });
-          source.addEventListener('resync_required', () => { setEvents([]); void load(); });
-        }
-      } catch (err) {
-        if (!stopped) { setError(messageFor(err)); setConnection(navigator.onLine ? 'reconnecting' : 'offline'); }
-      } finally { fetchBusy = false; }
-    }
-    refreshSelected.current = () => load(!source);
-    void load(true);
-    const poll = setInterval(() => { void load(!source); }, 6000);
-    function offline() { setConnection('offline'); }
-    function online() { setConnection('reconnecting'); void load(!source); }
-    window.addEventListener('offline', offline); window.addEventListener('online', online);
-    return () => {
-      stopped = true; controller.abort(); source?.close(); clearInterval(poll); clearTimeout(refreshTimer);
-      refreshSelected.current = null; window.removeEventListener('offline', offline); window.removeEventListener('online', online);
-    };
+    const feed = subscribeJobActivity(selectedId, setFeedState, () => { void currentRefresh.current().catch(() => undefined); });
+    refreshSelected.current = feed.refresh;
+    return () => { feed.stop(); refreshSelected.current = null; };
   }, [selectedId]);
 
   const control = useCallback(async (job: Job, action: 'pause' | 'resume' | 'cancel' | 'retry-storage') => {
@@ -201,9 +158,9 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
           <div className="job-current-action"><Activity size={15} aria-hidden="true" /><span>{job.current_action || jobStates[job.stage] || jobStates[job.state] || 'Подготовка'}{job.active_count ? ` · файлов одновременно: ${job.active_count}` : ''}</span></div>
           {active && !authorizationWaiting && !!job.retry_at && <p className="muted small job-retry">Автоматический повтор после {dateOf(new Date(job.retry_at * 1000).toISOString())}. Выполненные попытки сохраняются.</p>}
           {authorizationWaiting && <JobAuthorizationPanel key={`${job.id}:${job.authorization?.version}`} job={job} pending={pending === job.id} onGrant={scopes => { void reauthorize(job, scopes); }}/>}
-          {job.error && !authorizationWaiting && (job.error === 'partial_scan'
+          {jobErrorMessage(job) && !authorizationWaiting && (job.error === 'partial_scan'
             ? <p className="muted small job-retry">Сканирование завершилось не полностью. Обработанные записи сохранены.</p>
-            : <ErrorNotice message={job.error} />)}
+            : <ErrorNotice message={jobErrorMessage(job)} />)}
           {job.cancel_requested && <p className="muted small job-retry">Уже выполненные изменения сохраняются. Текущая операция с файлом завершается безопасно.</p>}
           <button className="button subtle job-activity-toggle" aria-expanded={expanded} aria-controls={`job-activity-${job.id}`} onClick={() => { setSelectedId(expanded ? '' : job.id); setManualActivity(!expanded); }}><ChevronDown className={expanded ? 'is-expanded' : ''} size={17} />{expanded ? 'Скрыть действия и события' : 'Действия и события'}</button>
           {expanded && <div className="job-activity" id={`job-activity-${job.id}`}>

@@ -41,6 +41,10 @@ export const jobStates: Record<string, string> = {
 };
 export const isActiveJob = (job: Job) => ['queued', 'running', 'pending', 'paused', 'waiting_provider', 'waiting_storage', 'waiting_authorization', 'deferred'].includes(job.state);
 export const needsJobAuthorization = (job: Job) => job.state === 'waiting_authorization' || job.state === 'running' && job.stage === 'waiting_authorization';
+export function jobErrorMessage(job: Job): string {
+  if (['canceled', 'cancelled', 'cancelled_partial'].includes(job.state) && job.error === 'cancelled') return '';
+  return job.error || '';
+}
 export function jobTone(job: Job): 'success' | 'cancelled' | 'error' | 'active' | 'waiting' | 'paused' | 'authorization' {
   if (['canceled', 'cancelled', 'cancelled_partial'].includes(job.state) || job.cancel_requested && isActiveJob(job)) return 'cancelled';
   if (needsJobAuthorization(job)) return 'authorization';

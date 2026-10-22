@@ -44,6 +44,17 @@ def test_alpha_to_jpeg_uses_white_background_and_never_upscales():
         assert actual.size == (64, 32) and all(channel >= 250 for channel in actual.getpixel((0, 0)))
 
 
+def test_rejected_image_formats_never_execute_their_decoder(monkeypatch):
+    from PIL import UnidentifiedImageError
+    raw = image_bytes((16, 16), format='GIF')
+    Image.init()
+    def unsupported_decoder(*args, **kwargs):
+        pytest.fail('Artwork must reject GIF before invoking its parser')
+    monkeypatch.setitem(Image.OPEN, 'GIF', (unsupported_decoder, lambda prefix: prefix.startswith(b'GIF')))
+    with pytest.raises(UnidentifiedImageError):
+        transform(raw)
+
+
 def test_image_validation_limits_actual_decode_and_subprocess_deadline(monkeypatch):
     with pytest.raises(ValueError, match='25 megapixels'): transform(image_bytes((5001, 5000)))
     with pytest.raises(media.MediaError) as oversized: artwork.process(b'x' * (20 * 1024 * 1024 + 1))
