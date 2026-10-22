@@ -494,16 +494,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/jobs")
     def jobs(request: Request, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
-             active_only: bool = False, kind: str = Query('', max_length=64)):
+             active_only: bool = False, active_first: bool = False, kind: str = Query('', max_length=64)):
         security.require_session(request, settings)
         where = ' WHERE 1=1'
         params = []
+        active_states = "state IN ('queued','running','pending','paused','waiting','waiting_provider','waiting_storage','waiting_authorization','deferred')"
         if active_only:
-            where += " AND state IN ('queued','running','pending','paused','waiting','waiting_provider','waiting_storage','waiting_authorization','deferred')"
+            where += ' AND ' + active_states
         if kind:
             where += ' AND kind=?'
             params.append(kind)
-        rows = db.fetchall(settings.db_path, "SELECT * FROM jobs" + where + " ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", (*params,page_size,(page-1)*page_size))
+        order = '(' + active_states + ') DESC,' if active_first else ''
+        rows = db.fetchall(settings.db_path, "SELECT * FROM jobs" + where + " ORDER BY " + order + "created_at DESC,id DESC LIMIT ? OFFSET ?", (*params,page_size,(page-1)*page_size))
         total = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs" + where, params)["n"]
         activity = job_activity.summaries(settings, rows)
         return {"items": [public_job(settings, row, activity=activity[row['id']]) for row in rows], "total": total, "page": page, "page_size": page_size}

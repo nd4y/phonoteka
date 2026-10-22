@@ -257,7 +257,7 @@ export default function App() {
   const loadStatus = useCallback(async () => {
     if (!session?.authenticated) return;
     await loadOrderedResult(statusSequence.current,
-      () => Promise.allSettled([api<Summary>('/summary'), api<{ items: Job[] }>('/jobs')]),
+      () => Promise.allSettled([api<Summary>('/summary'), api<{ items: Job[] }>('/jobs?active_first=true')]),
       results => {
         if (results[0].status === 'fulfilled') setSummary(results[0].value); else setError(messageFor(results[0].reason));
         if (results[1].status === 'fulfilled') setJobs(results[1].value.items); else setError(messageFor(results[1].reason));

@@ -63,3 +63,6 @@ def test_active_job_lookup_finds_old_paused_task_after_recent_history(settings):
         assert [job['id'] for job in active.json()['items']] == ['old-paused']
         assert client.get('/api/jobs?active_only=true&kind=recognize').json()['total'] == 0
         assert client.get('/api/jobs').json()['total'] == 52
+        visible = client.get('/api/jobs?active_first=true').json()
+        assert visible['items'][0]['id'] == 'old-paused'
+        assert len(visible['items']) == 50 and visible['total'] == 52
