@@ -7,10 +7,21 @@ export type LiveJob = Job & {
 export type ActivityEvent = {
   id: number; kind: string; created_at: string; message: string; track_id?: string;
   filename?: string; state?: string; completed?: number; failed?: number; retry_at?: number; code?: string;
+  provider?: string; duration_ms?: number; http_status?: number;
+};
+export type ProcessingStage = {
+  stage_id: string; attempt_id: string; track_id: string; filename?: string | null; stage: string; provider: string | null;
+  state: string; duration_ms: number | null; elapsed_seconds: number | null;
+  http_status: number | null; reason_code: string | null; long_running: boolean;
+  progress_counter?: number; progress_unit?: string; last_progress_age_seconds?: number | null; no_progress_suspected?: boolean;
 };
 export type JobActivity = {
   job: LiveJob; active_items: Array<{ track_id: string | null; filename: string; action: string; started_at?: string | null }>;
   active_items_truncated: boolean; events: ActivityEvent[]; cursor: number; resync_required: boolean; has_more: boolean;
+  server_now?: number; executor_health?: string; heartbeat_age_seconds?: number | null;
+  current_stages?: ProcessingStage[]; stage_history?: ProcessingStage[]; stages_truncated?: boolean;
+  provider_waits?: Array<{track_id: string | null; filename: string; provider: string; reason_code: string; retry_at: number | null; overdue_wait: boolean}>;
+  provider_waits_truncated?: boolean;
 };
 export const jobNames: Record<string, string> = {
   publish_sidecars: 'Публикация LRC и обложек', release_audit: 'Сверка релиза', rollback_ready: 'Откат опубликованной версии',

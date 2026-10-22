@@ -19,8 +19,9 @@ import sys
 import threading
 import time
 import uuid
+from contextvars import copy_context
 
-from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy, provider_attempts, input_readiness, automation, recording_review
+from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy, provider_attempts, input_readiness, automation, recording_review, processing_activity
 from .providers import Providers, ProviderError
 from .config import Settings
 from .telemetry import Metrics, configure_logging, context, log, opaque_id, bounded, KINDS, worker_server
@@ -139,6 +140,7 @@ class Worker:
         self.normal_task = None
         self.metrics = Metrics('worker')
         self.item_started = {}
+        self.activity_generation = str(uuid.uuid4())
         self.authorization_cursor = ''
         # Keep a group's file rename and subsequent catalog/history commit in
         # one lane. Other workers cannot observe our own half-persisted SHA.
@@ -147,11 +149,12 @@ class Worker:
 
     async def io(self, fn, *args, **kwargs):
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.pool, lambda: fn(*args, **kwargs))
+        copied = copy_context()
+        return await loop.run_in_executor(self.pool, lambda: copied.run(fn, *args, **kwargs))
 
     def heartbeat(self):
         db.set_setting(self.settings.db_path, "worker_heartbeat", db.encode({"at": time.time(), "last_seen": db.utcnow(), "state": self.state,
-                        "instance_id": self.settings.instance_id, "read_only": not self.settings.writable,
+                        "instance_id": self.settings.instance_id, "activity_generation": self.activity_generation, "read_only": not self.settings.writable,
                         "file_workers": self.settings.file_workers, "io_threads": self.settings.io_threads}))
 
     async def heartbeats(self):
@@ -253,6 +256,7 @@ class Worker:
             conn.execute("UPDATE jobs SET completed=?,failed=?,updated_at=?,heartbeat=? WHERE id=?", (completed,failed,db.utcnow(),time.time(),job_id))
             db.event(conn, "job_progress", {"job_id": job_id, "completed": completed, "failed": failed, "track_id": key, "state": state})
             kind = conn.execute('SELECT kind FROM jobs WHERE id=?',(job_id,)).fetchone()['kind']
+        processing_activity.outcome(state)
         if state == 'running':
             self.item_started[job_id,key] = time.perf_counter()
         else:
@@ -267,6 +271,7 @@ class Worker:
                 code=bounded(result.get('code'),{'conflict','revision_conflict','needs_review','invalid_lyrics','unsupported_format','authorization_revoked','provider_unavailable','rate_limited','budget_exhausted','cancelled','storage_unavailable','decode_failed','internal_error','recognition_attempt_budget_exhausted','recognition_identity_required'}) if result.get('code') else None)
 
     def item_action(self,job,item,action):
+        processing_activity.action(action)
         with db.transaction(self.settings.db_path) as conn:
             db.event(conn,'job_action',{'job_id':job['id'],'track_id':item['track_id'],'action':action})
         log('item_action',job_id=job['id'],track_id=opaque_id(item['track_id']),kind=job['kind'],action=action)
@@ -849,7 +854,8 @@ class Worker:
             if source['state']=='budget_exhausted':
                 first=db.fetchone(self.settings.db_path,'SELECT MIN(at) AS at FROM provider_calls WHERE provider=?',(source['provider'],))
                 due=(first['at'] if first and first['at'] else time.time())+86401
-            retry.append(max(time.time()+10,due))
+            source['retry_at'] = max(time.time()+10,due)
+            retry.append(source['retry_at'])
         return {'state':result['state'],'candidates':len(result['candidates']),'sources':result['sources'],**({'retry_at':max(retry)} if retry else {})}
 
     async def process_youtube(self, job, item):
@@ -1036,7 +1042,10 @@ class Worker:
                     result["recovery_required"] = True
                 self.item_result(job["id"], key, state, result)
         async def one(item):
-            with context(track_id=opaque_id(item['track_id'])): await one_inner(item)
+            if stop_admission(): return
+            with context(track_id=opaque_id(item['track_id'])), processing_activity.attempt(
+                    self.settings.db_path, job['id'], item['track_id'], self.activity_generation):
+                await one_inner(item)
         await self.bounded_items(items, one, should_stop=stop_admission)
         current=db.fetchone(self.settings.db_path,'SELECT * FROM jobs WHERE id=?',(job['id'],))
         paused=json.loads(current['payload']).get('pause_requested')

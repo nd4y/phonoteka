@@ -1,7 +1,7 @@
 """Bounded asynchronous public metadata providers. Results are proposals, not truth."""
 import asyncio
 import base64
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, ExitStack
 from contextvars import ContextVar
 from difflib import SequenceMatcher
 import hashlib
@@ -13,7 +13,7 @@ import unicodedata
 from urllib.parse import urlsplit
 
 import httpx
-from . import db, media, provider_policy,provider_attempts
+from . import db, media, provider_policy,provider_attempts, processing_activity
 from .telemetry import Metrics, provider_operation
 
 POLICY_VERSION = 'public-v1'
@@ -112,12 +112,15 @@ class Providers:
         # Keep its lock through the whole response and durable outcome. Starting
         # the next gap at completion also prevents a late DB stall from allowing
         # several pre-admitted requests onto the wire together.
-        async with self.request_locks.setdefault(provider,asyncio.Lock()):
-            async with self.semaphore:
-                attempt=await self.throttle(provider,operation,revision,kind)
-                try:yield attempt
-                finally:
-                    self.next[provider]=max(self.next.get(provider,0),time.monotonic()+self.intervals.get(provider,INTERVAL.get(provider,1)))
+        with ExitStack() as waiting:
+            waiting.enter_context(processing_activity.stage('provider_admission', provider))
+            async with self.request_locks.setdefault(provider,asyncio.Lock()):
+                async with self.semaphore:
+                    attempt=await self.throttle(provider,operation,revision,kind)
+                    waiting.close()
+                    try:yield attempt
+                    finally:
+                        self.next[provider]=max(self.next.get(provider,0),time.monotonic()+self.intervals.get(provider,INTERVAL.get(provider,1)))
 
     @asynccontextmanager
     async def request(self,provider,operation,method,url,*,revision=None,input_kind=None,authorize=None,**kwargs):
@@ -129,7 +132,11 @@ class Providers:
                 authorize=authorize or REQUEST_AUTHORIZATION.get()
                 if authorize:await asyncio.to_thread(authorize)
                 await asyncio.to_thread(provider_attempts.mark_sent,self.settings,attempt['id']);sent=True
-                async with self.client.stream(method,url,**kwargs) as response:yield response
+                with processing_activity.stage('provider_http', provider) as measured:
+                    async with self.client.stream(method,url,**kwargs) as response:
+                        measured['http_status'] = response.status_code
+                        processing_activity.checkpoint(1, 'responses')
+                        yield response
             except (ProviderError,ValueError,media.MediaError) as exc:
                 code='invalid_response' if isinstance(exc,ValueError) else 'response_too_large' if getattr(exc,'code',None)=='response_too_large' else 'rate_limited' if getattr(exc,'code',None)=='rate_limited' else 'provider_rejected' if getattr(exc,'code',None)=='provider_unauthorized' else 'provider_error'
                 if not sent and isinstance(exc,media.MediaError) and (exc.code.startswith('authorization_') or exc.code=='cancelled'):
@@ -148,6 +155,7 @@ class Providers:
                 await asyncio.to_thread(provider_attempts.finish,self.settings,attempt['id'],outcome,'not_found' if outcome=='no_match' else 'response_received',status)
 
     @provider_operation('metadata')
+    @processing_activity.provider_lookup
     async def get(self, provider, url, params=None, *, binary=False, headers=None):
         with provider_attempts.request_scope() as attempt_state:
             try:
@@ -195,6 +203,7 @@ class Providers:
                         content=bytearray();limit=5*1024**2 if binary else 2*1024**2
                         async for chunk in response.aiter_bytes():
                             content.extend(chunk)
+                            processing_activity.checkpoint(len(content), 'bytes')
                             if len(content)>limit: raise ProviderError('response_too_large',provider,'Ответ источника превышает лимит')
                         data=base64.b64encode(content).decode() if binary else json.loads(content)
                         if data==[] or isinstance(data,dict) and (data.get('recordings')==[] or data.get('images')==[]):

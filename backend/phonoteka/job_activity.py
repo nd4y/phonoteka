@@ -10,11 +10,11 @@ import math
 import re
 import time
 
-from . import db
+from . import db, processing_activity
 
 
 EVENT_KINDS = {
-    "job_action",
+    "job_action", "job_stage",
     "job_created", "job_started", "job_progress", "job_finished", "job_pause",
     "job_paused", "job_resume", "job_waiting", "job_cancel_requested", "job_authorization_required", "job_reauthorized",
     "album_loudness_measured",
@@ -256,7 +256,13 @@ def safe_event(event, row, tracks, results):
     retry_at = data.get("retry_at")
     if type(retry_at) in {int, float} and math.isfinite(retry_at) and retry_at > 0:
         result["retry_at"] = retry_at
-    if event['kind']=='job_action':
+    if event['kind']=='job_stage':
+        phase=data.get('stage') if isinstance(data.get('stage'),str) else ''
+        result['message']=PHASES.get(phase, {'provider_http':'Запрос внешнего сервиса', 'provider_lookup':'Обращение к источнику', 'provider_admission':'Ожидание допуска к сервису', 'file':'Попытка обработки файла'}.get(phase,'Этап обработки'))
+        if data.get('provider') in processing_activity.PROVIDERS: result['provider']=data['provider']
+        if type(data.get('duration_ms')) in (int,float) and 0 <= data['duration_ms'] < 1e12: result['duration_ms']=data['duration_ms']
+        if type(data.get('http_status')) is int and 100 <= data['http_status'] <= 599: result['http_status']=data['http_status']
+    elif event['kind']=='job_action':
         phase=data.get('action')
         result['message']=PHASES.get(phase,'Действие обработки') if isinstance(phase,str) else 'Действие обработки'
     elif event["kind"] == "job_progress":
@@ -339,7 +345,25 @@ def snapshot(settings, row, limit=80, after=0):
                     "action": phases.get(item['item_key'],ACTIONS.get(row["kind"], "Обработка файла")),
                     "started_at": starts.get(item["item_key"]),
                 })
+    heartbeat = _object(db.setting(settings.db_path, 'worker_heartbeat', '{}'))
+    measurements = processing_activity.project(events, rows, heartbeat, time.time(), job_running=row['state']=='running')
+    for measured in measurements['stage_history']:
+        track = tracks.get(measured['track_id'])
+        measured['filename'] = _filename(track['relative_path']) if track else None
+    waits = []
+    for item in rows:
+        if item['state'] != 'deferred': continue
+        detail = results.get(item['item_key'], {})
+        for source in detail.get('sources', []) if isinstance(detail.get('sources', []), list) else []:
+            if not isinstance(source, dict) or source.get('provider') not in processing_activity.PROVIDERS: continue
+            if not isinstance(source.get('state'),str) or source['state'] not in {'rate_limited','provider_cooldown','provider_unavailable','budget_exhausted'}: continue
+            retry = source.get('retry_at', detail.get('retry_at'))
+            retry = retry if type(retry) in (int,float) and math.isfinite(retry) and retry > 0 else None
+            waits.append({'track_id': item['id'], 'filename': _filename(item['relative_path']),
+                'provider': source['provider'], 'reason_code': source['state'], 'retry_at': retry,
+                'overdue_wait': bool(retry is not None and time.time() > retry+30)})
     return {
+        **measurements, 'provider_waits': waits[:100], 'provider_waits_truncated': len(waits)>100,
         "summary": {**estimate(row, events), "current_action": action_for(row), "active_count": len(active)},
         "active_items": active[:100], "active_items_truncated": len(active) > 100,
         "events": [safe_event(event, row, tracks, results) for event in selected],
