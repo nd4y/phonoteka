@@ -44,6 +44,32 @@ describe('generated worker lifecycle and offline behavior', () => {
     expect(respondWith).not.toHaveBeenCalled();
     expect(f.caches.open).not.toHaveBeenCalled();
   });
+  it.each([500, 502, 503, 504])('uses the public shell for HTTP %s without caching an error page', async status => {
+    const f = fixture();
+    f.fetch.mockResolvedValue(new Response('origin unavailable', { status }));
+    let response;
+    f.handlers.get('fetch')({ request: { method: 'GET', mode: 'navigate', headers: new Headers(), url: 'https://music.example/' }, respondWith: promise => { response = promise; } });
+    expect(await (await response).text()).toBe('public shell');
+    expect(f.cache.addAll).not.toHaveBeenCalled();
+  });
+  it.each([200, 302, 401, 403, 404])('preserves HTTP %s instead of masking it with the shell', async status => {
+    const f = fixture();
+    const original = new Response('origin response', { status });
+    f.fetch.mockResolvedValue(original);
+    let response;
+    f.handlers.get('fetch')({ request: { method: 'GET', mode: 'navigate', headers: new Headers(), url: 'https://music.example/' }, respondWith: promise => { response = promise; } });
+    expect(await response).toBe(original);
+    expect(f.caches.open).not.toHaveBeenCalled();
+  });
+  it('preserves a server failure if no public shell is available', async () => {
+    const f = fixture();
+    const original = new Response('origin unavailable', { status: 503 });
+    f.fetch.mockResolvedValue(original);
+    f.cache.match.mockResolvedValue(undefined);
+    let response;
+    f.handlers.get('fetch')({ request: { method: 'GET', mode: 'navigate', headers: new Headers(), url: 'https://music.example/' }, respondWith: promise => { response = promise; } });
+    expect(await response).toBe(original);
+  });
   it('activates a waiting update only on the explicit application message', async () => {
     const f = fixture();
     f.handlers.get('message')({ data: { type: 'something-else' } });

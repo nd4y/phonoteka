@@ -25,11 +25,37 @@ def summary(settings, conn=None):
             return summary(settings,active)
     exact=defaultdict(list);audio=defaultdict(list);albums=defaultdict(list);candidates=defaultdict(list);by_id={}
     counts={'youtube_recorded':0,'youtube_confirmed':0,'youtube_candidates':0,'youtube_conflicts':0,'files':0,'cue_sheets':0,'input_errors':0,'writable_profiles':0,'with_lyrics':0,'with_cover':0,'analyzed':0,'with_candidates':0,'no_match':0,'asr_drafts':0,'fingerprint_matches':0,'fingerprint_no_match':0,'fingerprint_unavailable':0}
-    for row,meta in rows(settings,conn):
+    counts.update(dict.fromkeys(('audio_files','with_core_tags','audit_clean','audit_warnings','audit_errors','audit_unchecked',
+        'published_current','current_proposals','stale_analysis','eligible_files','metadata_pending','recognition_pending'),0))
+    # Match the editor: only the newest proposal is visible, and its input must
+    # still be current. A source candidate is not a saved proposal.
+    proposals={r['track_id']:r for r in conn.execute('''SELECT track_id,input_sha256 FROM (
+        SELECT track_id,input_sha256,ROW_NUMBER() OVER(PARTITION BY track_id ORDER BY created_at DESC,rowid DESC) AS rank
+        FROM proposals) WHERE rank=1''')}
+    for row in conn.execute('''SELECT t.*,a.input_sha256 AS analysis_sha,a.payload AS analysis_payload
+        FROM tracks t LEFT JOIN analyses a ON a.track_id=t.id WHERE t.is_current=1 ORDER BY t.relative_path'''):
+        meta=json.loads(row['metadata'])
         counts['files']+=1
         state=meta.get('youtube',{}).get('state')
         for key,value in [('youtube_recorded','recorded'),('youtube_confirmed','owner_confirmed'),('youtube_candidates','candidates'),('youtube_conflicts','conflict')]:counts[key]+=state==value
         if meta.get('format')=='cue':counts['cue_sheets']+=1;continue
+        counts['audio_files']+=1
+        tags=meta.get('tags',{})
+        counts['with_core_tags']+=all(bool(scalar(tags,key).strip()) for key in ('title','artist','album'))
+        audit=audit_status.describe(meta,row['sha256'],row['status'])['audit_status']
+        counts[{'passed':'audit_clean','warning':'audit_warnings','error':'audit_errors','unchecked':'audit_unchecked'}[audit]]+=1
+        counts['published_current']+=(meta.get('publication') or {}).get('sha256')==row['sha256']
+        proposal=proposals.get(row['id'])
+        counts['current_proposals']+=bool(proposal and proposal['input_sha256']==row['sha256'])
+        current=row['analysis_sha']==row['sha256']
+        counts['stale_analysis']+=bool(row['analysis_sha'] and not current)
+        eligible=row['status'] not in ('error','missing') and not meta.get('cue_album_image',False)
+        counts['eligible_files']+=eligible
+        if eligible:
+            sources={s.get('provider'):s.get('state') for s in json.loads(row['analysis_payload']).get('sources',[])} if current else {}
+            done={'candidates','candidate','no_match','fingerprint_match'}
+            counts['metadata_pending']+=any(sources.get(provider) not in done for provider in ('musicbrainz','lrclib'))
+            counts['recognition_pending']+=sources.get('shazam') not in done
         counts['input_errors']+=bool(meta.get('input_error'))
         counts['writable_profiles']+=bool(meta.get('write_supported')) and not meta.get('cue_album_image',False)
         counts['with_lyrics']+=bool(meta.get('lrc'));counts['with_cover']+=bool(meta.get('has_art'))
@@ -68,7 +94,7 @@ def summary(settings, conn=None):
         duplicate_numbers={disc:sorted({n for n in numbers if numbers.count(n)>1}) for disc,numbers in observed.items()}
         album_report.append({'album':items[0]['album'],'artist':items[0]['artist'],'files':len(items),'missing_by_tags':missing,'duplicate_numbers':duplicate_numbers,'release_completeness':'unknown','ids':[x['id'] for x in items]})
     candidate_groups=[{'evidence':key[0],'verified_duplicate':False,'warning':'Совпадение идентификатора не подтверждает исполнение, мастеринг или издание','files':list({x['id']:x for x in values}.values())} for key,values in candidates.items() if len({x['id'] for x in values})>1]
-    return {'counts':counts,'exact_duplicates':[x for x in exact.values() if len(x)>1][:100],'same_audio_packets':[x for x in audio.values() if len(x)>1][:100],'recording_candidates':candidate_groups[:100],'albums':album_report[:500],'limits':{'duplicate_groups':100,'albums':500},'deletion_available':False}
+    return {'counts':counts,'generated_at':db.utcnow(),'exact_duplicates':[x for x in exact.values() if len(x)>1][:100],'same_audio_packets':[x for x in audio.values() if len(x)>1][:100],'recording_candidates':candidate_groups[:100],'albums':album_report[:500],'limits':{'duplicate_groups':100,'albums':500},'deletion_available':False}
 
 
 def safe_code(value):

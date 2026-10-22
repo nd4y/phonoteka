@@ -33,10 +33,17 @@ async function publicAsset(path, request) {
 self.addEventListener('fetch', event => {
   const kind = pwaRequestKind(event.request, self.location.origin, PRECACHE);
   if (kind === 'navigation') {
-    event.respondWith(fetch(event.request, { cache: 'no-store' }).catch(async () => {
+    event.respondWith((async () => {
+      let response;
+      try {
+        response = await fetch(event.request, { cache: 'no-store' });
+        if (response.status < 500) return response;
+      } catch {
+        // A disconnected network and an unavailable origin share the public shell.
+      }
       const shell = await caches.open(CACHE).then(cache => cache.match('/index.html'));
-      return shell || Response.error();
-    }));
+      return shell || response || Response.error();
+    })());
   } else {
     // A tab that stayed open across an update may request an older hashed asset.
     // Look it up only in our public shell caches; never add a runtime response.

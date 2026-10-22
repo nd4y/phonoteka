@@ -1,6 +1,6 @@
-export type Page = 'library' | 'review' | 'lyrics' | 'jobs' | 'ready' | 'settings' | 'reports';
+export type Page = 'library' | 'review' | 'lyrics' | 'jobs' | 'ready' | 'settings' | 'reports' | 'guide' | 'help';
 export type ViewState = { page: Page; query: string; filter: string; pageNumber: number; selectedId: string; scroll: number; queueScroll: number };
-const pages: Page[] = ['library', 'review', 'lyrics', 'jobs', 'ready', 'settings', 'reports'];
+const pages: Page[] = ['library', 'review', 'lyrics', 'jobs', 'ready', 'settings', 'reports', 'guide', 'help'];
 const filters = ['all', 'cue', 'review', 'missing_lyrics', 'missing_art', 'published', 'audit_errors', 'audit_warnings', 'audit_unchecked', 'audit_passed'];
 export const viewKey = 'phonoteka-view-v1';
 export const emptyView: ViewState = { page: 'library', query: '', filter: 'all', pageNumber: 1, selectedId: '', scroll: 0, queueScroll: 0 };
