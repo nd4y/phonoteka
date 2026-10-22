@@ -62,3 +62,8 @@ Read-only GitHub Dependabot alerts оказались выключены/нед�
 После штатного startup interval все контейнеры healthy / restart 0 / OOM false. Прошли 42 target и 19 origin проверки, JSON stdout/metrics и все 63 Grafana queries. Независимый read-only exec подтвердил Pillow 13.0.0 и certifi 2026.10.19 в app/worker/inference. App фактически отдает новый bundle `index-KGXIZR8X.js` и service worker shell `55cba0a795dd69213a64`; это проверка HTTP-ресурсов, а не приемка установленной PWA на телефоне.
 
 Сама поставка не запускала collection jobs, записи аудио, автоматического принятия ASR или новых провайдеров. Последующая разрешенная браузерная приемка запустила и отменила только один read-only аудит; операция безопасно завершила текущий файл. Все три контейнера после нее остаются healthy/restart 0/OOM false. По-прежнему нельзя объявить весь продукт Production Ready до закрытия перечисленных PWA/device/music условий.
+
+
+## Согласованное дополнение CHG-044
+
+Пользователь отдельно согласовал справку/мастер и понятный отчет. [Кандидат f41bba9](collection-guide-review.md) прошел build-01:210frontend/105backend, PWA build/npm audit0 и описанный Edge протокол (Back/F5/responsive/origin502/reconnect/logout). Разбор [ASR0/66](asr-zero-pilot-review.md) подтвердил отсутствие независимых опор и неподходящий положительный пилот, без ослабления порогов или записи выдуманного времени. Кандидат еще ожидает matched GitHub images и controlled production update; решение о полной готовности не изменено.

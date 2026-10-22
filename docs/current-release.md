@@ -44,3 +44,8 @@ Opt-in ShazamIO fingerprint recognition works without an API key; the unofficial
 Scoped expiring bearer tokens, owner-only token management, a durable opt-in scan/recognize/analyze/ReplayGain schedule, verified Ready manifests and portable M3U8 playlists are implemented. See [automation](automation.md). Shazam 429 and provider outages defer the job with a persisted retry time rather than marking all skipped files complete. Finished items survive retry/restart. Daily budgets are not reset to force completion. Failed ASR requests receive a new generation on explicit retry.
 
 Jobs support pause/resume at file boundaries. Offline state backup/restore verifies artifacts, excludes active tokens/sessions/cache, starts recovery mode and requires an administrative work/Ready hash check before new effects. Scratch cleanup defaults to preview and keeps rollback/exports/music. See [maintenance](maintenance.md). Real-file edge cases include a zero native MP3 duration (FFprobe fallback) and an undecodable advertised tail (bounded sample from the beginning).
+
+
+## Approved guide/report candidate
+
+[f41bba9 review](collection-guide-review.md): built and tested on build-01, 210 frontend/105 backend regressions, generated-data Edge checks of shared wizard/help history, immediate F5, responsive report, controlled origin502/cached public shell/reconnect and logout with playing WAV. The candidate is not yet the installed release. Full matched CI and guarded deployment await GitHub Actions recovery. No external ASR, cloud source or OTLP feature was added.
