@@ -6,13 +6,13 @@
 
 ## Проверенное установленное состояние
 
-- st1: runtime `bb98d3e42534e59583237fb07237cf2ba38a8a94`, версия `0.7.0-alpha`, schema 2. Повторная read-only проверка 22 октября: app/worker/inference healthy, restart 0, OOM false.
-- [GitHub 39737711667](https://github.com/nd4y/phonoteka/actions/runs/39737711667): 610 backend / 170 frontend tests, matched app/inference images, 19 ASR / 7 combined / 15 ordinary acceptance checks. Это доказательство установленного выпуска, не еще не выпущенных изменений ревью.
-- Перед последней поставкой создан и проверен checkpoint `image-only-bb98d3e-7ff80e4c1a5a4c1ebbca304da6e39f3b`. Сохранены отдельные версии медиа, CAS, packet identity, native reopen/full decode и read-only original. Postflight: 42 target / 19 origin checks, JSON stdout/metrics и 63 Grafana queries без ошибок.
+- st1: runtime `e59a2158bd5fbba948000fc716b4afa5f4440f32`, версия `0.7.0-alpha`, schema 2. Повторная read-only проверка 22 октября: app/worker/inference healthy, restart 0, OOM false.
+- [GitHub 39765307314](https://github.com/nd4y/phonoteka/actions/runs/39765307314): 611 backend / 182 frontend tests, matched app/inference images, 19 ASR / 7 combined / 15 ordinary acceptance checks. Это доказательство установленного выпуска с исправлениями ревью.
+- Перед последней поставкой создан и проверен checkpoint `image-only-e59a215-62dbd7cde4d14ca7837d4ff318b5e32e`. Сохранены отдельные версии медиа, CAS, packet identity, native reopen/full decode и read-only original. Postflight: 42 target / 19 origin checks, JSON stdout/metrics и 63 Grafana queries без ошибок.
 - Реальные ошибки MP3 ID3v1 и выхода worker once исправлены в установленном выпуске. Все шесть конкретных конфликтовавших файлов повторно записаны и независимо проверены; прежние ошибки сохранены в истории.
 - Результат обработки копии опубликован владельцу как датированный отчет: 2142 аудио + 11 CUE, 525 файлов со встроенным синхронизированным текстом, 700 с обложкой. 1971 запись имеет незаполненные поля/ошибки; категории пересекаются. Это не полностью организованная коллекция и не независимая приемка качества текста.
 
-## Найденные дефекты и исправления кандидата
+## Найденные дефекты и исправления установленного выпуска
 
 | ID / приоритет | Сценарий и причина | Исправление / проверка |
 | --- | --- | --- |
@@ -21,17 +21,17 @@
 | R-03 / P2 | Обычная отмена queued/paused задачи с `error=cancelled` показывала красный alert | Терминальная штатная отмена имеет отдельный статус без error alert. Настоящие ошибки и failed count сохраняются, включая cancelled_partial. Проверяется реальный server render JobsView. |
 | R-04 / P1 | Старый параллельный ответ /jobs мог вернуть running после уже показанного cancelled; запросы оставались действительными после logout | Queue/summary применяют ответы в порядке поколений без возврата к уже устаревшему состоянию; медленные ответы не теряются только из-за активного polling. Tracks используют тот же latest-result guard, что и карточка. Выход/expiry инвалидируют все поколения; новый результат нельзя затереть старым. |
 | R-05 / P2 | Ошибка cancel поглощалась оболочкой до обработчика JobsView | Ошибка остается rejected Promise и попадает в существующее сообщение управления задачей; success notice появляется только после успешного POST. |
-| R-06 / P1 | Закрепленные certifi/Pillow попали в опубликованные advisories; выбор JPEG/PNG проверялся после запуска общего image parser | Подготовлены certifi 2026.10.19 / Pillow 13.0.0, явный allowlist JPEG/PNG до парсинга. Требуются проверки совместимости и новых образов. Нельзя переносить старый backend gate на измененные зависимости. |
-| R-07 / P2 | @vitest/mocker 4.1.11 имеет два moderate advisories | Подготовлен lockfile Vitest 4.1.12 по официальным metadata/integrity для восьми пакетов с неизменным графом. Нужен npm ci/frontend gate. Это dev dependency, не код сервера в production image. |
+| R-06 / P1 | Закрепленные certifi/Pillow попали в опубликованные advisories; выбор JPEG/PNG проверялся после запуска общего image parser | Подготовлены certifi 2026.10.19 / Pillow 13.0.0, явный allowlist JPEG/PNG до парсинга. Новые зависимости проверены на build-01, в полном CI и в каждом установленном контейнере. Старый backend gate не переносился на измененные зависимости. |
+| R-07 / P2 | @vitest/mocker 4.1.11 имеет два moderate advisories | Подготовлен lockfile Vitest 4.1.12 по официальным metadata/integrity для восьми пакетов с неизменным графом. Npm ci, 182 frontend tests, build и audit прошли на build-01; полный CI также прошел. Это dev dependency, не код сервера в production image. |
 | R-08 / P2 | README/current-release/implementation-status расходились с фактическим runtime и schema | Документация актуализируется с отдельным указанием установленного выпуска и невыпущенного кандидата; исторический реестр не переписывается. |
 
-Первый frontend gate на build-01: 178/178 tests, 30 files, production build/PWA прошли; он предшествует исправлению R-04 и security patch. Повтор после этих изменений обязателен. Проверки выполняются в изолированном контейнере 1 CPU / 768 MiB под `/home/av/build/phonoteka/operation.lock`. При MemAvailable ниже 1536 MiB тяжелый запуск откладывается. Чужие контейнеры, VM и оригиналы не меняются.
+Первый frontend gate на build-01: 178/178 tests, 30 files, production build/PWA прошли; он предшествует исправлению R-04 и security patch. После этих изменений выполнены финальные exact runs, описанные ниже. Проверки выполняются в изолированном контейнере 1 CPU / 768 MiB под `/home/av/build/phonoteka/operation.lock`. При MemAvailable ниже 1536 MiB тяжелый запуск откладывается. Чужие контейнеры, VM и оригиналы не меняются.
 
 ## Условия окончательной приемки
 
-1. Выпустить исправления только после build-01 и полного matched GitHub gate. Перед st1 обновлением: idle queues, свежий проверенный checkpoint, проверка точных образов и mounts. После: HTTPS/auth/origin/metrics/logs, restart/OOM, отсутствие фоновых незапрошенных эффектов. Сохранить путь отката и версии файлов.
+1. Исправления e59a215 выпущены после build-01 и полного matched GitHub gate. Перед обновлением проверены idle queues, точные образы/mounts и свежий checkpoint; после прошли HTTPS/auth/origin/metrics/logs checks. Порядок резервирования, проверки и отката сохраняется для следующих выпусков.
 2. Музыкальное выравнивание остается неприемлемым для заявления готового караоке: разрешенный локальный пилот дал 0/66 строк при техническом succeeded 2/2. Результаты остаются черновыми, автоматическое принятие отключено. Нужна независимая приемка качества согласованного музыкального набора; внешний ASR не подключается как скрытый fallback.
-3. Финальные PWA/player/Back/logout/cache/mobile browser сценарии и реальный Android/Poweramp остаются непроверенными в полном объеме. Прежнее решение владельца не использовать браузер и отложить телефонную приемку сохраняется; unit/server checks ее не закрывают.
+3. Владелец разрешил финальную браузерную проверку и указал Edge. На установленном выпуске проверены обычный/CUE плеер, Back, защита черновика, reload, живой аудит/отмена, обе темы и 390/768/1024/1440 px: [протокол](browser-acceptance-2026-10-22.md). Установку и запуск PWA отдельным приложением подтвердил владелец. Реальный offline/reconnect и logout используемого Edge-сеанса этим протоколом не закрыты; серверные/автоматические cache/auth проверки сохраняют отдельную доказательную силу. Реальный Android/Poweramp и музыкальная приемка остаются отложенными до конца по решению владельца.
 4. Завершение коллекции требует проверки оставшихся сомнительных совпадений, отсутствующих данных и поврежденных файлов. Неизвестные данные нельзя заполнять первым поисковым ответом, а поврежденное аудио - объявлять восстановленным без доказательства. Ready не обходится искусственным принятием.
 5. Полный статус измерений обработки сверяется отдельно по P1-09 [tracing-spec](tracing-spec.md). Существующий журнал этапов не считается реализацией OpenTelemetry. P2/OTLP Collector остается отдельной проектной работой, а не условием скрытого подключения новой инфраструктуры.
 
@@ -47,4 +47,18 @@ Read-only GitHub Dependabot alerts оказались выключены/нед�
 
 ## Проверка security pins кандидата
 
-После правок npm advisory bulk API повторно проверил 146 package names, OSV querybatch - 61 Python pin: находок нет (22.10.2026 10:42:49 UTC). Это датированная проверка подготовленных lockfiles, а не утверждение об установленном на st1 образе. Vitest lockfile подготовлен легким редактированием по официальному registry metadata без локальной установки; npm ci и тесты на build-01 еще обязательны.
+После правок npm advisory bulk API повторно проверил 146 package names, OSV querybatch - 61 Python pin: находок нет (22.10.2026 10:42:49 UTC). Это датированная проверка подготовленных lockfiles, а не утверждение об установленном на st1 образе. Vitest lockfile подготовлен легким редактированием по официальному registry metadata без локальной установки; npm ci, tests/build/audit на build-01 затем прошли; это подтверждено отдельным протоколом.
+
+## Финальные серверные gates кандидата e59a215
+
+[GitHub 39765307314](https://github.com/nd4y/phonoteka/actions/runs/39765307314) прошел все четыре задания: 611 backend / 182 frontend tests, 19 ASR / 7 combined / 15 ordinary checks. Source probe проверил 62 backend modules по Git SHA. На build-01 независимо прошли 182 frontend tests/build/PWA/npm audit и 101 backend compatibility/auth/media/fault/activity tests с фактическими новыми security pins. Финальные reports привязаны к точным Git bytes; тесты с CRLF checkout не использованы для такого утверждения. Ошибки test tmpfs/source exporter и повторные exact runs сохранены в CHECK-041.
+
+Финальные input source, npm ci и версия decoder подтверждены. Поставка на st1 и проверка фактических образов завершены отдельным этапом CHECK-042. Полное ТЗ/музыкальная/device приемка остается открытой.
+
+## Подтвержденная поставка на st1
+
+22.10.2026 установлен `e59a2158bd5fbba948000fc716b4afa5f4440f32`. Изменены только три image ID, схема 2 и mounts сохранены. Перед единственным guarded PUT создан и проверен checkpoint `image-only-e59a215-62dbd7cde4d14ca7837d4ff318b5e32e`; старые образы и версии медиа сохранены.
+
+После штатного startup interval все контейнеры healthy / restart 0 / OOM false. Прошли 42 target и 19 origin проверки, JSON stdout/metrics и все 63 Grafana queries. Независимый read-only exec подтвердил Pillow 13.0.0 и certifi 2026.10.19 в app/worker/inference. App фактически отдает новый bundle `index-KGXIZR8X.js` и service worker shell `55cba0a795dd69213a64`; это проверка HTTP-ресурсов, а не приемка установленной PWA на телефоне.
+
+Сама поставка не запускала collection jobs, записи аудио, автоматического принятия ASR или новых провайдеров. Последующая разрешенная браузерная приемка запустила и отменила только один read-only аудит; операция безопасно завершила текущий файл. Все три контейнера после нее остаются healthy/restart 0/OOM false. По-прежнему нельзя объявить весь продукт Production Ready до закрытия перечисленных PWA/device/music условий.

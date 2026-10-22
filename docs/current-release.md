@@ -2,9 +2,13 @@
 
 The application is a single-owner service. Original audio is mounted read-only. Changes are proposed, reviewed, atomically written to the separate working copy, audited, and published to a separate Ready directory. The current image is not a claim that all specification acceptance criteria have passed.
 
-Production revision on 2026-10-22: `bb98d3e42534e59583237fb07237cf2ba38a8a94`. All three installed containers were rechecked healthy with zero restarts/OOM. New review fixes are candidates until matched CI artifacts and deployment are verified. See [release readiness](production-readiness.md).
+Production revision on 2026-10-22: `e59a2158bd5fbba948000fc716b4afa5f4440f32`. All three installed containers were rechecked healthy with zero restarts/OOM. The reviewed live-update/cancellation fixes and security dependency updates have passed matched CI/build-01 gates and are deployed. Full product acceptance remains open. See [release readiness](production-readiness.md).
+
+The owner-authorized [Edge acceptance](browser-acceptance-2026-10-22.md) verified playback/CUE, Back, reload state, dirty-form protection, real audit cancellation/live logs and the four agreed responsive sizes. The owner separately confirmed PWA installation and launch as a separate application. Browser offline behavior and physical Android/Poweramp are not inferred from these checks.
 
 ## Available
+
+- Live job subscriptions recover permanently closed SSE connections from a fresh snapshot; task changes cannot display another task's log. Queue responses cannot overwrite a newer cancellation, and logout invalidates pending private results. Normal cancellation remains distinct from a real task failure.
 
 - Accessible audio preview controls shared by normal tracks and CUE: play/pause, stop, bounded seeking and 10-second jumps, exact time entry, volume/mute, 0.5x-2x speed and repeat. CUE controls show composition-relative time and remain within its boundaries. Lyrics editing uses the same media position. Volume, mute and speed are stored locally; keyboard shortcuts apply only inside the focused player and do not intercept editor inputs. Browser decoding support still determines playable formats.
 
