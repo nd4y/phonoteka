@@ -38,7 +38,13 @@ export function GettingStarted({ summary, jobs, busy, onNavigate, onStart, step,
     const kind = guideJobKind(step);
     if (!kind || active || actionLock.current || busy) return;
     actionLock.current = true; setSubmitting(true); setNotice('');
-    try { const job = await onStart(kind, [], kind === 'scan' ? {} : { scope: 'pending' });
+    try {
+      // The main queue contains only its newest page. An old paused/waiting
+      // task still owns this stage, even when 50 newer jobs hide it there.
+      const existing = await api<{ items: Job[] }>(`/jobs?active_only=true&kind=${encodeURIComponent(kind)}&page_size=1`);
+      if (!mounted.current) return;
+      if (existing.items.length) { onNavigate('jobs'); return; }
+      const job = await onStart(kind, [], kind === 'scan' ? {} : { scope: 'pending' });
       if (job && mounted.current) { setNotice('Задача добавлена. Можно открыть ее ход или перейти к другим разделам.'); await load(); }
     } catch (problem) { if (mounted.current) setError(messageFor(problem)); }
     finally { actionLock.current = false; if (mounted.current) setSubmitting(false); }

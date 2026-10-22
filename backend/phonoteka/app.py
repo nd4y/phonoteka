@@ -493,10 +493,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(data, media_type=mime, headers={"Cache-Control": "private, no-store"})
 
     @app.get("/api/jobs")
-    def jobs(request: Request, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)):
+    def jobs(request: Request, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
+             active_only: bool = False, kind: str = Query('', max_length=64)):
         security.require_session(request, settings)
-        rows = db.fetchall(settings.db_path, "SELECT * FROM jobs ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", (page_size,(page-1)*page_size))
-        total = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs")["n"]
+        where = ' WHERE 1=1'
+        params = []
+        if active_only:
+            where += " AND state IN ('queued','running','pending','paused','waiting','waiting_provider','waiting_storage','waiting_authorization','deferred')"
+        if kind:
+            where += ' AND kind=?'
+            params.append(kind)
+        rows = db.fetchall(settings.db_path, "SELECT * FROM jobs" + where + " ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", (*params,page_size,(page-1)*page_size))
+        total = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs" + where, params)["n"]
         activity = job_activity.summaries(settings, rows)
         return {"items": [public_job(settings, row, activity=activity[row['id']]) for row in rows], "total": total, "page": page, "page_size": page_size}
 
@@ -563,6 +571,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         key = request.headers.get("idempotency-key", "")
         if not key or len(key) > 128:
             raise security.error(428, "idempotency_key_required", "Передайте Idempotency-Key длиной до 128 символов")
+        request_hash = hashlib.sha256(db.encode(body.model_dump()).encode()).hexdigest()
+        scope = 'token:' + active['api_token_id'] + ':jobs' if active.get('api_token_id') else 'owner:jobs'
+        # Resolve an accepted request before consulting mutable collection state.
+        # Its pending selection may now be empty, but retrying must return the
+        # original job. The transaction below still arbitrates concurrent creates.
+        with db.connect(settings.db_path) as conn:
+            previous = conn.execute("SELECT * FROM idempotency WHERE scope=? AND key=?", (scope, key)).fetchone()
+            if previous:
+                if previous['request_hash'] != request_hash:
+                    raise security.error(409, 'idempotency_conflict', 'Этот ключ уже использован для другого запроса')
+                existing = dict(conn.execute('SELECT * FROM jobs WHERE id=?', (previous['job_id'],)).fetchone())
+                return public_job(settings, existing)
         if body.kind in {"apply", "rollback", "publish", "rollback_ready", "publish_sidecars", "extract_cue", "normalize_audio"} and not settings.writable:
             raise security.error(409, "read_only", "Запись отключена до проверки конфигурации хранилища")
         if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id"}:
@@ -614,24 +634,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body.params.get('scope'):
             if body.kind not in {'analyze','recognize','replaygain','youtube'} or body.params['scope'] not in {'all','pending'} or ids:
                 raise security.error(422,'invalid_scope','Полная библиотека доступна только для анализа')
-            ids=[row['id'] for row in db.fetchall(settings.db_path,"SELECT id FROM tracks WHERE is_current=1 AND status NOT IN ('error','missing') AND json_extract(metadata,'$.format')<>'cue' AND COALESCE(json_extract(metadata,'$.cue_album_image'),0)=0 LIMIT 10000")]
-            if body.params['scope']=='pending':
-                pending=[]
-                known={}
-                for row in db.fetchall(settings.db_path,"SELECT a.track_id,json_extract(s.value,'$.provider') AS provider,json_extract(s.value,'$.state') AS state FROM analyses a JOIN tracks t ON t.id=a.track_id AND t.sha256=a.input_sha256 AND t.is_current=1,json_each(a.payload,'$.sources') s"):
-                    known.setdefault(row['track_id'],{})[row['provider']]=row['state']
-                for track_id in ids:
-                    if body.kind=='youtube':
-                        m=json.loads(db.fetchone(settings.db_path,'SELECT metadata FROM tracks WHERE id=?',(track_id,))['metadata']).get('youtube',{})
-                        complete=m.get('lookup_complete') if body.params.get('youtube_lookup') else m.get('scanned_at')
-                        if body.params.get('youtube_search'):complete=complete and (m.get('linked_id') or m.get('search_state') in {'candidates','no_match','insufficient_query'} or m.get('candidates'))
-                        if not complete:pending.append(track_id)
-                        continue
-                    sources=known.get(track_id,{})
-                    wanted=['shazam'] if body.kind=='recognize' else ['local_replaygain'] if body.kind=='replaygain' else ['musicbrainz','lrclib']
-                    if any(sources.get(p) not in {'candidates','candidate','no_match','fingerprint_match'} for p in wanted):pending.append(track_id)
-                ids=pending
-                if not ids:raise security.error(409,'nothing_to_process','Все доступные записи уже обработаны этим этапом')
+            ids=[]
+            # Stream a single snapshot; apply the batch bound to pending files,
+            # not to the first 10,000 catalog rows (which may all be complete).
+            with db.connect(settings.db_path) as conn:
+                for row in conn.execute("""SELECT t.id,t.metadata,a.payload FROM tracks t
+                    LEFT JOIN analyses a ON a.track_id=t.id AND a.input_sha256=t.sha256
+                    WHERE t.is_current=1 AND t.status NOT IN ('error','missing')
+                    AND json_extract(t.metadata,'$.format')<>'cue'
+                    AND COALESCE(json_extract(t.metadata,'$.cue_album_image'),0)=0 ORDER BY t.id"""):
+                    if body.params['scope']=='pending':
+                        if body.kind=='youtube':
+                            m=json.loads(row['metadata']).get('youtube',{})
+                            complete=m.get('lookup_complete') if body.params.get('youtube_lookup') else m.get('scanned_at')
+                            if body.params.get('youtube_search'):complete=complete and (m.get('linked_id') or m.get('search_state') in {'candidates','no_match','insufficient_query'} or m.get('candidates'))
+                            if complete:continue
+                        else:
+                            sources={s.get('provider'):s.get('state') for s in json.loads(row['payload'] or '{}').get('sources',[])}
+                            wanted=['shazam'] if body.kind=='recognize' else ['local_replaygain'] if body.kind=='replaygain' else ['musicbrainz','lrclib']
+                            if all(sources.get(p) in {'candidates','candidate','no_match','fingerprint_match'} for p in wanted):continue
+                    ids.append(row['id'])
+                    if len(ids)==10000:break
+            if body.params['scope']=='pending' and not ids:
+                raise security.error(409,'nothing_to_process','Все доступные записи уже обработаны этим этапом')
         if body.kind=='analyze' and not settings.external_metadata:
             raise security.error(409,'provider_disabled','Внешние метаданные отключены')
         if body.kind=='recognize' and not settings.external_fingerprints:
@@ -640,8 +665,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise security.error(422, "invalid_scope", "Сканирование выполняется для всей библиотеки")
         if body.kind not in {"scan","export_ready"} and not ids:
             raise security.error(422, "tracks_required", "Выберите конкретные треки")
-        request_hash = hashlib.sha256(db.encode(body.model_dump()).encode()).hexdigest()
-        scope = 'token:' + active['api_token_id'] + ':jobs' if active.get('api_token_id') else 'owner:jobs'
         now, identity = db.utcnow(), str(uuid.uuid4())
         with db.transaction(settings.db_path) as conn:
             previous = conn.execute("SELECT * FROM idempotency WHERE scope=? AND key=?", (scope,key)).fetchone()
