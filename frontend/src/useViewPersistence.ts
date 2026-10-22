@@ -21,6 +21,10 @@ export function useViewPersistence(view: Omit<ViewState, 'scroll' | 'queueScroll
     saveView({ ...current.current, scroll: window.scrollY, queueScroll: document.querySelector('.queue-tracks')?.scrollTop || 0 });
   };
   const writeRef = useRef(write); writeRef.current = write;
+  const leaveRef = useRef(() => {});
+  leaveRef.current = () => {
+    if (authenticated) saveView(reloadView.current ?? (restoring.current ? target.current : capture()));
+  };
   useEffect(() => { const previous = history.scrollRestoration; history.scrollRestoration = 'manual'; return () => { history.scrollRestoration = previous; }; }, []);
   useLayoutEffect(() => {
     if (!ready || !authenticated || !restoring.current) return;
@@ -40,9 +44,10 @@ export function useViewPersistence(view: Omit<ViewState, 'scroll' | 'queueScroll
   useEffect(() => { writeRef.current(); }, [view.page, view.query, view.filter, view.pageNumber, view.selectedId, view.guideStep]);
   useEffect(() => {
     const remember = () => writeRef.current();
+    const leave = () => leaveRef.current();
     window.addEventListener('scroll', remember, { passive: true, capture: true });
-    window.addEventListener('pagehide', remember);
-    return () => { window.removeEventListener('scroll', remember, true); window.removeEventListener('pagehide', remember); };
+    window.addEventListener('pagehide', leave);
+    return () => { window.removeEventListener('scroll', remember, true); window.removeEventListener('pagehide', leave); };
   }, []);
   return Object.assign(() => writeRef.current(), {
     capture,

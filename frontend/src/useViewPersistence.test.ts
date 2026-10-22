@@ -42,6 +42,14 @@ afterEach(() => {
 });
 
 describe('view persistence during an explicit PWA activation', () => {
+  it('persists an immediate F5 destination before Back content restoration finishes', () => {
+    const { target, queue, persistence, initial } = setup();
+    const destination: ViewState = { ...initial, page:'guide',guideStep:'recognize',scroll:420,queueScroll:0 };
+    persistence.restore(destination);
+    target.scrollY=0; queue.scrollTop=0;
+    target.dispatchEvent(new Event('pagehide'));
+    expect(readView()).toEqual(destination);
+  });
   it('captures the destination offsets while a Back restoration waits for content', () => {
     const { target, queue, persistence, initial } = setup();
     const destination = { ...initial, scroll: 1240, queueScroll: 260 };
