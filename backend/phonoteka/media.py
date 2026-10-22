@@ -864,6 +864,31 @@ def _staging_directory(target: Path, roots: Mapping[str, Any]) -> Path | None:
     return None
 
 
+def _restore_legacy_id3v1(source: Path, staged: Path) -> bool:
+    """Restore only an existing legacy tail, never reinterpret packet identity.
+
+    Called only after the ordinary MP3 write fails the exact packet guard.
+    Successful ordinary ID3v1 updates keep their existing behavior. A second
+    complete packet comparison and all native/tag checks remain mandatory.
+    """
+    with _file(source) as stream:
+        if os.fstat(stream.fileno()).st_size < 128: return False
+        stream.seek(-128, os.SEEK_END); legacy = stream.read(128)
+    if legacy[:3] != b'TAG': return False
+    with _directory(staged.parent) as directory:
+        fd = os.open(staged.name if directory >= 0 else staged,
+                     os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), dir_fd=directory if directory >= 0 else None)
+        with os.fdopen(fd, 'r+b') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise MediaError('unsafe_path', 'Legacy staging target is not a private regular file')
+            if info.st_size < 128: return False
+            stream.seek(-128, os.SEEK_END); current = stream.read(128)
+            if current[:3] != b'TAG' or current == legacy: return False
+            stream.seek(-128, os.SEEK_END); stream.write(legacy); stream.flush()
+    return True
+
+
 def _apply_changes_impl(path: str | Path, tags: Mapping[str, Any], lrc: str | None,
                   expected_sha256: str, backup_dir: str | Path, roots: Mapping[str, Any],
                   cover: bytes | None = None, *, authorize: Callable[[], None] | None = None,
@@ -895,7 +920,9 @@ def _apply_changes_impl(path: str | Path, tags: Mapping[str, Any], lrc: str | No
     else:
         _edit(staged, tags, lrc, cover)
     if audio_identity(staged) != before_audio:
-        raise MediaError("audio_changed", "Tag staging changed the encoded audio packets")
+        restored = isinstance(original_native, MP3) and _restore_legacy_id3v1(path, staged)
+        if not restored or audio_identity(staged) != before_audio:
+            raise MediaError("audio_changed", "Tag staging changed the encoded audio packets")
     if _untouched_signature(staged, tags, lrc, cover, preservation_targets) != untouched:
         raise MediaError("metadata_changed", "Tag staging changed unrelated metadata")
     checked = inspect_audio(staged, roots)

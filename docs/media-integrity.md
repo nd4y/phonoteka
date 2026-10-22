@@ -83,3 +83,18 @@ the tag object being saved and is removed afterward. It does not filter the
 unchanged-metadata signature or the native-slot preservation check. Removing
 even an empty unrelated frame still prevents the staged file from replacing
 the original. Explicitly clearing a requested field continues to remove it.
+## Legacy ID3v1 and strict MP3 packet identity
+
+Some MP3 inputs expose their existing ID3v1 tail inside the final demuxed audio
+packet. Mutagen's ordinary ID3v1 mirroring can then trip `audio_changed` even
+when the MPEG payload excluding that tail is byte-identical. The writer first
+uses its ordinary serializer and packet comparison. Only on a mismatch, and
+only for MP3 with existing `TAG` tails on both source and staging files, it can
+restore the original128 tail bytes in its private staging file. It then repeats
+the complete unchanged packet-identity comparison. Any remaining mismatch
+still rejects the write. Native metadata, requested values, decode, CAS and
+backup checks are unchanged. Successful ordinary ID3v1 mirroring is unaffected.
+
+The source file is never patched in this fallback. Retained staging evidence,
+generated fault-injection/negative tests and an actual-input RAM experiment
+bind the fix to the original failure; the packet hash definition is unchanged.
