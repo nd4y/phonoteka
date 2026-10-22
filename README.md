@@ -44,7 +44,10 @@ npm run build
 
 Автоматизация и доставка: [API, расписание и экспорт](docs/automation.md). Дополнительные каталоги: [профили источников](docs/catalogs.md).
 
-
 Обслуживание: [проверенный backup/restore и режим восстановления](docs/maintenance.md).
 
 Metrics, JSON stdout and Grafana: [observability](docs/observability.md). Import [dashboard JSON](monitoring/phonoteka-dashboard.json); regenerate with `python monitoring/build_dashboard.py`.
+
+## Стандарт разработки
+
+Репозиторий подключает общий стандарт версии 0.4.0. См. [русское руководство](docs/ru/development-standard.md) и [English guide](docs/en/development-standard.md). Локальный пакет проверяет секреты подготовленного коммита, форматирование изменённых файлов и двуязычную документацию до merge. Проверки продукта сохраняются. Подключение продолжается; приёмка продукта и перевод прежней документации учитываются отдельно в .repo-policy.json.
