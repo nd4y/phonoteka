@@ -185,7 +185,7 @@ class Worker:
             busy = bool(self.inference_task and not self.inference_task.done())
             ordinary_busy = bool(self.normal_task and not self.normal_task.done())
             for _ in range(64):
-                row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND COALESCE(json_extract(payload,'$.retry_at'),0)<=? AND (?=0 OR kind NOT IN ('transcribe','align')) AND (?=0 OR kind IN ('transcribe','align')) ORDER BY created_at,id LIMIT 1",(time.time(),int(busy),int(ordinary_busy))).fetchone()
+                row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND COALESCE(json_extract(payload,'$.retry_at'),0)<=? AND (?=0 OR kind NOT IN ('transcribe','align')) AND (?=0 OR kind IN ('transcribe','align')) ORDER BY created_at,rowid LIMIT 1",(time.time(),int(busy),int(ordinary_busy))).fetchone()
                 if not row:return None
                 control=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(row['id'],)).fetchone()
                 reason=automation.grant_reason(conn,control)
@@ -1182,7 +1182,14 @@ class Worker:
                         else: self.normal_task=task
                         continue
                     pending=[task for task in (self.normal_task,self.inference_task) if task and not task.done()]
-                    if once and not pending: break
+                    if once and not pending:
+                        # A lane can finish while the threaded claim still
+                        # observes it busy. Poll again without those completed
+                        # lane handles before declaring the eligible queue empty.
+                        if self.normal_task is not None or self.inference_task is not None:
+                            self.normal_task = self.inference_task = None
+                            continue
+                        break
                     # Poll claims while either lane runs, so a newly queued ASR
                     # can start during a long metadata batch (and vice versa).
                     if pending:

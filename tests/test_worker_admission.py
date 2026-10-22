@@ -8,6 +8,8 @@ import json
 import threading
 import time
 import wave
+import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,6 +18,7 @@ from phonoteka import db, media
 from phonoteka.app import create_app
 from phonoteka.worker import Worker
 from test_backend import settings, authenticated, job
+import phonoteka.app as app_module
 
 
 def native_catalog(settings, count):
@@ -38,6 +41,50 @@ def native_catalog(settings, count):
     with db.transaction(settings.db_path) as conn:
         conn.executemany('INSERT INTO tracks(id,relative_path,sha256,metadata,created_at,updated_at) VALUES(?,?,?,?,?,?)',rows())
     return ids,metadata['sha256']
+
+
+def test_once_repolls_when_lane_finishes_during_busy_claim(settings,monkeypatch):
+    cfg=replace(settings,read_only=False,storage_verified=True,file_workers=1)
+    with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
+        headers=authenticated(client,cfg);ids,_=native_catalog(cfg,1)
+        one=job(client,headers,'audit',ids);two=job(client,headers,'audit',ids)
+        worker=Worker(cfg);release=threading.Event();forced=[];real_claim=worker.claim_job
+        def operation(current,item):
+            assert release.wait(10),'finite audit barrier was not released'
+            return {'state':'passed'}
+        worker.process_item=operation
+        async def exercise():
+            loop=asyncio.get_running_loop()
+            async def joined(task):await asyncio.shield(task)
+            def claim():
+                row=real_claim()
+                if row is None and not forced and worker.normal_task and not worker.normal_task.done():
+                    forced.append(True);release.set()
+                    asyncio.run_coroutine_threadsafe(joined(worker.normal_task),loop).result(10)
+                    # This empty result was computed with the old busy lane.
+                    assert worker.normal_task.done()
+                return row
+            monkeypatch.setattr(worker,'claim_job',claim)
+            try:await worker.run(once=True)
+            finally:release.set()
+        asyncio.run(exercise())
+        assert forced==[True]
+        assert client.get('/api/jobs/'+one['id']).json()['state']=='succeeded'
+        assert client.get('/api/jobs/'+two['id']).json()['state']=='succeeded'
+
+
+def test_same_timestamp_jobs_follow_submission_order_not_random_uuid(settings,monkeypatch):
+    cfg=replace(settings,read_only=False,storage_verified=True)
+    with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
+        headers=authenticated(client,cfg);ids,_=native_catalog(cfg,1)
+        fixed=db.utcnow();monkeypatch.setattr(db,'utcnow',lambda:fixed)
+        identities=iter([uuid.UUID('ffffffff-ffff-4fff-8fff-ffffffffffff'),uuid.UUID('00000000-0000-4000-8000-000000000001')])
+        monkeypatch.setattr(app_module,'uuid',SimpleNamespace(uuid4=lambda:next(identities),UUID=uuid.UUID))
+        first=job(client,headers,'audit',ids);second=job(client,headers,'audit',ids)
+        assert first['id']>second['id'] and first['created_at']==second['created_at']
+        worker=Worker(cfg)
+        try:assert worker.claim_job()['id']==first['id']
+        finally:worker.pool.shutdown()
 
 
 def controlled_segment(settings, client, headers, job_id, calls, control):
