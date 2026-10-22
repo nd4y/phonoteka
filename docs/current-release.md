@@ -2,7 +2,7 @@
 
 The application is a single-owner service. Original audio is mounted read-only. Changes are proposed, reviewed, atomically written to the separate working copy, audited, and published to a separate Ready directory. The current image is not a claim that all specification acceptance criteria have passed.
 
-Production revision on 2026-10-22: `e59a2158bd5fbba948000fc716b4afa5f4440f32`. All three installed containers were rechecked healthy with zero restarts/OOM. The reviewed live-update/cancellation fixes and security dependency updates have passed matched CI/build-01 gates and are deployed. Full product acceptance remains open. See [release readiness](production-readiness.md).
+Production revision on 2026-10-22: `f41bba90afe174fa2e386032833839ff7bd4b579`. All three installed containers were rechecked healthy with zero restarts/OOM. The reviewed live-update/cancellation fixes and security dependency updates have passed matched CI/build-01 gates and are deployed. Full product acceptance remains open. See [release readiness](production-readiness.md).
 
 The owner-authorized [Edge acceptance](browser-acceptance-2026-10-22.md) verified playback/CUE, Back, reload state, dirty-form protection, real audit cancellation/live logs and the four agreed responsive sizes. The owner separately confirmed PWA installation and launch as a separate application. Browser offline behavior and physical Android/Poweramp are not inferred from these checks.
 
@@ -48,4 +48,9 @@ Jobs support pause/resume at file boundaries. Offline state backup/restore verif
 
 ## Approved guide/report candidate
 
-[f41bba9 review](collection-guide-review.md): built and tested on build-01, 210 frontend/105 backend regressions, generated-data Edge checks of shared wizard/help history, immediate F5, responsive report, controlled origin502/cached public shell/reconnect and logout with playing WAV. The candidate is not yet the installed release. Full matched CI and guarded deployment await GitHub Actions recovery. No external ASR, cloud source or OTLP feature was added.
+[f41bba9 review](collection-guide-review.md): built and tested on build-01, 210 frontend/105 backend regressions, generated-data Edge checks of shared wizard/help history, immediate F5, responsive report, controlled origin502/cached public shell/reconnect and logout with playing WAV. The update has been delivered after full matched CI and deployment verification; operational details are kept separately. No external ASR, cloud source or OTLP feature was added.
+
+
+## CHG-044: выпуск проверен
+
+Справка, мастер организации, понятный отчет и исправления PWA/Back/F5/logout реализованы и выпущены. [CI39798349961](https://github.com/nd4y/phonoteka/actions/runs/39798349961) для f41bba9 прошел:613backend/210frontend,19ASR/7combined/15ordinary. Проверки установленной версии через HTTPS пройдены; подробный журнал развертывания хранится отдельно от репозитория. Физическая проверка Android/Poweramp и независимая музыкальная приемка остаются открытыми.

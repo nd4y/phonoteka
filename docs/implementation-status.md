@@ -1,8 +1,8 @@
 # Статус реализации
 
-Актуализировано 22.10.2026. На st1 установлен **0.7.0-alpha**, runtime `e59a2158bd5fbba948000fc716b4afa5f4440f32`. Прежние сведения о production 0.6 и неразвернутом кандидате больше не описывают текущую установку.
+Актуализировано 22.10.2026. На st1 установлен **0.7.0-alpha**, runtime `f41bba90afe174fa2e386032833839ff7bd4b579`. Прежние сведения о production 0.6 и неразвернутом кандидате больше не описывают текущую установку.
 
-Точный установленный SHA: `e59a2158bd5fbba948000fc716b4afa5f4440f32`. Все три контейнера повторно проверены healthy, restart 0 / OOM false. Схема 2 и приватные mounts сохранены. [GitHub 39765307314](https://github.com/nd4y/phonoteka/actions/runs/39765307314) проверил 611 backend / 182 frontend tests и 19 ASR / 7 combined / 15 ordinary критериев; postflight проверил 42 target / 19 origin checks и 63 Grafana queries. Подробности - CHECK-041..042 [реестра](requirements-register.md).
+Точный установленный SHA: `f41bba90afe174fa2e386032833839ff7bd4b579`. Все три контейнера повторно проверены healthy, restart 0 / OOM false. Схема 2 и приватные mounts сохранены. [GitHub 39798349961](https://github.com/nd4y/phonoteka/actions/runs/39798349961) проверил 613 backend / 210 frontend tests и 19 ASR / 7 combined / 15 ordinary критериев; postflight проверил 42 target / 19 origin checks и 63 Grafana queries. Подробности - CHECK-041..042 [реестра](requirements-register.md).
 
 **Полное ТЗ и Production Ready пока не подтверждены.** [Ревью готовности](production-readiness.md) отдельно перечисляет найденные дефекты, уже выпущенные исправления, точные проверки и открытые условия приемки. Наличие кода, работающего контейнера или технического succeeded не подменяет приемку продукта и качество музыки. Разрешенная владельцем [проверка Edge](browser-acceptance-2026-10-22.md) завершена в описанном объеме; запуск PWA отдельным приложением подтвержден владельцем.
 
@@ -25,4 +25,9 @@
 
 ## CHG-044: проверенный кандидат, поставка ожидается
 
-[Мастер/справка/отчет f41bba9](collection-guide-review.md) реализованы в согласованном объеме. Build-01:210frontend/105backend, production/PWA build и audit0. Edge: новые четыре responsive размера, drilldown, shared Back/F5, controlled origin502/reconnect и logout с playing WAV. Это source-overlay демо, не приемка производственного OCI. [ASR разбор](asr-zero-pilot-review.md) объясняет0/66 без новых jobs/модели/записи. Установленный e59a215 остался healthy; полная matched CI и controlled поставка кандидата ожидаются.
+[Мастер/справка/отчет f41bba9](collection-guide-review.md) реализованы в согласованном объеме. Build-01:210frontend/105backend, production/PWA build и audit0. Edge: новые четыре responsive размера, drilldown, shared Back/F5, controlled origin502/reconnect и logout с playing WAV. Это source-overlay демо, не приемка производственного OCI. [ASR разбор](asr-zero-pilot-review.md) объясняет0/66 без новых jobs/модели/записи. Выпуск прошел полную matched CI и проверку доставки; подробный операционный журнал сохранен отдельно.
+
+
+## CHG-044: выпуск проверен
+
+Справка, мастер организации, понятный отчет и исправления PWA/Back/F5/logout реализованы и выпущены. [CI39798349961](https://github.com/nd4y/phonoteka/actions/runs/39798349961) для f41bba9 прошел:613backend/210frontend,19ASR/7combined/15ordinary. Проверки установленной версии через HTTPS пройдены; подробный журнал развертывания хранится отдельно от репозитория. Физическая проверка Android/Poweramp и независимая музыкальная приемка остаются открытыми.

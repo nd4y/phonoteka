@@ -6,9 +6,9 @@
 
 ## Проверенное установленное состояние
 
-- st1: runtime `e59a2158bd5fbba948000fc716b4afa5f4440f32`, версия `0.7.0-alpha`, schema 2. Повторная read-only проверка 22 октября: app/worker/inference healthy, restart 0, OOM false.
-- [GitHub 39765307314](https://github.com/nd4y/phonoteka/actions/runs/39765307314): 611 backend / 182 frontend tests, matched app/inference images, 19 ASR / 7 combined / 15 ordinary acceptance checks. Это доказательство установленного выпуска с исправлениями ревью.
-- Перед последней поставкой создан и проверен checkpoint `image-only-e59a215-62dbd7cde4d14ca7837d4ff318b5e32e`. Сохранены отдельные версии медиа, CAS, packet identity, native reopen/full decode и read-only original. Postflight: 42 target / 19 origin checks, JSON stdout/metrics и 63 Grafana queries без ошибок.
+- st1: runtime `f41bba90afe174fa2e386032833839ff7bd4b579`, версия `0.7.0-alpha`, schema 2. Повторная read-only проверка 22 октября: app/worker/inference healthy, restart 0, OOM false.
+- [GitHub 39798349961](https://github.com/nd4y/phonoteka/actions/runs/39798349961): 613 backend / 210 frontend tests, matched app/inference images, 19 ASR / 7 combined / 15 ordinary acceptance checks. Это доказательство установленного выпуска с исправлениями ревью.
+- При предыдущем выпуске создан и проверен checkpoint `image-only-e59a215-62dbd7cde4d14ca7837d4ff318b5e32e`. Сохранены отдельные версии медиа, CAS, packet identity, native reopen/full decode и read-only original. Postflight: 42 target / 19 origin checks, JSON stdout/metrics и 63 Grafana queries без ошибок.
 - Реальные ошибки MP3 ID3v1 и выхода worker once исправлены в установленном выпуске. Все шесть конкретных конфликтовавших файлов повторно записаны и независимо проверены; прежние ошибки сохранены в истории.
 - Результат обработки копии опубликован владельцу как датированный отчет: 2142 аудио + 11 CUE, 525 файлов со встроенным синхронизированным текстом, 700 с обложкой. 1971 запись имеет незаполненные поля/ошибки; категории пересекаются. Это не полностью организованная коллекция и не независимая приемка качества текста.
 
@@ -66,4 +66,9 @@ Read-only GitHub Dependabot alerts оказались выключены/нед�
 
 ## Согласованное дополнение CHG-044
 
-Пользователь отдельно согласовал справку/мастер и понятный отчет. [Кандидат f41bba9](collection-guide-review.md) прошел build-01:210frontend/105backend, PWA build/npm audit0 и описанный Edge протокол (Back/F5/responsive/origin502/reconnect/logout). Разбор [ASR0/66](asr-zero-pilot-review.md) подтвердил отсутствие независимых опор и неподходящий положительный пилот, без ослабления порогов или записи выдуманного времени. Кандидат еще ожидает matched GitHub images и controlled production update; решение о полной готовности не изменено.
+Пользователь отдельно согласовал справку/мастер и понятный отчет. [Кандидат f41bba9](collection-guide-review.md) прошел build-01:210frontend/105backend, PWA build/npm audit0 и описанный Edge протокол (Back/F5/responsive/origin502/reconnect/logout). Разбор [ASR0/66](asr-zero-pilot-review.md) подтвердил отсутствие независимых опор и неподходящий положительный пилот, без ослабления порогов или записи выдуманного времени. Выпуск прошел matched CI и проверку доставки; решение о полной музыкальной готовности не изменено.
+
+
+## CHG-044: выпуск проверен
+
+Справка, мастер организации, понятный отчет и исправления PWA/Back/F5/logout реализованы и выпущены. [CI39798349961](https://github.com/nd4y/phonoteka/actions/runs/39798349961) для f41bba9 прошел:613backend/210frontend,19ASR/7combined/15ordinary. Проверки установленной версии через HTTPS пройдены; подробный журнал развертывания хранится отдельно от репозитория. Физическая проверка Android/Poweramp и независимая музыкальная приемка остаются открытыми.

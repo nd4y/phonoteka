@@ -1,6 +1,6 @@
 # Состояние коллекции, мастер и справка
 
-22.10.2026, CHG-044. Кандидат кода `f41bba90afe174fa2e386032833839ff7bd4b579`. Это протокол проверки кандидата, а не заявление о поставке на st1 или полной музыкальной приемке.
+22.10.2026, CHG-044. Кандидат кода `f41bba90afe174fa2e386032833839ff7bd4b579`. Проверенный выпуск доставлен; подробности развертывания сохраняются отдельно. Музыкальная приемка и полностью организованная коллекция не заявлены.
 
 ## Поведение
 
@@ -39,3 +39,8 @@ Logout: перед выходом реально играл WAV (readyState4/pau
 st1 повторно проверен: прежний `e59a215`, все3 healthy/restart0/OOMfalse. [CI кандидата](https://github.com/nd4y/phonoteka/actions/runs/39798349961) запущен. При записи GitHub обрабатывал [инцидент Actions Results](https://www.githubstatus.com/incidents/q29p76qtnkyk); старые кандидаты уже отменены, последний verify выполняется. Полная CI/matched-image приемка и guarded st1 update ожидаются. Source-overlay демо их не заменяет; прежний consumed apply не повторялся.
 
 Операционные доказательства вне Git: `output/music-library/release-guide-report-f41bba9-20261022/build01-gates.json`, `guide-demo-start-0969cf01808c40ceb46fe2cd28339dda.json`, `guide-demo-final-bd612da32dcc41008f3e877032a268c0.json`, `guide-report-real-17de8a6219e24ed28a2149d23679af6c.json`, `collection-overview-f41bba9-{desktop,mobile}.png`, `pwa-origin-unavailable-f41bba9.png`, `browser-guide-report-f41bba9-20261022.json`. Приватное аудио на общий build-01 не передавалось.
+
+
+## CHG-044: выпуск проверен
+
+Справка, мастер организации, понятный отчет и исправления PWA/Back/F5/logout реализованы и выпущены. [CI39798349961](https://github.com/nd4y/phonoteka/actions/runs/39798349961) для f41bba9 прошел:613backend/210frontend,19ASR/7combined/15ordinary. Проверки установленной версии через HTTPS пройдены; подробный журнал развертывания хранится отдельно от репозитория. Физическая проверка Android/Poweramp и независимая музыкальная приемка остаются открытыми.
