@@ -17,11 +17,11 @@ def main():
  (ROOT/'key').write_text(key);(ROOT/'metrics-key').write_text(metrics_key)
  spec=importlib.util.spec_from_file_location('acceptance_perf','/performance_acceptance.py');perf=importlib.util.module_from_spec(spec);spec.loader.exec_module(perf)
  report={'checks':{},'phases':[],'resources':[],
-  'acceptance_resource_profile':{'id':'generated_asr19_ordinary7_memory2048_v1','revision':os.environ['ACCEPTANCE_REVISION'],'configured_limits':{'inference_memory': 1342177280, 'ordinary_memory': 268435456, 'reserved_host_memory': 536870912, 'stop_below_available': 536870912, 'inference_cpus': 2, 'ordinary_cpus': 1, 'overall_deadline_seconds': 600}},
+  'acceptance_resource_profile':{'id':'generated_asr19_ordinary7_memory3840_v2','revision':os.environ['ACCEPTANCE_REVISION'],'configured_limits':{'inference_memory': 3221225472, 'ordinary_memory': 268435456, 'reserved_host_memory': 536870912, 'stop_below_available': 536870912, 'inference_cpus': 2, 'ordinary_cpus': 1, 'overall_deadline_seconds': 600}},
   'limitations':[
   'Generated clear English speech is not musical or Poweramp acceptance.',
   'Separate ordinary Worker/API container; same-Worker inference polling isolation remains a contract-test result.',
-  '1280 MiB VM inference cgroup, lower than the recommended 3 GiB container profile.',
+  'Declared CPU 3 GiB inference profile; undersized1280MiB refusal is a separate real-container smoke check.',
   'Short actual-model deadline/RSS diagnostics prove cleanup mechanism; not 6600 seconds elapsed or kernel OOM.']}
  stop=threading.Event();server=None;phase='fixture_generation';monitor=None
  def require(name,value):

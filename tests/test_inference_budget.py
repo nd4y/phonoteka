@@ -12,6 +12,48 @@ import pytest
 from phonoteka.inference_budget import ModelProcess, BudgetError, PROFILE, profile, read_model_input, write_model_result
 
 
+def test_cpu_undersized_container_refused_before_loading(monkeypatch):
+    from phonoteka import inference_budget as budget
+    monkeypatch.setattr(budget,'container_memory_limit',lambda:1280*1024**2)
+    with pytest.raises(BudgetError) as caught:budget.require_cpu_capacity()
+    assert caught.value.code=='inference_container_budget'
+    model=ModelProcess(target=echo_model)
+    assert model.max_rss==1024*1024**2
+    model.close()
+
+
+def test_cgroup_v1_limit_and_unlimited_sentinel(monkeypatch):
+    from phonoteka import inference_budget as budget
+    original=Path.read_text
+    def read(path,*args,**kwargs):
+        name=str(path)
+        if name=='/sys/fs/cgroup/memory.max':raise FileNotFoundError()
+        if name.endswith('memory.limit_in_bytes'):return '1342177280'
+        return original(path,*args,**kwargs)
+    monkeypatch.setattr(Path,'read_text',read)
+    assert budget.container_memory_limit()==1280*1024**2
+    monkeypatch.setattr(Path,'read_text',lambda *a,**k:str(2**63))
+    assert budget.container_memory_limit() is None
+
+
+def test_cancelled_active_model_unloads_and_next_job_can_run(tmp_path):
+    loaded=threading.Event();cancelled=threading.Event();errors=[]
+    worker=ModelProcess(target=loaded_slow_model,deadline=10,scratch_root=tmp_path,on_residency=lambda value:loaded.set() if value else None)
+    def run():
+        try:worker.run({'generation':1},cancel_event=cancelled)
+        except BudgetError as error:errors.append(error.code)
+    thread=threading.Thread(target=run);thread.start()
+    try:
+        assert loaded.wait(5),'Model did not load'
+        cancelled.set();thread.join(3)
+        assert not thread.is_alive() and errors==['inference_cancelled']
+        assert worker.process is None and not list(tmp_path.iterdir())
+        worker.target=echo_model
+        assert worker.run({'generation':2})['generation']==2
+    finally:
+        cancelled.set();worker.close();thread.join(5)
+
+
 def echo_model(connection):
     while True:
         try:

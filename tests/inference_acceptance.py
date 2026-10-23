@@ -15,7 +15,7 @@ import time
 import uuid
 
 MIB = 1024 ** 2
-LIMITS = {'inference_memory': 1280*MIB, 'ordinary_memory': 256*MIB,
+LIMITS = {'inference_memory': 3072*MIB, 'ordinary_memory': 256*MIB,
           'reserved_host_memory': 512*MIB, 'stop_below_available': 512*MIB,
           'inference_cpus': 2, 'ordinary_cpus': 1, 'overall_deadline_seconds': 600}
 CHECKS = {'inference_protocol_passed', 'ordinary_measured_checks_passed',

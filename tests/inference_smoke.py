@@ -58,7 +58,20 @@ with tempfile.TemporaryDirectory() as directory:
         events=[json.loads(line) for line in logs.stdout.splitlines() if line.strip()]
         assert any(e['event']=='inference_finished' for e in events)
         assert 'speech.wav' not in logs.stdout and 'test-metrics-key' not in logs.stdout and not logs.stderr
-        print(json.dumps({'real_model':result['model'],'revision':result['model_revision'],'words':len(result['words']),'timeline_valid':True,'deduplication':True,'forced_alignment_coverage':alignment['coverage']}))
+        low_probe="""import hashlib
+from pathlib import Path
+from phonoteka import inference
+from phonoteka.inference_budget import BudgetError
+p=Path('/work/speech.wav')
+try:inference.execute({'relative_path':p.name,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+except BudgetError as e:
+ assert e.code=='inference_container_budget' and inference.MODEL_INSTANCE is None
+ print('UNDERSIZED_CPU_REFUSED_BEFORE_MODEL_LOAD')
+else:raise AssertionError('Undersized CPU profile was accepted')
+"""
+        low=subprocess.run(['docker','run','--rm','--no-healthcheck','--memory','1280m','--memory-swap','1280m','--cpus','1','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','64','--user','10001:10001','--tmpfs','/tmp:size=64m,mode=1777','-v',str(root/'work')+':/work:ro','--entrypoint','python','phonoteka-inference:ci','-c',low_probe],capture_output=True,text=True,timeout=45,check=True)
+        assert 'UNDERSIZED_CPU_REFUSED_BEFORE_MODEL_LOAD' in low.stdout
+        print(json.dumps({'real_model':result['model'],'revision':result['model_revision'],'words':len(result['words']),'timeline_valid':True,'deduplication':True,'forced_alignment_coverage':alignment['coverage'],'undersized_cpu_no_oom':True}))
     except BaseException:
         subprocess.run(['docker','logs','--tail','100',name],check=False)
         raise
