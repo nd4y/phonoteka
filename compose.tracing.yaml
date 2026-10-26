@@ -1,0 +1,33 @@
+# Optional overlay: docker compose -f compose.yaml -f compose.tracing.yaml config
+# Production deployment remains through Portainer with its existing mounts/networks.
+x-tracing-env: &tracing-env
+  PHONOTEKA_TRACING_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: https://otlp.phonoteka.internal:4318/v1/traces
+  OTEL_EXPORTER_OTLP_CERTIFICATE: /run/secrets/otlp_ca.pem
+  OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE: /run/secrets/otlp_client.crt
+  OTEL_EXPORTER_OTLP_CLIENT_KEY: /run/secrets/otlp_client.key
+  OTEL_EXPORTER_OTLP_TOKEN_FILE: /run/secrets/otlp_token
+  GRAFANA_TRACE_ORIGIN: ${GRAFANA_TRACE_ORIGIN:?Set Grafana HTTPS origin}
+  GRAFANA_TRACES_DATASOURCE_UID: ${GRAFANA_TRACES_DATASOURCE_UID:-phonoteka-jaeger}
+x-tracing-volumes: &tracing-volumes
+  - ${TRACE_ROOT:?}/secrets/ca.pem:/run/secrets/otlp_ca.pem:ro
+  - ${TRACE_ROOT:?}/secrets/client.crt:/run/secrets/otlp_client.crt:ro
+  - ${TRACE_ROOT:?}/secrets/client.key:/run/secrets/otlp_client.key:ro
+  - ${TRACE_ROOT:?}/secrets/otlp_token:/run/secrets/otlp_token:ro
+services:
+  app:
+    environment: *tracing-env
+    volumes: *tracing-volumes
+    networks: [default, traces]
+  worker:
+    environment: *tracing-env
+    volumes: *tracing-volumes
+    networks: [default, traces]
+  inference:
+    environment: *tracing-env
+    volumes: *tracing-volumes
+    networks: [default, traces]
+networks:
+  traces:
+    external: true
+    name: phonoteka_trace_ingest

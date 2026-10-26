@@ -264,6 +264,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.fetchone(settings.db_path, "SELECT 1")
         return {"status": "ok", "version": __version__}
 
+    @app.get('/api/diagnostics/tracing')
+    def tracing_diagnostics(request: Request):
+        security.require_session(request,settings)
+        from .tracing import diagnostics
+        return diagnostics()
+
     @app.get("/api/auth/session")
     def auth_session(request: Request):
         active = security.session(request, settings)
@@ -758,6 +764,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except media.MediaError as exc:
                     raise security.error(409, exc.code, exc.message) from exc
             payload = {"items": items, "params": body.params}
+            from .tracing import carrier
+            if carrier(): payload['_trace'] = carrier()
             if active.get('api_token_id'):
                 payload['auth_token_id']=active['api_token_id']
                 payload['auth_scopes']=sorted(active['scopes'])

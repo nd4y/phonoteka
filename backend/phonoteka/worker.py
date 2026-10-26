@@ -1044,7 +1044,8 @@ class Worker:
         async def one(item):
             if stop_admission(): return
             with context(track_id=opaque_id(item['track_id'])), processing_activity.attempt(
-                    self.settings.db_path, job['id'], item['track_id'], self.activity_generation):
+                    self.settings.db_path, job['id'], item['track_id'], self.activity_generation,
+                    json.loads(job['payload']).get('_trace')):
                 await one_inner(item)
         await self.bounded_items(items, one, should_stop=stop_admission)
         current=db.fetchone(self.settings.db_path,'SELECT * FROM jobs WHERE id=?',(job['id'],))
@@ -1222,6 +1223,8 @@ def main():
     parser.add_argument("--health", action="store_true", help="Check worker heartbeat")
     args = parser.parse_args()
     configure_logging('worker')
+    from . import tracing
+    tracing.configure('worker')
     settings = Settings.from_env()
     if args.health:
         heartbeat = json.loads(db.setting(settings.db_path, "worker_heartbeat", "{}"))
@@ -1240,6 +1243,7 @@ def main():
     finally:
         if server: server.shutdown(); server.server_close()
         log('worker_stopped')
+        tracing.shutdown()
     return 0
 
 

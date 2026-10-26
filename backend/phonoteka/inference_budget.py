@@ -118,13 +118,16 @@ def _model_main(connection):
     from .inference import execute
     from .telemetry import configure_logging
     configure_logging('inference')
+    from . import tracing
+    tracing.configure('inference')
     while True:
         try:
             body = read_model_input(connection.recv_bytes(MAX_REFERENCE_BYTES))
         except (EOFError, OSError):
             return
         try:
-            result = execute(body, on_model_loaded=lambda: connection.send_bytes(b'{"event":"loaded"}'))
+            with tracing.span('asr.execute', body.get('_trace_attributes',{}), parent=tracing.extracted(body.get('_trace',{}))):
+                result = execute(body, on_model_loaded=lambda: connection.send_bytes(b'{"event":"loaded"}'))
             write_model_result(body['_scratch_root'], result)
             document = {'event':'result'}
         except BaseException as exc:

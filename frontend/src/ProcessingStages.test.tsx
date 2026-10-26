@@ -10,6 +10,13 @@ const stage: ProcessingStage = { stage_id: 'phase', attempt_id: 'attempt', track
   http_status: null, reason_code: null, long_running: false };
 
 describe('owner-facing processing measurements', () => {
+  it('opens a measured trace separately without replacing the app screen', () => {
+    const traced = {...stage, trace_id:'a'.repeat(32), trace_url:'https://grafana.example/explore?trace=aaa'};
+    const html = renderToStaticMarkup(<ProcessingStages activity={{...base, stage_history:[traced]}} />);
+    expect(html).toContain('Подробная трасса в Grafana');
+    expect(html).toContain('target="_blank"'); expect(html).toContain('noopener noreferrer');
+    expect(html).toContain('Trace ID:');
+  });
   it('names the provider and distinguishes unknown duration from a completed zero', () => {
     const html = renderToStaticMarkup(<ProcessingStages activity={{...base, current_stages: [stage], stage_history: [stage]}} />);
     expect(html).toContain('lrclib'); expect(html).toContain('Test.mp3');

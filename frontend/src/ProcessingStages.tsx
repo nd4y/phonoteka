@@ -56,6 +56,8 @@ export function ProcessingStages({ activity }: { activity: JobActivity }) {
         <strong>{stage.filename || 'Файл'} · {labels[stage.stage] || stage.stage}</strong>
         <span>{stage.provider ? `${stage.provider} · ` : ''}{states[stage.state] || stage.state} · {duration(stage.duration_ms === null ? null : stage.duration_ms / 1000)}{stage.http_status ? ` · HTTP ${stage.http_status}` : ''}</span>
         {stage.reason_code && <small>{reasons[stage.reason_code] || stage.reason_code}</small>}
+        {stage.trace_url && <a href={stage.trace_url} target="_blank" rel="noopener noreferrer">Подробная трасса в Grafana</a>}
+        {stage.trace_id && <small>Trace ID: {stage.trace_id}</small>}
       </li>)}</ol>
       {activity.stages_truncated && <p className="muted small">Показаны последние 100 этапов.</p>}
     </details>

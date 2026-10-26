@@ -13,7 +13,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 40
     permissions:
       contents: read
       packages: write
@@ -56,6 +56,23 @@ jobs:
             -t phonoteka:ci .
       - name: Container smoke and isolation
         run: python3 tests/container_smoke.py
+      - name: Native tracing infrastructure configuration
+        run: python3 tests/tracing_infrastructure.py
+      - name: Generated tracing workload, resource budget and ten-minute receiver outage
+        run: |
+          docker run --rm --user 0:0 --memory=768m --memory-swap=768m --cpus=2 \
+            --volume "$PWD/tests:/tests:ro" --volume "$RUNNER_TEMP:/out" \
+            --entrypoint python phonoteka:ci /tests/tracing_budget.py \
+            --output /out/tracing-budget.json --outage-seconds 600
+      - name: Record generated tracing acceptance evidence
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/tracing-budget.json" ]; then
+            cat "$RUNNER_TEMP/tracing-budget.json"
+            printf '\n### Generated tracing budget\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+            cat "$RUNNER_TEMP/tracing-budget.json" >> "$GITHUB_STEP_SUMMARY"
+            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Push exact tested image candidate
         if: github.event_name != 'pull_request'
         id: candidate

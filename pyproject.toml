@@ -17,6 +17,8 @@ dependencies = [
   "shazamio==0.8.1",
   "yt-dlp==2026.8.19",
   "prometheus-client==0.26.0",
+  "opentelemetry-sdk==1.45.1",
+  "opentelemetry-exporter-otlp-proto-http==1.45.1",
   "audioop-lts==0.2.2; python_version >= '3.13'",
 ]
 

@@ -1,0 +1,69 @@
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  bearertokenauth:
+    filename: /run/secrets/otlp_token
+  file_storage:
+    directory: /queue
+    max_size: 4294967296
+    compaction:
+      on_rebound: true
+      directory: /queue
+      rebound_needed_threshold_mib: 128
+      rebound_trigger_threshold_mib: 16
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        auth:
+          authenticator: bearertokenauth
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 128
+  filter/namespace:
+    error_mode: propagate
+    traces:
+      span:
+        - 'resource.attributes["service.namespace"] != "phonoteka"'
+  transform/privacy:
+    error_mode: propagate
+    trace_statements:
+      - context: resource
+        statements:
+          - 'keep_matching_keys(attributes, "^(service\\.(namespace|name|version|instance\\.id)|deployment\\.environment\\.name|host\\.name)$")'
+      - context: span
+        statements:
+          - 'keep_matching_keys(attributes, "^(phonoteka\\.(job\\.id|item\\.id|attempt\\.(id|number)|operation|stage|provider|outcome|reason_code|cache\\.hit|segment\\.number)|http\\.(request\\.method|response\\.status_code|route)|server\\.(address|port)|url\\.scheme|error\\.type|dns\\.(question\\.(name|type)|answers\\.count)|network\\.(transport|protocol\\.name))$")'
+  batch:
+    timeout: 1s
+    send_batch_size: 128
+    send_batch_max_size: 128
+exporters:
+  otlp_http/jaeger:
+    endpoint: http://jaeger:4318
+    compression: none
+    timeout: 3s
+    retry_on_failure:
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 10m
+    sending_queue:
+      enabled: true
+      sizer: bytes
+      queue_size: 268435456
+      num_consumers: 2
+      block_on_overflow: false
+      storage: file_storage
+service:
+  extensions: [health_check, bearertokenauth, file_storage]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/namespace, transform/privacy, batch]
+      exporters: [otlp_http/jaeger]
+  telemetry:
+    logs:
+      level: warn

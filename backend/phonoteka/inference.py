@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from fastapi import FastAPI, Request, HTTPException, Response
 from pydantic import BaseModel, Field
 from fastapi.responses import JSONResponse
-from . import cue, media
+from . import cue, media, tracing
 from .telemetry import Metrics, ObserveHTTP, metrics_authorized, CONTENT_TYPE_LATEST, log
 from .metrics import DatabaseCollector
 from .inference_budget import ModelProcess, BudgetError, PROFILE, MAX_DURATION, MAX_PCM_BYTES, MAX_SAMPLES, MAX_INPUT_CHANNELS, MAX_INPUT_RATE, profile
@@ -151,7 +151,10 @@ async def worker():
             current=conn.execute('SELECT state FROM jobs WHERE id=?',(row['id'],)).fetchone()
             if current['state']=='cancelling':cancelled.set()
         try:
-            result=await asyncio.to_thread(MODEL_WORKER.run,json.loads(row['input']),cancel_event=cancelled)
+            data=json.loads(row['input'])
+            with tracing.span('asr.transcribe', data.get('_trace_attributes',{}), parent=tracing.extracted(data.get('_trace',{}))):
+                data['_trace']=tracing.carrier()
+                result=await asyncio.to_thread(MODEL_WORKER.run,data,cancel_event=cancelled)
             state='succeeded'
         except Exception as exc:
             if getattr(exc,'code',None)!='inference_cancelled':LOG.exception('Inference job failed',extra={'event':'inference_failed','fields':{'job_id':row['id']}})
@@ -210,6 +213,11 @@ def health(): return {'status':'ok','model':MODEL,'model_revision':MODEL_REVISIO
 @app.post('/jobs',status_code=202)
 def submit(body:Input,request:Request):
     auth(request);data=body.model_dump();key=identity(data)
+    # Only after the existing RPC authentication; trace data never alters dedup identity.
+    with tracing.span('asr.accept', parent=tracing.extracted(dict(request.headers)), kind=tracing.SpanKind.SERVER):
+        data['_trace']=tracing.carrier()
+        data['_trace_attributes']=tracing.safe(tracing.attributes(job_id=request.headers.get('x-phonoteka-job-id'),
+            item_id=request.headers.get('x-phonoteka-item-id')))
     cue.safe_path(ROOT,body.relative_path)
     with connect() as conn:
         count=conn.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running','cancelling')").fetchone()[0]

@@ -3,7 +3,7 @@ import hashlib
 import json
 import time
 import httpx
-from . import db, media, provider_policy, lyrics_document
+from . import db, media, provider_policy, lyrics_document, tracing
 
 
 async def process(worker, job, item):
@@ -25,7 +25,8 @@ async def process(worker, job, item):
     token=(await worker.io(settings.inference_secret_file.read_text)).strip()
     body={'relative_path':item['relative_path'],'sha256':item['sha256'],'language':params.get('language') or None,'generation':item.get('generation',params.get('generation',0)),'reference_text':item.get('reference_text') if job['kind']=='align' else None}
     worker.authorize_grant(job)
-    async with httpx.AsyncClient(base_url=settings.inference_url,timeout=15,headers={'Authorization':'Bearer '+token}) as client:
+    headers={'Authorization':'Bearer '+token, **tracing.carrier(), 'x-phonoteka-job-id':job['id'], 'x-phonoteka-item-id':item['track_id']}
+    async with httpx.AsyncClient(base_url=settings.inference_url,timeout=15,headers=headers) as client:
         health=await client.get('/health');health.raise_for_status();model=health.json()['model'];revision=health.json()['model_revision']
         if health.json().get('contract')!='transcribe-v3' or not health.json().get('profile_revision'): raise media.MediaError('inference_contract','Update app and inference to compatible versions')
         remote_id=hashlib.sha256(json.dumps([body,model,revision,health.json()['profile_revision'],'transcribe-v3'],sort_keys=True).encode()).hexdigest()

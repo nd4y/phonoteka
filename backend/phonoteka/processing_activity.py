@@ -10,7 +10,8 @@ import threading
 import time
 import uuid
 
-from . import db
+from . import db, tracing
+from opentelemetry import trace
 from .telemetry import PROVIDERS
 
 CURRENT = ContextVar('processing_attempt', default=None)
@@ -33,6 +34,31 @@ class Attempt:
         self.lock = threading.RLock()
         self.partial = False
         self.root_id = None
+        self.number = None
+        self.previous = None
+
+    def trace_history(self):
+        if tracing.diagnostics()['state'] != 'enabled': return
+        try:
+            with db.connect(self.path) as conn:
+                conn.execute('PRAGMA busy_timeout=20')
+                row = conn.execute('SELECT number,context FROM trace_attempts WHERE job_id=? AND item_id=?',
+                                   (self.job_id, self.item_id)).fetchone()
+                if row:
+                    import json
+                    self.number, self.previous = row['number']+1, json.loads(row['context'])
+                else: self.number = 1
+        except Exception: self.partial = True
+
+    def remember_trace(self):
+        if self.number is None: return
+        try:
+            with db.connect(self.path) as conn:
+                conn.execute('PRAGMA busy_timeout=20')
+                conn.execute('INSERT OR REPLACE INTO trace_attempts VALUES(?,?,?,?,?)',
+                    (self.job_id, self.item_id, self.number, db.encode(tracing.carrier()), db.utcnow()))
+                conn.execute("DELETE FROM trace_attempts WHERE rowid IN (SELECT t.rowid FROM trace_attempts t JOIN jobs j ON j.id=t.job_id WHERE j.state NOT IN ('queued','running','paused','waiting_authorization') AND t.updated_at < strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-14 days') LIMIT 100)")
+        except Exception: self.partial = True
 
     def emit(self, value):
         # Telemetry has a short contention budget and cannot roll back media.
@@ -50,11 +76,31 @@ class Attempt:
         stage = {'stage_id': str(uuid.uuid4()), 'stage': name if name in STAGES else 'preflight',
                  'parent_stage_id': parent or self.root_id, 'provider': provider if provider in PROVIDERS else None,
                  'started_at': db.utcnow(), 'state': 'running', 'progress_observability': 'unavailable'}
+        if name != 'file':
+            current = CURRENT_STAGE.get()
+            parent_span = current[1][0].get('_otel') if current and current[0] is self else self.action[0].get('_otel') if self.action else None
+            parent_context = trace.set_span_in_context(parent_span) if parent_span else None
+            canonical = 'provider.'+('caa' if provider=='coverartarchive' else provider) if name=='provider_lookup' and provider in PROVIDERS else {
+                'decode':'audio.decode','fingerprint_sample':'fingerprint.compute','asr':'asr.transcribe',
+                'write_tags':'metadata.write','commit':'result.verify'}.get(name,'file.stage')
+            stage['_otel'] = tracing.start(canonical, tracing.attributes(stage=name, provider=provider),
+                parent=tracing.segment_context() or parent_context)
+            sc = stage['_otel'].get_span_context()
+            if sc.is_valid: stage.update(trace_id=format(sc.trace_id,'032x'), span_id=format(sc.span_id,'016x'))
+        else: stage.update(tracing.correlation())
+        if self.number is not None: stage['attempt_number'] = self.number
         self.emit(stage)
         return stage, time.monotonic()
 
     def end(self, handle, state, reason=None, status=None):
         stage, started = handle
+        otel = stage.get('_otel')
+        if otel:
+            otel.set_attribute('phonoteka.outcome', state)
+            if reason in REASONS: otel.set_attribute('phonoteka.reason_code', reason)
+            if type(status) is int: otel.set_attribute('http.response.status_code', status)
+            if state == 'failed': otel.set_status(trace.Status(trace.StatusCode.ERROR))
+            otel.end()
         self.emit({**stage, 'state': state, 'ended_at': db.utcnow(),
             'duration_ms': round(max(0, time.monotonic()-started)*1000, 3),
             'reason_code': reason if reason in REASONS else None,
@@ -73,16 +119,21 @@ class Attempt:
 
 
 @contextmanager
-def attempt(path, job_id, item_id, executor):
+def attempt(path, job_id, item_id, executor, enqueue_context=None):
     value = Attempt(path, job_id, item_id, executor)
+    value.trace_history()
     token = CURRENT.set(value)
-    root = value.begin('file')
-    value.root_id = root[0]['stage_id']
     try:
-        yield value
+        with tracing.file_attempt(job_id, item_id, value.identity, value.number, value.previous or enqueue_context) as otel:
+            value.remember_trace()
+            root = value.begin('file')
+            value.root_id = root[0]['stage_id']
+            try: yield value
+            finally:
+                value.finish()
+                value.end(root, value.outcome)
+                otel.set_attribute('phonoteka.outcome', value.outcome)
     finally:
-        value.finish()
-        value.end(root, value.outcome)
         CURRENT.reset(token)
 
 
@@ -106,6 +157,7 @@ def stage(name, provider=None):
     parent = current[1][0]['stage_id'] if current and current[0] is value else value.action[0]['stage_id'] if value.action else value.root_id
     handle = value.begin(name, provider, parent)
     token = CURRENT_STAGE.set((value, handle))
+    otel_token = tracing.otcontext.attach(trace.set_span_in_context(handle[0]['_otel'])) if handle[0].get('_otel') else None
     result = {}
     try:
         yield result
@@ -116,6 +168,7 @@ def stage(name, provider=None):
     else:
         value.end(handle, 'succeeded', status=result.get('http_status'))
     finally:
+        if otel_token is not None: tracing.otcontext.detach(otel_token)
         CURRENT_STAGE.reset(token)
 
 
@@ -162,6 +215,12 @@ def project(events, rows, heartbeat, now, *, job_running=True):
                for k in ('track_id', 'attempt_id', 'executor_instance_id')): continue
         safe = {k: data.get(k) for k in ('track_id', 'attempt_id', 'stage_id', 'stage',
                     'parent_stage_id', 'executor_instance_id')}
+        import re
+        for key, length in (('trace_id',32),('span_id',16)):
+            value = data.get(key)
+            if isinstance(value,str) and re.fullmatch('[a-f0-9]{'+str(length)+'}',value): safe[key] = value
+        if safe.get('trace_id'):
+            safe['trace_url'] = tracing.grafana_link(safe['trace_id'])
         safe.update(provider=allowed(data.get('provider'), PROVIDERS),
             started_at=data.get('started_at') if epoch(data.get('started_at')) is not None else None,
             ended_at=data.get('ended_at') if epoch(data.get('ended_at')) is not None else None,

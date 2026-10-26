@@ -7,6 +7,8 @@ def main():
     service = sys.argv[1] if len(sys.argv)>1 else 'app'
     if service not in {'app','inference'}: raise SystemExit('Expected app or inference')
     configure_logging(service)
+    from . import tracing
+    tracing.configure('api' if service == 'app' else service)
     log('service_starting')
     import uvicorn
     uvicorn.run('phonoteka.'+service+':app',host='0.0.0.0',port=8000 if service=='app' else 8001,

@@ -42,4 +42,17 @@ shazamio==0.8.1
 yt-dlp==2026.8.19
 prometheus-client==0.26.0
 shazamio-core==1.1.2
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-exporter-otlp-proto-common==1.45.1
+opentelemetry-exporter-otlp-common==0.66b1
+opentelemetry-exporter-http-transport==0.66b1
+opentelemetry-proto==1.45.1
+googleapis-common-protos==1.76.0
+protobuf==7.36.2
+requests==2.34.2
+charset-normalizer==3.5.2
+urllib3==2.8.0
 yarl==1.25.1

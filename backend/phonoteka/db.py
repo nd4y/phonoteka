@@ -146,6 +146,11 @@ def base_schema_sql():
             job_id TEXT NOT NULL REFERENCES jobs(id), created_at TEXT NOT NULL,
             PRIMARY KEY(scope,key)
         );
+        CREATE TABLE IF NOT EXISTS trace_attempts (
+            job_id TEXT NOT NULL REFERENCES jobs(id), item_id TEXT NOT NULL,
+            number INTEGER NOT NULL, context TEXT NOT NULL, updated_at TEXT NOT NULL,
+            PRIMARY KEY(job_id,item_id)
+        );
         CREATE TABLE IF NOT EXISTS history (
             id TEXT PRIMARY KEY, track_id TEXT NOT NULL REFERENCES tracks(id), job_id TEXT,
             kind TEXT NOT NULL, before_sha256 TEXT, after_sha256 TEXT,

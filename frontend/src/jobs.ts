@@ -10,6 +10,7 @@ export type ActivityEvent = {
   provider?: string; duration_ms?: number; http_status?: number;
 };
 export type ProcessingStage = {
+  trace_id?: string; span_id?: string; trace_url?: string | null;
   stage_id: string; attempt_id: string; track_id: string; filename?: string | null; stage: string; provider: string | null;
   state: string; duration_ms: number | null; elapsed_seconds: number | null;
   http_status: number | null; reason_code: string | null; long_running: boolean;

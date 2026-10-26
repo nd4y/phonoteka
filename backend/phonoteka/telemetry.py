@@ -64,6 +64,8 @@ class JsonFormatter(logging.Formatter):
         data = {'timestamp':datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec='milliseconds'),
                 'level':record.levelname.lower(),'service':self.service,'version':__version__,
                 'logger':record.name,'event':event or 'library_log'}
+        from .tracing import correlation
+        data.update(correlation())
         for key, value in {**CONTEXT.get(), **getattr(record, 'fields', {})}.items():
             if key in FIELDS and isinstance(value, (str,int,float,bool,type(None))):
                 if key == 'action':
@@ -112,6 +114,18 @@ class Metrics:
         self.registry = CollectorRegistry()
         ProcessCollector(registry=self.registry); PlatformCollector(registry=self.registry); GCCollector(registry=self.registry)
         self.registry.register(PolicyDenialsCollector())
+        from .tracing import diagnostics
+        class TraceCollector:
+            def collect(self):
+                state = diagnostics()
+                for name in ('accepted','exported','dropped','failed','partial'):
+                    metric = CounterMetricFamily('phonoteka_tracing_'+name+'_spans_total', 'OTLP span delivery count')
+                    metric.add_metric([], state.get(name, 0)); yield metric
+                for name in ('queued','queued_bytes'):
+                    from prometheus_client.core import GaugeMetricFamily
+                    metric = GaugeMetricFamily('phonoteka_tracing_'+name, 'Bounded OTLP queue')
+                    metric.add_metric([], state.get(name, 0)); yield metric
+        self.registry.register(TraceCollector())
         Gauge('phonoteka_build_info','Running component and version',['component','version'],registry=self.registry).labels(service,__version__).set(1)
         self.http = Counter('phonoteka_http_requests_total','HTTP requests',['method','route','status'],registry=self.registry)
         self.http_duration = Histogram('phonoteka_http_request_duration_seconds','Full HTTP response duration',['method','route'],buckets=(.005,.02,.1,.5,1,3,10,30,120),registry=self.registry)
@@ -165,7 +179,12 @@ class ObserveHTTP:
                 status = message['status']; message = {**message,'headers':list(message.get('headers',[]))+[(b'x-request-id',request_id.encode())]}
             await send(message)
         self.metrics.http_active.inc()
-        with context(request_id=request_id):
+        from . import tracing
+        method = bounded(scope['method'], {'GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'})
+        measured = scope['method'] != 'GET' or not scope['path'].startswith(('/api/jobs','/api/summary','/api/events'))
+        from contextlib import nullcontext
+        with context(request_id=request_id), (tracing.span('http.server', {'http.request.method': method},
+                parent=tracing.otcontext.Context(), kind=tracing.SpanKind.SERVER) if measured else nullcontext()) as server_span:
             try: await self.app(scope,receive,observed_send)
             except BaseException as exc:
                 log('http_exception', logging.ERROR, error_type=type(exc).__name__)
@@ -173,6 +192,11 @@ class ObserveHTTP:
             finally:
                 method = bounded(scope['method'], {'GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'})
                 route = getattr(scope.get('route'),'path','unmatched')
+                if server_span:
+                    server_span.update_name(method+' '+route)
+                    server_span.set_attribute('http.route',route)
+                    server_span.set_attribute('http.response.status_code',status)
+                    if status >= 500: server_span.set_status(tracing.Status(tracing.StatusCode.ERROR))
                 duration = time.perf_counter()-started
                 self.metrics.http.labels(method,route,str(status)).inc(); self.metrics.http_duration.labels(method,route).observe(duration); self.metrics.http_active.dec()
                 log('http_request', logging.ERROR if status>=500 else logging.WARNING if status>=400 else logging.INFO,
