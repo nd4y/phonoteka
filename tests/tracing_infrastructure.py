@@ -30,7 +30,9 @@ with tempfile.TemporaryDirectory(prefix='phonoteka-trace-infra-') as directory:
         for mount in service['volumes']:
             command+=['--volume',mount['source']+':'+mount['target']+(':ro' if mount.get('read_only') else '')]
         command+=['--tmpfs','/tmp:rw,size=32m,mode=1777']
-        if name=='ingest':command+=['--entrypoint','nginx',image,'-t','-c','/etc/nginx/nginx.conf']
+        # Syntax validation has no compose DNS; only resolve the upstream here.
+        # Real connectivity/auth/persistence are checked against the deployed stack.
+        if name=='ingest':command+=['--add-host','collector:127.0.0.1','--entrypoint','nginx',image,'-t','-c','/etc/nginx/nginx.conf']
         else:command+=[image,*arguments]
         run(*command);results.append({'component':name,'image':image,'native_validation':True})
     print(json.dumps({'validated':results}))
