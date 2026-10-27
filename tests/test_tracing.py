@@ -89,6 +89,22 @@ def test_async_concurrency_keeps_each_file_separate(spans, server):
     assert not trace.get_current_span().get_span_context().is_valid
 
 
+def test_aiohttp_request_and_dns_are_traced_without_private_url(spans,server):
+    import aiohttp
+    async def run():
+        with tracing.file_attempt(str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4())):
+            async with aiohttp.ClientSession(trust_env=False) as http:
+                async with http.get(f'http://localhost:{server.server_port}/private?token=secret-aiohttp') as response:
+                    assert await response.text()=='ok'
+    asyncio.run(run())
+    result=spans.get_finished_spans()
+    request=next(s for s in result if s.name=='http.client')
+    assert request.attributes['phonoteka.operation']=='response_headers'
+    assert request.attributes['http.response.status_code']==200
+    assert any(s.name=='dns.lookup' for s in result)
+    assert 'secret-aiohttp' not in json.dumps([dict(s.attributes) for s in result])
+
+
 def test_redirect_is_two_actual_exchanges_without_duplicate_transport_hooks(spans, server):
     with tracing.file_attempt(str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4())):
         with httpx.Client(trust_env=False,follow_redirects=True) as http:

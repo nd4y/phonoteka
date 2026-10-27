@@ -387,6 +387,24 @@ def install_network():
                 current.set_status(Status(StatusCode.ERROR)); current.end(); raise
     httpx.Client._send_single_request = send
     httpx.AsyncClient._send_single_request = asend
+    # ShazamIO uses aiohttp rather than HTTPX. Its request coroutine ends once
+    # response headers arrive; body reads happen later and are not guessed here.
+    import aiohttp
+    aiohttp_request = aiohttp.ClientSession._request
+    async def aio_request(self, method, url, *args, **kwargs):
+        if not active(): return await aiohttp_request(self, method, url, *args, **kwargs)
+        from yarl import URL
+        target = URL(url)
+        values = {'http.request.method': str(method).upper()[:16], 'server.address': host(target.host),
+            'server.port': target.port or (443 if target.scheme == 'https' else 80),
+            'url.scheme': target.scheme, 'http.route': http_route(target),
+            'phonoteka.operation': 'response_headers'}
+        with span('http.client', values, parent=segment_context(), kind=SpanKind.CLIENT) as current:
+            response = await aiohttp_request(self, method, url, *args, **kwargs)
+            current.set_attribute('http.response.status_code', response.status)
+            if response.status >= 400: current.set_status(Status(StatusCode.ERROR))
+            return response
+    aiohttp.ClientSession._request = aio_request
 
 
 def install_httpcore_trace(request, asynchronous=False):
