@@ -26,9 +26,11 @@ import wave
 def fixtures(root, audio=True, count=500):
     def openssl(*args): subprocess.run(['openssl',*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     openssl('req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes','-days','1',
+        '-addext','basicConstraints=critical,CA:TRUE','-addext','keyUsage=critical,keyCertSign,cRLSign',
+        '-addext','subjectKeyIdentifier=hash',
         '-subj','/CN=Generated Trace Test CA','-keyout',str(root/'ca.key'),'-out',str(root/'ca.pem'))
     for name,cn,ext in [('server','localhost','subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n'),('client','generated-trace-test','extendedKeyUsage=clientAuth\n')]:
-        (root/(name+'.ext')).write_text(ext)
+        (root/(name+'.ext')).write_text(ext+'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n')
         openssl('req','-new','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes','-subj','/CN='+cn,
             '-keyout',str(root/(name+'.key')),'-out',str(root/(name+'.csr')))
         openssl('x509','-req','-in',str(root/(name+'.csr')),'-CA',str(root/'ca.pem'),'-CAkey',str(root/'ca.key'),

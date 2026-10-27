@@ -149,6 +149,25 @@ def test_external_parent_ignored_and_diagnostics_require_auth(client,settings,sp
         assert value.get_span_context().trace_id != int('1'*32,16)
 
 
+def test_owner_enqueue_persists_own_context_and_links_attempt(client,settings,spans):
+    headers=authenticated(client,settings)
+    item,_=seed(settings)
+    foreign='00-'+'1'*32+'-'+'2'*16+'-01'
+    response=client.post('/api/jobs',json={'kind':'audit','track_ids':[item]},headers={
+        **headers,'Idempotency-Key':'trace-enqueue-check','traceparent':foreign,'baggage':'secret'})
+    assert response.status_code==202,response.text
+    identity=response.json()['id']
+    with db.connect(settings.db_path) as conn:
+        payload=json.loads(conn.execute('SELECT payload FROM jobs WHERE id=?',(identity,)).fetchone()[0])
+    parent=trace.get_current_span(tracing.extracted(payload['_trace'])).get_span_context()
+    assert parent.is_valid and parent.trace_id!=int('1'*32,16)
+    assert set(payload['_trace'])=={'traceparent'}
+    with processing_activity.attempt(settings.db_path,identity,item,str(uuid.uuid4()),payload['_trace']):
+        processing_activity.action('decode')
+    root=next(s for s in spans.get_finished_spans() if s.name=='file.attempt')
+    assert root.links[0].context.trace_id==parent.trace_id
+
+
 def test_safe_grafana_link_is_optional_and_encodes_trace_query(monkeypatch):
     value='a'*32
     monkeypatch.delenv('GRAFANA_TRACE_ORIGIN',raising=False)
