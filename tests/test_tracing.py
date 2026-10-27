@@ -122,6 +122,17 @@ def test_segments_bound_span_count_and_preserve_new_nested_parent(spans):
     assert inner.context.trace_id==outer.get_span_context().trace_id
 
 
+def test_long_segment_rolls_on_next_operation(spans):
+    with tracing.file_attempt(str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4())):
+        tracing.SEGMENT.get()['started']-=901
+        with tracing.span('next.operation'): pass
+    result=spans.get_finished_spans()
+    continuation=next(s for s in result if s.name=='file.attempt' and s.links)
+    operation=next(s for s in result if s.name=='next.operation')
+    assert operation.context.trace_id==continuation.context.trace_id
+    assert operation.parent.span_id==continuation.context.span_id
+
+
 def test_redirect_is_two_actual_exchanges_without_duplicate_transport_hooks(spans, server):
     with tracing.file_attempt(str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4())):
         with httpx.Client(trust_env=False,follow_redirects=True) as http:
