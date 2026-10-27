@@ -104,18 +104,31 @@ def child(root, enabled, count, outage_seconds, offset):
         assert result['export']['failed']==result['export']['dropped']==result['export']['partial']==0, result
         assert result['export']['accepted']==result['export']['exported']==Receiver.spans, result
     if enabled and outage_seconds:
-        Receiver.outage=True;deadline=time.monotonic()+outage_seconds;completed=0;peak=0
+        Receiver.outage=True;deadline=time.monotonic()+outage_seconds;completed=0;peak=0;audio_work=0;next_audio=0.0
         while time.monotonic()<deadline:
             with tracing.span('file.stage',tracing.attributes(stage='preflight')):completed+=1
+            if time.monotonic() >= next_audio:
+                # Keep real generated audio decoding and provider HTTP work going
+                # throughout the outage, not just empty tracing spans.
+                with tracing.file_attempt(str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4())):
+                    with tracing.span('audio.decode',tracing.attributes(stage='decode')):
+                        subprocess.run(['ffmpeg','-nostdin','-v','error','-threads','1','-i',str(root/'0.wav'),'-f','null','-'],
+                            check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                    with tracing.span('provider.lrclib',tracing.attributes(stage='metadata_lookup',provider='lrclib')):
+                        response=httpx.get(f'http://localhost:{provider.server_port}/generated',trust_env=False)
+                        assert response.content==b'ok'
+                audio_work+=1;next_audio=time.monotonic()+60
             peak=max(peak,tracing.diagnostics()['queued_bytes']);time.sleep(.05)
         assert tracing._processor.force_flush(2000)
         assert tracing.diagnostics()['failed']>0 and peak<=8*1024*1024
+        assert audio_work>=max(1,outage_seconds//60)
         Receiver.outage=False
         with tracing.span('file.stage',tracing.attributes(stage='preflight')):pass
         assert tracing._processor.force_flush(2000)
         before=time.monotonic();tracing.shutdown();shutdown=time.monotonic()-before
         assert shutdown<=2.1
-        result['outage']={'seconds':outage_seconds,'work_completed':completed,'queue_peak_bytes':peak,'shutdown_seconds':shutdown,'export_after':tracing.diagnostics()}
+        result['outage']={'seconds':outage_seconds,'work_completed':completed,'audio_work_completed':audio_work,
+            'queue_peak_bytes':peak,'shutdown_seconds':shutdown,'export_after':tracing.diagnostics()}
     else:tracing.shutdown()
     print(json.dumps(result),flush=True)
 
