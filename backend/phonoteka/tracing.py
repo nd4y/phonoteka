@@ -219,6 +219,15 @@ def extracted(value):
 
 def start(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
     if _provider is None: return trace.NonRecordingSpan(trace.INVALID_SPAN_CONTEXT)
+    if name != 'file.attempt':
+        segment = segment_context()
+        if segment:
+            candidate = parent if parent is not None else otcontext.get_current()
+            current = trace.get_current_span(candidate).get_span_context()
+            replacement = trace.get_current_span(segment).get_span_context()
+            # Preserve nesting inside the new segment, but never attach newly
+            # created spans to a parent belonging to the previous segment.
+            if current.trace_id != replacement.trace_id: parent = segment
     return _provider.get_tracer('phonoteka', '1').start_span(name, context=parent,
         kind=kind, attributes=safe(values or {}), links=links,
         record_exception=False, set_status_on_exception=False)
@@ -241,7 +250,8 @@ def file_attempt(job_id, item_id, attempt_id, number=None, previous=None):
     prior = trace.get_current_span(extracted(previous or {})).get_span_context()
     if prior.is_valid: links = [Link(prior)]
     values = attributes(job_id=job_id, item_id=item_id, attempt_id=attempt_id, attempt_number=number)
-    token = SEGMENT.set({'count': 0, 'started': time.monotonic(), 'values': values, 'number': 1, 'extra': None})
+    token = SEGMENT.set({'count': 1, 'started': time.monotonic(), 'values': values, 'number': 1, 'extra': None,
+                         'lock': threading.RLock()})
     try:
         with span('file.attempt', values, parent=otcontext.Context(), links=links) as root:
             yield root
@@ -252,19 +262,24 @@ def file_attempt(job_id, item_id, attempt_id, number=None, previous=None):
 
 
 def segment_context():
-    """Cap detailed segments at 512 spans / 15 minutes without stopping work."""
+    """Conservative 1 MiB span budget, and time rollover at the next operation.
+
+    Every exported span is capped at 8 KiB, hence 128 spans bound payload bytes.
+    Long running spans cannot be split until the next instrumented operation.
+    """
     state = SEGMENT.get()
     if not state: return None
-    if state['count'] >= 510 or time.monotonic()-state['started'] >= 900:
-        prior = trace.get_current_span().get_span_context()
-        if state['extra']:
-            prior = state['extra'].get_span_context(); state['extra'].end()
-        state['number'] += 1
-        state['extra'] = start('file.attempt', {**state['values'], 'phonoteka.segment.number': state['number']},
-            parent=otcontext.Context(), links=[Link(prior)] if prior.is_valid else [])
-        state['count'] = 0; state['started'] = time.monotonic()
-    state['count'] += 1
-    if state['extra']: return trace.set_span_in_context(state['extra'])
+    with state['lock']:
+        if state['count'] >= 128 or time.monotonic()-state['started'] >= 900:
+            prior = trace.get_current_span().get_span_context()
+            if state['extra']:
+                prior = state['extra'].get_span_context(); state['extra'].end()
+            state['number'] += 1
+            state['extra'] = start('file.attempt', {**state['values'], 'phonoteka.segment.number': state['number']},
+                parent=otcontext.Context(), links=[Link(prior)] if prior.is_valid else [])
+            state['count'] = 1; state['started'] = time.monotonic()
+        state['count'] += 1
+        if state['extra']: return trace.set_span_in_context(state['extra'])
     return None
 
 
@@ -303,14 +318,14 @@ def install_network():
     def dns(name, port, *args, **kwargs):
         if not active(): return original_dns(name, port, *args, **kwargs)
         with span('dns.lookup', {'dns.question.name': host(name), 'server.port': int(port) if str(port).isdigit() else 0,
-                                'dns.question.type': 'A/AAAA'}, parent=segment_context()) as current:
+                                'dns.question.type': 'A/AAAA'}) as current:
             result = original_dns(name, port, *args, **kwargs)
             current.set_attribute('dns.answers.count', len(result)); return result
     socket.getaddrinfo = dns
     original_async_dns = asyncio.BaseEventLoop.getaddrinfo
     async def async_dns(self, name, port, *args, **kwargs):
         if not active(): return await original_async_dns(self, name, port, *args, **kwargs)
-        with span('dns.lookup', {'dns.question.name': host(name), 'dns.question.type': 'A/AAAA'}, parent=segment_context()) as current:
+        with span('dns.lookup', {'dns.question.name': host(name), 'dns.question.type': 'A/AAAA'}) as current:
             result = await original_async_dns(self, name, port, *args, **kwargs)
             current.set_attribute('dns.answers.count', len(result)); return result
     asyncio.BaseEventLoop.getaddrinfo = async_dns
@@ -359,7 +374,7 @@ def install_network():
                 'url.scheme': request.url.scheme, 'http.route':http_route(request.url)}
     def send(self, request):
         if not active(): return sync_send(self, request)
-        current = start('http.client', request_values(request), parent=segment_context(), kind=SpanKind.CLIENT)
+        current = start('http.client', request_values(request), kind=SpanKind.CLIENT)
         with trace.use_span(current, end_on_exit=False, record_exception=False, set_status_on_exception=False):
             try:
                 internal_headers(request); install_httpcore_trace(request)
@@ -373,7 +388,7 @@ def install_network():
                 current.set_status(Status(StatusCode.ERROR)); current.end(); raise
     async def asend(self, request):
         if not active(): return await async_send(self, request)
-        current = start('http.client', request_values(request), parent=segment_context(), kind=SpanKind.CLIENT)
+        current = start('http.client', request_values(request), kind=SpanKind.CLIENT)
         with trace.use_span(current, end_on_exit=False, record_exception=False, set_status_on_exception=False):
             try:
                 internal_headers(request); install_httpcore_trace(request, asynchronous=True)
@@ -399,7 +414,7 @@ def install_network():
             'server.port': target.port or (443 if target.scheme == 'https' else 80),
             'url.scheme': target.scheme, 'http.route': http_route(target),
             'phonoteka.operation': 'response_headers'}
-        with span('http.client', values, parent=segment_context(), kind=SpanKind.CLIENT) as current:
+        with span('http.client', values, kind=SpanKind.CLIENT) as current:
             response = await aiohttp_request(self, method, url, *args, **kwargs)
             current.set_attribute('http.response.status_code', response.status)
             if response.status >= 400: current.set_status(Status(StatusCode.ERROR))
@@ -421,7 +436,7 @@ def install_httpcore_trace(request, asynchronous=False):
         base, _, ending = name.rpartition('.')
         if base not in names: return
         if ending == 'started':
-            child = start(names[base], {'network.transport': 'tcp'}, parent=segment_context() or parent)
+            child = start(names[base], {'network.transport': 'tcp'}, parent=parent)
             token = otcontext.attach(trace.set_span_in_context(child))
             pending[base] = (child, token)
         elif base in pending:

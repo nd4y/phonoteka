@@ -105,6 +105,23 @@ def test_aiohttp_request_and_dns_are_traced_without_private_url(spans,server):
     assert 'secret-aiohttp' not in json.dumps([dict(s.attributes) for s in result])
 
 
+def test_segments_bound_span_count_and_preserve_new_nested_parent(spans):
+    with tracing.file_attempt(str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4())):
+        for _ in range(127):
+            with tracing.span('small'): pass
+        with tracing.span('outer') as outer:
+            with tracing.span('inner'): pass
+    result=spans.get_finished_spans()
+    traces={}
+    for s in result: traces.setdefault(s.context.trace_id,[]).append(s)
+    assert len(traces)==2 and all(len(group)<=128 for group in traces.values())
+    continuation=next(s for s in result if s.name=='file.attempt' and s.links)
+    assert continuation.attributes['phonoteka.segment.number']==2
+    inner=next(s for s in result if s.name=='inner')
+    assert inner.parent.span_id==outer.get_span_context().span_id
+    assert inner.context.trace_id==outer.get_span_context().trace_id
+
+
 def test_redirect_is_two_actual_exchanges_without_duplicate_transport_hooks(spans, server):
     with tracing.file_attempt(str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4())):
         with httpx.Client(trust_env=False,follow_redirects=True) as http:

@@ -84,7 +84,7 @@ class Attempt:
                 'decode':'audio.decode','fingerprint_sample':'fingerprint.compute','asr':'asr.transcribe',
                 'write_tags':'metadata.write','commit':'result.verify'}.get(name,'file.stage')
             stage['_otel'] = tracing.start(canonical, tracing.attributes(stage=name, provider=provider),
-                parent=tracing.segment_context() or parent_context)
+                parent=parent_context)
             sc = stage['_otel'].get_span_context()
             if sc.is_valid: stage.update(trace_id=format(sc.trace_id,'032x'), span_id=format(sc.span_id,'016x'))
         else: stage.update(tracing.correlation())
