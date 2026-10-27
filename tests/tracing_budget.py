@@ -134,7 +134,12 @@ def main():
             command=[sys.executable,__file__,'--child','on' if enabled else 'off','--root',str(root),'--count',str(args.count),'--offset',str(counts[enabled]*args.count)]
             counts[enabled]+=1
             if index==6 and args.outage_seconds:command+=['--outage-seconds',str(args.outage_seconds)]
-            process=subprocess.run(command,check=True,capture_output=True,text=True,timeout=1200)
+            process=subprocess.run(command,capture_output=True,text=True,timeout=1200)
+            if process.returncode:
+                # Only generated fixtures are used here. Preserve the actual failed
+                # assertion instead of losing child diagnostics behind run(check=True).
+                print(process.stderr[-6000:],file=sys.stderr)
+                raise RuntimeError('generated_workload_child_failed')
             samples.append(json.loads(process.stdout))
     off=[s for s in samples if not s['enabled']];on=[s for s in samples if s['enabled']]
     import statistics
