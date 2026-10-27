@@ -41,6 +41,7 @@ jobs:
         run: |
           python3 -m venv .venv
           .venv/bin/pip install -c requirements.lock '.[test]'
+          PYTHONPATH=backend .venv/bin/python tests/tracing_budget.py --smoke
           .venv/bin/python -m pytest -q
       - name: Frontend tests and production build
         run: |

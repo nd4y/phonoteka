@@ -69,6 +69,7 @@ class BoundedProcessor(SpanProcessor):
         self.queue = deque(); self.bytes = 0
         self.lock = threading.Condition(); self.sending = False; self.stopping = False
         self.accepted = self.exported = self.dropped = self.failed = self.partial = 0
+        self.last_failure = None
         self.thread = threading.Thread(target=self._run, daemon=True, name='otlp-export')
         self.thread.start()
 
@@ -107,7 +108,9 @@ class BoundedProcessor(SpanProcessor):
                     if len(content) > 8192: raise RuntimeError('otlp_response_bound')
                     rejected = ExportTraceServiceResponse.FromString(content).partial_success.rejected_spans if content else 0
                 self.partial += rejected; self.exported += max(0, len(batch)-rejected)
-            except Exception:
+            except Exception as exc:
+                # Safe class only; exception messages may contain credentials.
+                self.last_failure = type(exc).__name__
                 self.failed += len(batch)
             finally:
                 with self.lock: self.sending = False; self.lock.notify_all()
@@ -178,7 +181,7 @@ def diagnostics():
         with _processor.lock:
             result.update(queued=len(_processor.queue), queued_bytes=_processor.bytes,
                 accepted=_processor.accepted, exported=_processor.exported, dropped=_processor.dropped,
-                failed=_processor.failed, partial=_processor.partial)
+                failed=_processor.failed, partial=_processor.partial, last_failure=_processor.last_failure)
     return result
 
 

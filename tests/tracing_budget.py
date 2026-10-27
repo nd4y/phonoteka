@@ -23,7 +23,7 @@ import uuid
 import wave
 
 
-def fixtures(root, audio=True):
+def fixtures(root, audio=True, count=500):
     def openssl(*args): subprocess.run(['openssl',*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     openssl('req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes','-days','1',
         '-subj','/CN=Generated Trace Test CA','-keyout',str(root/'ca.key'),'-out',str(root/'ca.pem'))
@@ -39,7 +39,7 @@ def fixtures(root, audio=True):
         output.setparams((1,2,16000,0,'NONE','not compressed'))
         output.writeframes(b''.join(struct.pack('<h',int(8000*math.sin(2*math.pi*440*n/16000))) for n in range(16000)))
     original=(root/'generated.wav').read_bytes()
-    for index in range(500):
+    for index in range(count):
         # Different valid PCM revision for every generated file, same decode cost.
         (root/(str(index)+'.wav')).write_bytes(original[:44]+struct.pack('<h',index)+original[46:])
 
@@ -99,8 +99,8 @@ def child(root, enabled, count, outage_seconds, offset):
         'max_rss_bytes':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,'rss_before_enable_bytes':start_rss,
         'received_spans':Receiver.spans,'export':tracing.diagnostics()}
     if enabled:
-        assert result['export']['failed']==result['export']['dropped']==result['export']['partial']==0
-        assert result['export']['accepted']==result['export']['exported']==Receiver.spans
+        assert result['export']['failed']==result['export']['dropped']==result['export']['partial']==0, result
+        assert result['export']['accepted']==result['export']['exported']==Receiver.spans, result
     if enabled and outage_seconds:
         Receiver.outage=True;deadline=time.monotonic()+outage_seconds;completed=0;peak=0
         while time.monotonic()<deadline:
@@ -122,8 +122,13 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('--output',type=Path);parser.add_argument('--child',choices=['on','off'])
     parser.add_argument('--root',type=Path);parser.add_argument('--count',type=int,default=125);parser.add_argument('--outage-seconds',type=int,default=0)
     parser.add_argument('--offset',type=int,default=0)
+    parser.add_argument('--smoke',action='store_true')
     args=parser.parse_args()
     if args.child:return child(args.root,args.child=='on',args.count,args.outage_seconds,args.offset)
+    if args.smoke:
+        with tempfile.TemporaryDirectory(prefix='phonoteka-trace-smoke-') as directory:
+            root=Path(directory);fixtures(root,count=1)
+            return child(root,True,1,0,0)
     assert args.output is not None
     samples=[]
     with tempfile.TemporaryDirectory(prefix='phonoteka-trace-budget-') as directory:
