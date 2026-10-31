@@ -40,6 +40,8 @@ OPAQUE = re.compile(r'^(?:[a-f0-9]{32,64}|[a-f0-9-]{36})$')
 PROPAGATOR = TraceContextTextMapPropagator()
 SEGMENT = ContextVar('trace_segment', default=None)
 _provider = None
+_cached_provider = None
+_cached_tracer = None
 _processor = None
 _patched = False
 _state = 'disabled'
@@ -56,18 +58,21 @@ class SegmentDeadline:
         global _deadline_thread
         self.state, self.number = state, state['number']
         with _deadline_condition:
+            earliest = _deadlines[0][0] if _deadlines else float('inf')
             heapq.heappush(_deadlines, (state['started'] + SEGMENT_SECONDS,
                                      next(_deadline_sequence), self))
             if _deadline_thread is None:
                 _deadline_thread = threading.Thread(target=_run_deadlines, daemon=True,
                                                     name='otel-segment-deadlines')
                 _deadline_thread.start()
-            _deadline_condition.notify()
+            if state['started'] + SEGMENT_SECONDS < earliest:
+                _deadline_condition.notify()
 
     def cancel(self):
         with _deadline_condition:
             self.state = None
-            _deadline_condition.notify()
+            if _deadlines and _deadlines[0][2] is self:
+                _deadline_condition.notify()
 
 
 def _run_deadlines():
@@ -151,7 +156,7 @@ def rotate_segment(state, deadline=False):
     state['started'] = now if delayed else scheduled
     start_ns = time.time_ns() if delayed else boundary
     parents = {}
-    tracer = _provider.get_tracer('phonoteka', '1')
+    tracer = sdk_tracer()
     for current, old, values in previous:
         old_context = old.get_span_context()
         parent = parents.get(old.parent.span_id, state['root']) if old.parent else None
@@ -366,6 +371,15 @@ def extracted(value):
     return PROPAGATOR.extract({'traceparent': parent})
 
 
+def sdk_tracer():
+    """Instrumentation scope is process-wide, not a new object per HTTP phase."""
+    global _cached_provider, _cached_tracer
+    if _cached_provider is not _provider:
+        _cached_tracer = _provider.get_tracer('phonoteka', '1')
+        _cached_provider = _provider
+    return _cached_tracer
+
+
 def start(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
     state = SEGMENT.get()
     if state:
@@ -389,7 +403,7 @@ def _start(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
             # Preserve nesting inside the new segment, but never attach newly
             # created spans to a parent belonging to the previous segment.
             if current.trace_id != replacement.trace_id: parent = segment
-    inner = _provider.get_tracer('phonoteka', '1').start_span(name, context=parent,
+    inner = sdk_tracer().start_span(name, context=parent,
         kind=kind, attributes=safe(values or {}), links=links,
         record_exception=False, set_status_on_exception=False)
     state = SEGMENT.get()

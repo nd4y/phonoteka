@@ -63,7 +63,8 @@ jobs:
         run: python3 tests/tracing_infrastructure.py
       - name: Generated tracing workload, resource budget and ten-minute receiver outage
         run: |
-          docker run --rm --user 0:0 --memory=768m --memory-swap=768m --cpus=2 \
+          cpuset="$(python3 -c 'import os; print(",".join(map(str, sorted(os.sched_getaffinity(0))[:2])))')"
+          docker run --rm --user 0:0 --memory=768m --memory-swap=768m --cpuset-cpus="$cpuset" \
             --volume "$PWD/tests:/tests:ro" --volume "$RUNNER_TEMP:/out" \
             --entrypoint python phonoteka:ci /tests/tracing_budget.py \
             --output /out/tracing-budget.json --outage-seconds 600

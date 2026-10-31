@@ -158,7 +158,6 @@ def main():
         for index,enabled in enumerate((False,True,True,False,False,True,True,False)):
             command=[sys.executable,__file__,'--child','on' if enabled else 'off','--root',str(root),'--count',str(args.count),'--offset',str(counts[enabled]*args.count)]
             counts[enabled]+=1
-            if index==6 and args.outage_seconds:command+=['--outage-seconds',str(args.outage_seconds)]
             process=subprocess.run(command,capture_output=True,text=True,timeout=1200)
             if process.returncode:
                 # Only generated fixtures are used here. Preserve the actual failed
@@ -166,12 +165,24 @@ def main():
                 print(process.stderr[-6000:],file=sys.stderr)
                 raise RuntimeError('generated_workload_child_failed')
             samples.append(json.loads(process.stdout))
+        # Keep every on/off pair adjacent. A ten-minute outage between the last
+        # pair would compare workloads under potentially different host load.
+        outage_probe=None
+        if args.outage_seconds:
+            command=[sys.executable,__file__,'--child','on','--root',str(root),'--count','1',
+                     '--outage-seconds',str(args.outage_seconds)]
+            process=subprocess.run(command,capture_output=True,text=True,timeout=1200)
+            if process.returncode:
+                print(process.stderr[-6000:],file=sys.stderr)
+                raise RuntimeError('generated_outage_probe_failed')
+            outage_probe=json.loads(process.stdout)
     off=[s for s in samples if not s['enabled']];on=[s for s in samples if s['enabled']]
     import statistics
     baseline=statistics.median(s['p95_seconds'] for s in off);measured=statistics.median(s['p95_seconds'] for s in on)
     wall_off=sum(s['wall_seconds'] for s in off);wall_on=sum(s['wall_seconds'] for s in on)
     result={'files_per_mode':sum(s['files'] for s in on),'workers':4,'p95_overhead':measured/baseline-1,
         'throughput_loss':max(0,1-wall_off/wall_on),'additional_rss_bytes':max(s['max_rss_bytes'] for s in on)-max(s['max_rss_bytes'] for s in off),'samples':samples}
+    if outage_probe is not None:result['outage_probe']=outage_probe
     result['passed']=result['p95_overhead']<=.05 and result['throughput_loss']<=.05 and result['additional_rss_bytes']<=32*1024*1024
     args.output.write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps({k:v for k,v in result.items() if k!='samples'}))
