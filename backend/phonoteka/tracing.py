@@ -56,7 +56,7 @@ class SegmentDeadline:
         global _deadline_thread
         self.state, self.number = state, state['number']
         with _deadline_condition:
-            heapq.heappush(_deadlines, (time.monotonic() + SEGMENT_SECONDS,
+            heapq.heappush(_deadlines, (state['started'] + SEGMENT_SECONDS,
                                      next(_deadline_sequence), self))
             if _deadline_thread is None:
                 _deadline_thread = threading.Thread(target=_run_deadlines, daemon=True,
@@ -95,8 +95,10 @@ class SegmentSpan(trace.Span):
     def __init__(self, inner, state):
         self.inner, self.state, self.closed = inner, state, False
 
-    def get_span_context(self): return self.inner.get_span_context()
-    def is_recording(self): return not self.closed and self.inner.is_recording()
+    def get_span_context(self):
+        with self.state['lock']: return self.inner.get_span_context()
+    def is_recording(self):
+        with self.state['lock']: return not self.closed and self.inner.is_recording()
     def set_attribute(self, key, value):
         with self.state['lock']:
             if not self.closed: self.inner.set_attribute(key, value)
@@ -118,19 +120,52 @@ class SegmentSpan(trace.Span):
     def end(self, end_time=None):
         with self.state['lock']:
             if self.closed: return
+            if not self.state['finished'] and time.monotonic()-self.state['started'] >= SEGMENT_SECONDS:
+                rotate_segment(self.state, deadline=True)
             self.closed = True
             self.inner.end(end_time=end_time)
             self.state['active'].remove(self)
 
 
 def expire_segment(state, number):
-    """Export bounded partial intervals without cancelling business work."""
+    """Continue open logical spans without repeating their business operation."""
     with state['lock']:
         if state['finished'] or state['number'] != number: return
-        for current in list(reversed(state['active'])):
-            current.set_attribute('phonoteka.reason_code', 'segment_deadline')
-            current.end(end_time=state['deadline_ns'])
-        state['expired'] = True
+        rotate_segment(state, deadline=True)
+
+
+def rotate_segment(state, deadline=False):
+    # Called with the attempt lock held, including by the scheduler thread.
+    state['timer'].cancel()
+    boundary = state['deadline_ns'] if deadline else min(time.time_ns(), state['deadline_ns'])
+    previous = [(current, current.inner, safe(dict(current.inner.attributes))) for current in state['active']]
+    for _, inner, _ in reversed(previous):
+        inner.set_attribute('phonoteka.reason_code', 'segment_deadline' if deadline else 'segment_boundary')
+        inner.end(end_time=boundary)
+    state['number'] += 1
+    now = time.monotonic()
+    scheduled = state['started'] + SEGMENT_SECONDS if deadline else now
+    # A suspended process cannot produce an unbounded catch-up burst. Make the
+    # unobserved interval explicit instead of fabricating many timed segments.
+    delayed = now - scheduled >= SEGMENT_SECONDS
+    state['started'] = now if delayed else scheduled
+    start_ns = time.time_ns() if delayed else boundary
+    parents = {}
+    tracer = _provider.get_tracer('phonoteka', '1')
+    for current, old, values in previous:
+        old_context = old.get_span_context()
+        parent = parents.get(old.parent.span_id, state['root']) if old.parent else None
+        values['phonoteka.segment.number'] = state['number']
+        if delayed: values['phonoteka.reason_code'] = 'scheduler_delay'
+        current.inner = tracer.start_span(old.name,
+            context=trace.set_span_in_context(parent) if parent else otcontext.Context(),
+            kind=old.kind, attributes=values, links=[Link(old_context)], start_time=start_ns,
+            record_exception=False, set_status_on_exception=False)
+        if old.status.status_code != StatusCode.UNSET: current.inner.set_status(old.status)
+        parents[old_context.span_id] = current
+    state['count'] = len(previous)
+    state['deadline_ns'] = start_ns + int(SEGMENT_SECONDS * 1_000_000_000)
+    state['timer'] = SegmentDeadline(state)
 
 
 def safe(attributes):
@@ -317,6 +352,10 @@ def start(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
 
 def _start(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
     if _provider is None: return trace.NonRecordingSpan(trace.INVALID_SPAN_CONTEXT)
+    state = SEGMENT.get()
+    if state and name != 'file.attempt' and len(state['active']) >= 128:
+        if _processor is not None: _processor.dropped += 1
+        return trace.NonRecordingSpan(state['root'].get_span_context())
     if name != 'file.attempt':
         segment = segment_context()
         if segment:
@@ -336,6 +375,7 @@ def _start(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
         state['active'].append(current)
         if name == 'file.attempt':
             state['root'] = current
+            state['started'] = time.monotonic()
             state['deadline_ns'] = inner.start_time + int(SEGMENT_SECONDS * 1_000_000_000)
             state['timer'] = SegmentDeadline(state)
         return current
@@ -358,8 +398,8 @@ def file_attempt(job_id, item_id, attempt_id, number=None, previous=None):
     prior = trace.get_current_span(extracted(previous or {})).get_span_context()
     if prior.is_valid: links = [Link(prior)]
     values = attributes(job_id=job_id, item_id=item_id, attempt_id=attempt_id, attempt_number=number)
-    token = SEGMENT.set({'count': 1, 'started': time.monotonic(), 'values': values, 'number': 1, 'extra': None,
-                         'lock': threading.RLock(), 'active': [], 'expired': False, 'finished': False})
+    token = SEGMENT.set({'count': 1, 'started': time.monotonic(), 'values': values, 'number': 1,
+                         'lock': threading.RLock(), 'active': [], 'finished': False})
     try:
         with span('file.attempt', values, parent=otcontext.Context(), links=links) as root:
             yield root
@@ -373,28 +413,20 @@ def file_attempt(job_id, item_id, attempt_id, number=None, previous=None):
 
 
 def segment_context():
-    """Conservative 1 MiB span budget and deadline-bounded partial intervals.
+    """Conservative 1 MiB span budget with linked continuation intervals.
 
     Every exported span is capped at 8 KiB, hence 128 spans bound payload bytes.
-    A deadline closes active intervals; the next operation links a new segment.
+    A deadline closes and continues every active span, preserving nesting.
     """
     state = SEGMENT.get()
     if not state: return None
     with state['lock']:
-        if state['expired'] or state['count'] >= 128 or time.monotonic()-state['started'] >= SEGMENT_SECONDS:
-            prior = state['root'].get_span_context()
-            state['timer'].cancel()
-            for current in list(reversed(state['active'])):
-                current.set_attribute('phonoteka.reason_code', 'segment_boundary')
-                current.end(end_time=min(time.time_ns(), state['deadline_ns']))
-            state['number'] += 1
-            state['expired'] = False
-            state['extra'] = start('file.attempt', {**state['values'], 'phonoteka.segment.number': state['number']},
-                parent=otcontext.Context(), links=[Link(prior)] if prior.is_valid else [])
-            state['count'] = 1; state['started'] = time.monotonic()
+        if time.monotonic()-state['started'] >= SEGMENT_SECONDS:
+            rotate_segment(state, deadline=True)
+        elif state['count'] >= 128:
+            rotate_segment(state)
         state['count'] += 1
-        if state['extra']: return trace.set_span_in_context(state['extra'])
-    return None
+        return trace.set_span_in_context(state['root'])
 
 
 def host(value):

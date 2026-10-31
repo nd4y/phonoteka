@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory(prefix='phonoteka-trace-infra-') as directory:
     secret=root/'secrets';secret.mkdir()
     for source,target in [('server.crt','server.crt'),('server.key','server.key'),('ca.pem','ca.pem'),('token','otlp_token')]:
         (secret/target).write_bytes((root/source).read_bytes());(secret/target).chmod(0o644)
-    for name in ('queue','jaeger-v220','config'):(root/name).mkdir(mode=0o777)
+    for name in ('queue','jaeger-bounded','config'):(root/name).mkdir(mode=0o777)
     for name in ('collector.yaml','jaeger.yaml','nginx.conf'):
         (root/'config'/name).write_bytes((Path('monitoring/tracing')/name).read_bytes())
     env={**os.environ,'TRACE_ROOT':str(root)}

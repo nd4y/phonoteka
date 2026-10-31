@@ -125,6 +125,7 @@ def test_segments_bound_span_count_and_preserve_new_nested_parent(spans):
 def test_long_segment_rolls_on_next_operation(spans):
     with tracing.file_attempt(str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4())):
         tracing.SEGMENT.get()['started']-=901
+        tracing.SEGMENT.get()['deadline_ns']=time.time_ns()
         with tracing.span('next.operation'): pass
     result=spans.get_finished_spans()
     continuation=next(s for s in result if s.name=='file.attempt' and s.links)
@@ -137,6 +138,7 @@ def test_deadline_exports_open_intervals_without_waiting_for_business_work(spans
     monkeypatch.setattr(tracing, 'SEGMENT_SECONDS', .05)
     with tracing.file_attempt(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())):
         state = tracing.SEGMENT.get()
+        initial_deadline = state['deadline_ns']
         with tracing.span('long.operation'):
             # Wait for the actual timer, without ending the operation/context.
             deadline = time.monotonic() + 2
@@ -144,16 +146,51 @@ def test_deadline_exports_open_intervals_without_waiting_for_business_work(spans
                 time.sleep(.005)
             first = spans.get_finished_spans()
             assert {s.name for s in first} == {'file.attempt', 'long.operation'}
-            assert all(s.end_time <= state['deadline_ns'] for s in first)
+            assert all(s.end_time <= initial_deadline for s in first)
             assert all(s.attributes['phonoteka.reason_code'] == 'segment_deadline' for s in first)
             with tracing.span('next.operation'): pass
         timer = state['timer']
     assert timer.state is None
     result = spans.get_finished_spans()
-    assert len(result) == 4  # no duplicate ends when old contexts finally exit
+    assert len(result) == 5  # root + long operation continue; next.operation is new
     continuation = next(s for s in result if s.name == 'file.attempt' and s.links)
     assert continuation.links[0].context.trace_id == first[0].context.trace_id
     assert len({s.attributes['phonoteka.attempt.id'] for s in result if s.name == 'file.attempt'}) == 1
+    parts = sorted((s for s in result if s.name == 'long.operation'), key=lambda s:s.start_time)
+    assert parts[0].end_time == parts[1].start_time
+    assert parts[1].links[0].context.span_id == parts[0].context.span_id
+    next_op = next(s for s in result if s.name == 'next.operation')
+    assert next_op.parent.span_id == parts[1].context.span_id
+
+
+def test_long_operation_continues_across_multiple_deadlines(spans, monkeypatch):
+    monkeypatch.setattr(tracing, 'SEGMENT_SECONDS', .04)
+    with tracing.file_attempt(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())):
+        with tracing.span('long.operation') as operation:
+            stop = time.monotonic() + 3
+            while len([s for s in spans.get_finished_spans() if s.name == 'long.operation']) < 3:
+                assert time.monotonic() < stop
+                time.sleep(.005)
+            operation.set_attribute('phonoteka.outcome', 'succeeded')
+    parts = sorted((s for s in spans.get_finished_spans() if s.name == 'long.operation'), key=lambda s:s.start_time)
+    assert len(parts) >= 4
+    assert all(0 <= s.end_time-s.start_time <= 40_000_000 for s in parts)
+    assert all(a.end_time == b.start_time for a,b in zip(parts,parts[1:]))
+    assert parts[-1].attributes['phonoteka.outcome'] == 'succeeded'
+
+
+def test_span_count_rollover_preserves_running_parent(spans):
+    with tracing.file_attempt(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())):
+        with tracing.span('outer'):
+            for _ in range(260):
+                with tracing.span('child'): pass
+    groups = {}
+    for s in spans.get_finished_spans(): groups.setdefault(s.context.trace_id, []).append(s)
+    assert len(groups) == 3
+    for group in groups.values():
+        assert len(group) <= 128
+        outer = next(s for s in group if s.name == 'outer')
+        assert all(s.parent.span_id == outer.context.span_id for s in group if s.name == 'child')
 
 
 def test_span_budget_closes_original_root_before_attempt_finishes(spans):

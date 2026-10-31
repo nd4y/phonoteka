@@ -52,7 +52,8 @@ services:
     tmpfs: ["/tmp:size=32m,mode=1777"]
     volumes:
       - ${TRACE_ROOT}/config/jaeger.yaml:/etc/jaeger/config.yaml:ro
-      - ${TRACE_ROOT}/jaeger-v220:/data
+      # Production: dedicated Btrfs subvolume with a verified 32 GiB qgroup limit.
+      - ${TRACE_ROOT}/jaeger-bounded:/data
     networks: [pipeline, bridge]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
