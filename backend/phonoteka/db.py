@@ -79,9 +79,16 @@ def initialize(path: Path, *, settings=None) -> None:
             raise RuntimeError("Unsupported database schema; compatible image required")
         if version==SCHEMA_VERSION:
             verify_schema(db)
+            # The v2 base and its ledger checksum are immutable. Add tracing as
+            # an atomic extension, retaining the write barriers used by v2 images.
+            db.execute('BEGIN IMMEDIATE')
+            create_trace_schema(db)
+            install_schema_guard(db, SCHEMA_VERSION, None)
+            db.commit()
             return
         db.execute('BEGIN IMMEDIATE')
         create_base_schema(db)
+        create_trace_schema(db)
         install_schema_guard(db,0,None)
         db.execute('PRAGMA user_version=2')
         db.commit()
@@ -146,11 +153,6 @@ def base_schema_sql():
             job_id TEXT NOT NULL REFERENCES jobs(id), created_at TEXT NOT NULL,
             PRIMARY KEY(scope,key)
         );
-        CREATE TABLE IF NOT EXISTS trace_attempts (
-            job_id TEXT NOT NULL REFERENCES jobs(id), item_id TEXT NOT NULL,
-            number INTEGER NOT NULL, context TEXT NOT NULL, updated_at TEXT NOT NULL,
-            PRIMARY KEY(job_id,item_id)
-        );
         CREATE TABLE IF NOT EXISTS history (
             id TEXT PRIMARY KEY, track_id TEXT NOT NULL REFERENCES tracks(id), job_id TEXT,
             kind TEXT NOT NULL, before_sha256 TEXT, after_sha256 TEXT,
@@ -203,6 +205,14 @@ def create_base_schema(db):
     if statement.strip():raise RuntimeError('Incomplete schema migration')
     db.execute("INSERT OR IGNORE INTO settings VALUES('auth_epoch','1')")
     db.execute("INSERT OR IGNORE INTO settings VALUES('instance_uuid',?)", (str(uuid.uuid4()),))
+
+
+def create_trace_schema(db):
+    db.execute("""CREATE TABLE IF NOT EXISTS trace_attempts (
+        job_id TEXT NOT NULL REFERENCES jobs(id), item_id TEXT NOT NULL,
+        number INTEGER NOT NULL, context TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY(job_id,item_id)
+    )""")
 
 
 def install_schema_guard(db,source_version,checkpoint_id):
