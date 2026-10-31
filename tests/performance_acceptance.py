@@ -256,24 +256,30 @@ def serve(base, port, fd, interval, real_audio=False):
                     readings['spans'].append({'start':started,'end':time.monotonic(),'thread_id':thread_id,'concurrent':active})
         audio_worker.process_item=observed
         audio_task=asyncio.create_task(audio_worker.run(),name='real-four-file-workers')
+        next_admission = 0.0
         try:
             while not stop.is_set():
                 if audio_task.done():
                     audio_task.result()
                     raise RuntimeError('Real worker stopped during load')
-                pending=await asyncio.to_thread(db.fetchone,settings.db_path,"SELECT COUNT(*) AS count FROM jobs WHERE state IN ('queued','running')")
-                if pending['count']==0:
-                    def enqueue():
-                        with db.transaction(settings.db_path) as connection:
-                            rows=connection.execute("SELECT id,relative_path,sha256 FROM tracks ORDER BY relative_path LIMIT 16").fetchall()
-                            items=[{'track_id':row['id'],'relative_path':row['relative_path'],'sha256':row['sha256']} for row in rows]
-                            identity='performance-audit-'+str(readings['batches'])
-                            now=db.utcnow();epoch=int(db.setting(settings.db_path,'auth_epoch','0'))
-                            connection.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch) VALUES(?,'audit','queued','pending',?,?,?,?,?)",
-                                (identity,db.encode({'items':items,'params':{}}),len(items),now,now,epoch))
-                            db.event(connection,'job_created',{'job_id':identity,'kind':'audit'})
-                    await asyncio.to_thread(enqueue)
-                    readings['batches']+=1
+                # Admission pacing must not also pace observation: a short ASR
+                # phase can fit entirely between two ten-second batch polls.
+                # Keep the workload cadence, observe durable completions at 4 Hz.
+                if time.monotonic() >= next_admission:
+                    next_admission = time.monotonic() + max(1, interval*4)
+                    pending=await asyncio.to_thread(db.fetchone,settings.db_path,"SELECT COUNT(*) AS count FROM jobs WHERE state IN ('queued','running')")
+                    if pending['count']==0:
+                        def enqueue():
+                            with db.transaction(settings.db_path) as connection:
+                                rows=connection.execute("SELECT id,relative_path,sha256 FROM tracks ORDER BY relative_path LIMIT 16").fetchall()
+                                items=[{'track_id':row['id'],'relative_path':row['relative_path'],'sha256':row['sha256']} for row in rows]
+                                identity='performance-audit-'+str(readings['batches'])
+                                now=db.utcnow();epoch=int(db.setting(settings.db_path,'auth_epoch','0'))
+                                connection.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch) VALUES(?,'audit','queued','pending',?,?,?,?,?)",
+                                    (identity,db.encode({'items':items,'params':{}}),len(items),now,now,epoch))
+                                db.event(connection,'job_created',{'job_id':identity,'kind':'audit'})
+                        await asyncio.to_thread(enqueue)
+                        readings['batches']+=1
                 stats=await asyncio.to_thread(db.fetchone,settings.db_path,"SELECT COALESCE(SUM(completed),0) AS n,COALESCE(SUM(failed),0) AS failed FROM jobs")
                 if readings['updates'] != stats['n']:
                     readings['updates']=stats['n']
@@ -285,7 +291,7 @@ def serve(base, port, fd, interval, real_audio=False):
                             return [dict(row) for row in rows]
                     readings['failed_jobs']=await asyncio.to_thread(failed_summary)
                     raise RuntimeError('Real audio audit failed during load')
-                await asyncio.sleep(max(1,interval*4))
+                await asyncio.sleep(.25)
         except asyncio.CancelledError:raise
         except Exception as error:readings['background_errors'].append({'type':type(error).__name__,'reason':str(error)[:300]})
 
