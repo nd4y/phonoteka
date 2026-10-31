@@ -148,8 +148,7 @@ def test_deadline_exports_open_intervals_without_waiting_for_business_work(spans
             assert all(s.attributes['phonoteka.reason_code'] == 'segment_deadline' for s in first)
             with tracing.span('next.operation'): pass
         timer = state['timer']
-    timer.join(timeout=1)
-    assert not timer.is_alive()
+    assert timer.state is None
     result = spans.get_finished_spans()
     assert len(result) == 4  # no duplicate ends when old contexts finally exit
     continuation = next(s for s in result if s.name == 'file.attempt' and s.links)

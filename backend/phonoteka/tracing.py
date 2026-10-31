@@ -5,6 +5,8 @@ for music/provider credentials. Only the allowlisted attributes below cross OTLP
 """
 import asyncio
 import atexit
+import heapq
+import itertools
 from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -42,6 +44,50 @@ _processor = None
 _patched = False
 _state = 'disabled'
 SEGMENT_SECONDS = 900
+_deadlines = []
+_deadline_condition = threading.Condition()
+_deadline_sequence = itertools.count()
+_deadline_thread = None
+
+
+class SegmentDeadline:
+    """One scheduler per process; cancelled entries release attempt state."""
+    def __init__(self, state):
+        global _deadline_thread
+        self.state, self.number = state, state['number']
+        with _deadline_condition:
+            heapq.heappush(_deadlines, (time.monotonic() + SEGMENT_SECONDS,
+                                     next(_deadline_sequence), self))
+            if _deadline_thread is None:
+                _deadline_thread = threading.Thread(target=_run_deadlines, daemon=True,
+                                                    name='otel-segment-deadlines')
+                _deadline_thread.start()
+            _deadline_condition.notify()
+
+    def cancel(self):
+        with _deadline_condition:
+            self.state = None
+            _deadline_condition.notify()
+
+
+def _run_deadlines():
+    while True:
+        with _deadline_condition:
+            while _deadlines and _deadlines[0][2].state is None:
+                heapq.heappop(_deadlines)
+            if not _deadlines:
+                _deadline_condition.wait()
+                continue
+            deadline, _, entry = _deadlines[0]
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                _deadline_condition.wait(remaining)
+                continue
+            heapq.heappop(_deadlines)
+            state, entry.state = entry.state, None
+        # Never take the attempt lock while holding the scheduler condition.
+        if state is not None:
+            expire_segment(state, entry.number)
 
 
 class SegmentSpan(trace.Span):
@@ -291,9 +337,7 @@ def _start(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
         if name == 'file.attempt':
             state['root'] = current
             state['deadline_ns'] = inner.start_time + int(SEGMENT_SECONDS * 1_000_000_000)
-            state['timer'] = threading.Timer(SEGMENT_SECONDS, expire_segment, args=(state, state['number']))
-            state['timer'].daemon = True
-            state['timer'].start()
+            state['timer'] = SegmentDeadline(state)
         return current
 
 
