@@ -95,11 +95,16 @@ def child(root, enabled, count, outage_seconds, offset):
                             response=await client.get(f'http://localhost:{provider.server_port}/generated');assert response.content==b'ok'
                     durations.append(time.perf_counter()-started)
             await asyncio.gather(*(one(n) for n in range(count)))
+    def cpu_seconds(who):
+        usage=resource.getrusage(who)
+        return usage.ru_utime+usage.ru_stime
+    cpu_before=cpu_seconds(resource.RUSAGE_SELF);media_before=cpu_seconds(resource.RUSAGE_CHILDREN)
     started=time.perf_counter();asyncio.run(run());elapsed=time.perf_counter()-started
+    cpu_used=cpu_seconds(resource.RUSAGE_SELF)-cpu_before;media_used=cpu_seconds(resource.RUSAGE_CHILDREN)-media_before
     if enabled: assert tracing._processor.force_flush(2000)
     result={'enabled':enabled,'files':count,'workers':4,'wall_seconds':elapsed,'p95_seconds':percentile(durations),
         'max_rss_bytes':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,'rss_before_enable_bytes':start_rss,
-        'received_spans':Receiver.spans,'export':tracing.diagnostics()}
+        'received_spans':Receiver.spans,'cpu_self_seconds':cpu_used,'cpu_media_seconds':media_used,'export':tracing.diagnostics()}
     if enabled:
         assert result['export']['failed']==result['export']['dropped']==result['export']['partial']==0, result
         assert result['export']['accepted']==result['export']['exported']==Receiver.spans, result

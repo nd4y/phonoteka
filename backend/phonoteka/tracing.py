@@ -201,42 +201,66 @@ class BoundedProcessor(SpanProcessor):
     def on_start(self, span, parent_context=None): pass
 
     def on_end(self, span):
+        # Reserve the maximum allowed wire size before encoding. SDK on_end runs
+        # on the business caller: serializing here stalls concurrent HTTP work.
+        # This conservative reservation admits at most 1024 pending spans.
+        with self.lock:
+            if self.stopping or len(self.queue) >= 2048 or self.bytes + 8192 > 8*1024*1024:
+                self.dropped += 1; return
+            self.queue.append(span); self.bytes += 8192; self.accepted += 1
+            if len(self.queue) >= 128: self.lock.notify()
+
+    def _send(self, data, count):
         try:
-            size = encode_spans([span]).ByteSize()
-            with self.lock:
-                if self.stopping or size > 8192 or len(self.queue) >= 2048 or self.bytes + size > 8*1024*1024:
-                    self.dropped += 1; return
-                self.queue.append((span, size)); self.bytes += size; self.accepted += 1
-                if len(self.queue) >= 128: self.lock.notify()
-        except Exception:
-            self.dropped += 1
+            with self.session.post(self.endpoint, data=data, timeout=(1, 2), stream=True,
+                headers={'Content-Type': 'application/x-protobuf'}, allow_redirects=False) as response:
+                if not 200 <= response.status_code < 300: raise RuntimeError('otlp_http')
+                from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceResponse
+                # Bounded response: OTLP partial-success counters, no server text.
+                content = response.raw.read(8193)
+                if len(content) > 8192: raise RuntimeError('otlp_response_bound')
+                rejected = ExportTraceServiceResponse.FromString(content).partial_success.rejected_spans if content else 0
+            self.partial += rejected; self.exported += max(0, count-rejected)
+        except Exception as exc:
+            self.last_failure = type(exc).__name__
+            self.failed += count
 
     def _run(self):
         while True:
             with self.lock:
                 if not self.stopping and len(self.queue) < 128: self.lock.wait(timeout=1)
                 if self.stopping and not self.queue: return
-                batch = []; size = 0
-                while self.queue and len(batch) < 128 and size + self.queue[0][1] <= 480*1024:
-                    item, length = self.queue.popleft(); self.bytes -= length
-                    batch.append(item); size += length
+                batch = []
+                while self.queue and len(batch) < 128:
+                    batch.append(self.queue.popleft()); self.bytes -= 8192
                 self.sending = bool(batch)
             if not batch: continue
             try:
-                data = encode_spans(batch).SerializeToString()
-                with self.session.post(self.endpoint, data=data, timeout=(1, 2), stream=True,
-                    headers={'Content-Type': 'application/x-protobuf'}, allow_redirects=False) as response:
-                    if not 200 <= response.status_code < 300: raise RuntimeError('otlp_http')
-                    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceResponse
-                    # Bounded response: OTLP partial-success counters, no server text.
-                    content = response.raw.read(8193)
-                    if len(content) > 8192: raise RuntimeError('otlp_response_bound')
-                    rejected = ExportTraceServiceResponse.FromString(content).partial_success.rejected_spans if content else 0
-                self.partial += rejected; self.exported += max(0, len(batch)-rejected)
-            except Exception as exc:
-                # Safe class only; exception messages may contain credentials.
-                self.last_failure = type(exc).__name__
-                self.failed += len(batch)
+                chunks = []; size = 0
+                try:
+                    encoded = encode_spans(batch)
+                except Exception:
+                    self.dropped += len(batch); continue
+                # Encode Python attributes/resources once per batch. Reuse its
+                # protobuf metadata when checking individual wire-size bounds.
+                for resource in encoded.resource_spans:
+                    envelope = type(encoded)()
+                    target = envelope.resource_spans.add(); target.CopyFrom(resource)
+                    target.ClearField('scope_spans')
+                    for scope in resource.scope_spans:
+                        target.ClearField('scope_spans')
+                        group = target.scope_spans.add(); group.CopyFrom(scope); group.ClearField('spans')
+                        for item in scope.spans:
+                            group.spans.add().CopyFrom(item)
+                            data = envelope.SerializeToString(); group.ClearField('spans')
+                            if len(data) > 8192:
+                                self.dropped += 1; continue
+                            if size+len(data) > 480*1024:
+                                self._send(b''.join(chunks), len(chunks)); chunks = []; size = 0
+                            chunks.append(data); size += len(data)
+                # ExportTraceServiceRequest has repeated resource_spans only.
+                # Protobuf concatenation merges these without encoding twice.
+                if chunks: self._send(b''.join(chunks), len(chunks))
             finally:
                 with self.lock: self.sending = False; self.lock.notify_all()
 

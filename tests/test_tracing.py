@@ -244,12 +244,50 @@ def test_export_failure_does_not_break_work_and_queue_is_bounded(spans):
     # Hold consumer while filling queue to prove count bound and explicit drops.
     with processor.lock:
         for _ in range(2200): processor.on_end(value)
-        assert len(processor.queue) == 2048
-        assert processor.dropped == 152
-        assert processor.bytes <= 8*1024*1024
+        assert len(processor.queue) == 1024  # 8 KiB reservation per pending span
+        assert processor.dropped == 1176
+        assert processor.bytes == 8*1024*1024
     assert processor.force_flush(2000)
-    assert processor.failed == 2048
+    assert processor.failed == 1024
     processor.shutdown()
+
+
+def test_serialization_runs_off_business_thread_once_with_wire_bounds(spans, monkeypatch):
+    import io
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+    requests=[];encoders=[];encode=tracing.encode_spans;caller=threading.get_ident()
+    def measured(values):
+        encoders.append(threading.get_ident())
+        return encode(values)
+    monkeypatch.setattr(tracing,'encode_spans',measured)
+    class Response:
+        status_code=200
+        def __enter__(self):self.raw=io.BytesIO();return self
+        def __exit__(self,*args):pass
+    class Receiver:
+        def post(self,*args,**kwargs):requests.append(kwargs['data']);return Response()
+    processor=tracing.BoundedProcessor('https://generated/v1/traces',Receiver())
+    # Large valid spans force byte splitting before the 128-span count limit.
+    for index in range(140):
+        with tracing.span('x'*6500):pass
+    with tracing.span('x'*9000):pass
+    values=spans.get_finished_spans()
+    with processor.lock:
+        for value in values:processor.on_end(value)
+        assert not encoders
+    assert processor.force_flush(2000)
+    processor.shutdown()
+    assert len(encoders)==2 and caller not in encoders  # 128 + 13 spans
+    assert processor.exported==140 and processor.dropped==1
+    received=[]
+    for payload in requests:
+        assert len(payload)<=480*1024
+        message=ExportTraceServiceRequest.FromString(payload)
+        batch=[s for r in message.resource_spans for scope in r.scope_spans for s in scope.spans]
+        assert len(batch)<=128
+        received.extend(batch)
+    assert len(received)==140 and len({s.span_id for s in received})==140
+    assert {s.span_id.hex() for s in received}=={format(s.context.span_id,'016x') for s in values[:-1]}
 
 
 def test_external_parent_ignored_and_diagnostics_require_auth(client,settings,spans):
