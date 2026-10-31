@@ -133,6 +133,37 @@ def test_long_segment_rolls_on_next_operation(spans):
     assert operation.parent.span_id==continuation.context.span_id
 
 
+def test_deadline_exports_open_intervals_without_waiting_for_business_work(spans, monkeypatch):
+    monkeypatch.setattr(tracing, 'SEGMENT_SECONDS', .05)
+    with tracing.file_attempt(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())):
+        state = tracing.SEGMENT.get()
+        with tracing.span('long.operation'):
+            # Wait for the actual timer, without ending the operation/context.
+            deadline = time.monotonic() + 2
+            while not spans.get_finished_spans() and time.monotonic() < deadline:
+                time.sleep(.005)
+            first = spans.get_finished_spans()
+            assert {s.name for s in first} == {'file.attempt', 'long.operation'}
+            assert all(s.end_time <= state['deadline_ns'] for s in first)
+            assert all(s.attributes['phonoteka.reason_code'] == 'segment_deadline' for s in first)
+            with tracing.span('next.operation'): pass
+        timer = state['timer']
+    timer.join(timeout=1)
+    assert not timer.is_alive()
+    result = spans.get_finished_spans()
+    assert len(result) == 4  # no duplicate ends when old contexts finally exit
+    continuation = next(s for s in result if s.name == 'file.attempt' and s.links)
+    assert continuation.links[0].context.trace_id == first[0].context.trace_id
+    assert len({s.attributes['phonoteka.attempt.id'] for s in result if s.name == 'file.attempt'}) == 1
+
+
+def test_span_budget_closes_original_root_before_attempt_finishes(spans):
+    with tracing.file_attempt(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())):
+        for _ in range(128):
+            with tracing.span('small'): pass
+        assert any(s.name == 'file.attempt' for s in spans.get_finished_spans())
+
+
 def test_redirect_is_two_actual_exchanges_without_duplicate_transport_hooks(spans, server):
     with tracing.file_attempt(str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4())):
         with httpx.Client(trust_env=False,follow_redirects=True) as http:
