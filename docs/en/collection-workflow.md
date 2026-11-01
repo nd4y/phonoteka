@@ -13,3 +13,5 @@ The four main sections are **Overview**, **Collection**, **Processing**, and **R
 On narrow screens, each field retains its before/after pair, and write controls sit above the compact player. Back dismisses an open disclosure or the Sources tab before returning through application actions. Unsaved-change protection remains in place.
 
 The guide labels its input/output path example as illustrative, not a real rename result. This UI release does not alter available sources, formats, quality profiles, provider permissions, or the tracing architecture.
+
+The **Saved proposals** counter counts current proposals only. Its shortcut opens the entire review queue, including records with errors or conflicts; the queue can therefore contain more records than the counter. In **Ready files**, an empty collection directs you to review records and publish them through the existing plan. An empty search instead suggests changing the query; neither state asks you to rescan the working collection.

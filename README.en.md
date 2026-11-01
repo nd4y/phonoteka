@@ -9,3 +9,5 @@ This repository adopts version 0.4.0 of the shared development standard. Read th
 ## Collection workflow
 
 Start with Overview for the next action, review proposals, check processing outcomes, then transfer ready files. See the [interface workflow](docs/en/collection-workflow.md).
+
+The saved-proposal count is narrower than the full review queue, which also includes errors and conflicts. An empty Ready files section explains how to publish reviewed revisions; an empty search suggests refining the query.

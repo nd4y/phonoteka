@@ -101,6 +101,11 @@
   line-height: 1.5;
   color: var(--muted);
 }
+.workflow-attention small {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
 .workflow-explainer,
 .workflow-library-tools {
   margin: 20px 0;
