@@ -31,3 +31,34 @@ export function nextReviewId(ids: string[], currentId: string): string | null {
   const index = ids.indexOf(currentId);
   return index >= 0 ? ids[index + 1] || null : null;
 }
+
+export type ReviewWriteResult = "written" | "failed" | "pending" | "abandoned";
+// Never advance on task admission, a zero-item success, or an unknown outcome.
+// The caller retains the job ID while pending, so checking again cannot write twice.
+export async function awaitReviewWrite(
+  initial: Job,
+  read: (id: string) => Promise<Job>,
+  current: () => boolean,
+  pause: () => Promise<void> = () => new Promise((resolve) => setTimeout(resolve, 1000)),
+  attempts = 30,
+): Promise<ReviewWriteResult> {
+  let job = initial;
+  for (let index = 0; index <= attempts; index++) {
+    if (!current()) return "abandoned";
+    if (job.state === "succeeded")
+      return job.completed === 1 && job.failed === 0 ? "written" : "failed";
+    if (!isActiveJob(job)) return "failed";
+    if (
+      job.state === "paused" ||
+      job.state === "waiting_authorization" ||
+      job.stage === "waiting_storage" ||
+      job.stage === "waiting_authorization" ||
+      index === attempts
+    )
+      return "pending";
+    await pause();
+    if (!current()) return "abandoned";
+    job = await read(job.id);
+  }
+  return "pending";
+}

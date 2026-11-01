@@ -47,7 +47,7 @@ import { SchedulePanel } from "./SchedulePanel";
 import { DeliveryPanel } from "./DeliveryPanel";
 import { ReportView } from "./ReportView";
 import { WorkflowOverview } from "./WorkflowOverview";
-import { nextReviewId } from "./workflow";
+import { awaitReviewWrite, nextReviewId } from "./workflow";
 import { GettingStarted, HelpPage } from "./GettingStarted";
 import { clearGuideState, readGuideState, saveGuideState } from "./guideState";
 import type { GuideStep } from "./guideState";
@@ -371,6 +371,9 @@ export default function App() {
   const [dirty, setDirty] = useState(false);
   const [policyDirty, setPolicyDirty] = useState(false);
   const [showReports, setShowReports] = useState(false);
+  const pendingReviewWrites = useRef(
+    new Map<string, { job: Job; nextId: string | null; nextPage: number }>(),
+  );
   const [reviewMoving, setReviewMoving] = useState(false);
   const reviewLock = useRef(false);
   const [reviewDirty, setReviewDirty] = useState(false);
@@ -991,6 +994,7 @@ export default function App() {
     setReviewMoving(true);
     setError("");
     const generation = detailSequence.current;
+    let appliedKey: string | null = null;
     try {
       // Review includes CUE and files with errors; the player's neighbor endpoint
       // intentionally excludes these and must not silently skip them here.
@@ -1012,24 +1016,66 @@ export default function App() {
       }
       if (!authenticated.current || generation !== detailSequence.current) return;
       if (apply) {
-        const job = await submitJob("apply", [track.id], { proposal_id: track.proposal?.id });
+        const key = `${track.id}:${track.proposal?.id}`;
+        const pending = pendingReviewWrites.current.get(key);
+        const job =
+          pending?.job ||
+          (await submitJob("apply", [track.id], { proposal_id: track.proposal?.id }));
         if (!job) return;
+        if (pending) {
+          nextId = pending.nextId;
+          nextPage = pending.nextPage;
+        } else pendingReviewWrites.current.set(key, { job, nextId, nextPage });
         setNotice(
-          "Запись выбранных данных поставлена в очередь. Итог по файлу появится в обработке; готовая коллекция сохраняется отдельно.",
+          "Записываем выбранные данные. Следующая карточка откроется после успешного завершения.",
+        );
+        const result = await awaitReviewWrite(
+          job,
+          (id) => api<Job>(`/jobs/${encodeURIComponent(id)}`),
+          () => authenticated.current && generation === detailSequence.current,
+        );
+        if (result === "abandoned") return;
+        if (result === "pending") {
+          setNotice(
+            "Запись еще не завершена. Проверьте задачу в обработке или нажмите «Записать и дальше», чтобы проверить ее результат. Повторная задача не создается.",
+          );
+          return;
+        }
+        if (result === "failed") {
+          pendingReviewWrites.current.delete(key);
+          setNotice("");
+          setError(
+            "Изменения не записаны полностью. Карточка сохранена; причина доступна в обработке.",
+          );
+          return;
+        }
+        appliedKey = key;
+        if (nextId && nextPage !== pageNumber) {
+          // Applying the last item of a filtered page can move the next item
+          // onto that page. Keep the editor and the visible queue together.
+          const currentPage = await api<TrackPage>(
+            `/tracks?search=${encodeURIComponent(query)}&filter=${encodeURIComponent(filter)}&page=${pageNumber}&page_size=30`,
+          );
+          if (currentPage.items.some((item) => item.id === nextId)) nextPage = pageNumber;
+        }
+        setNotice(
+          "Изменения записаны. Предыдущая версия доступна в истории; готовая коллекция сохраняется отдельно.",
         );
       }
       if (!authenticated.current || generation !== detailSequence.current) return;
-      if (nextId)
-        await openTrack({ id: nextId }, "review", {
+      if (nextId) {
+        const opened = await openTrack({ id: nextId }, "review", {
           catalogPage: nextPage,
           confirmed: true,
           preservePlayback: true,
         });
-      else {
+        if (opened && appliedKey) pendingReviewWrites.current.delete(appliedKey);
+      } else {
+        if (appliedKey) pendingReviewWrites.current.delete(appliedKey);
         navigate("library");
         setNotice(
           apply
-            ? "Последняя запись списка поставлена на запись. Проверьте результат в обработке."
+            ? "Последняя запись списка сохранена. Результаты доступны в обработке."
             : "Вы дошли до конца этого списка. Пропущенные записи остаются в коллекции.",
         );
       }
@@ -2604,7 +2650,7 @@ function TrackEditor({
                   {changed
                     ? "Сохраните выбранные изменения в черновик"
                     : activeProposal
-                      ? "Запись создаст резервную версию. Результат - в обработке"
+                      ? "После успешной записи откроется следующий трек"
                       : "Файл остается без изменений"}
                 </span>
               </div>
@@ -2629,7 +2675,7 @@ function TrackEditor({
                   disabled={applyBlocked || moving}
                 >
                   <CheckCheck size={18} />
-                  {moving ? "Добавляем запись..." : "Записать и дальше"}
+                  {moving ? "Записываем..." : "Записать и дальше"}
                 </button>
               </div>
             </div>
