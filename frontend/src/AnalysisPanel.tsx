@@ -1,38 +1,358 @@
-import { useState } from 'react';
-import { Search, RefreshCw, Check, CircleAlert } from 'lucide-react';
-import { api, messageFor } from './api';
-import type { Track, Candidate } from './types';
-import { ProviderCandidateUsage } from './ProviderPolicyPanel';
-import type { PolicyCandidate } from './ProviderPolicyPanel';
-import { AutomaticQualityPanel } from './AutomaticQualityPanel';
-import { alignmentStatus, instrumentalTextConflict } from './alignmentStatus';
-const states: Record<string,string> = {fingerprint_match:'Совпадение по отпечатку',candidates:'Найдены варианты',candidate:'Есть вариант',no_match:'Не найдено',key_required:'Нужен API-ключ',insufficient_metadata:'Недостаточно исходных данных',provider_cooldown:'Пауза после ошибок',provider_unavailable:'Источник недоступен',provider_unauthorized:'Нет доступа',budget_exhausted:'Достигнут лимит',rate_limited:'Ограничение частоты',invalid_audio:'Ошибка аудио'};
-const reasons: Record<string,string> = {album_differs:'Название альбома или исполнитель отличается',confirm_album_group:'Проверьте состав измеренной группы альбома',replaygain_preview:'Громкость измерена; применение запишет только теги',recording_version_unverified:'Отпечаток совпал; проверьте версию и релиз',human_timing_review_required:'Нужна проверка времен по вокалу',title_differs:'Отличается название',artist_differs:'Отличается исполнитель',duration_differs:'Отличается длительность',duration_unknown:'Длительность неизвестна',lyrics_out_of_range:'Таймкоды вне длительности',invalid_lyrics:'Ошибки LRC',confirm_release:'Проверьте релиз',confirm_album_cover:'Проверьте принадлежность обложки альбому'};
-const text=(value:unknown)=>Array.isArray(value)?value.join(', '):String(value||'');
-export function AnalysisPanel({track,enabled,recognitionEnabled,asrEnabled,busy,changed,onJob,onRefresh}:{track:Track;enabled:boolean;recognitionEnabled:boolean;asrEnabled:boolean;busy:boolean;changed:boolean;onJob:(kind:string)=>Promise<void>;onRefresh:()=>void}) {
- const [chosen,setChosen]=useState<string[]>([]),[error,setError]=useState(''),[saving,setSaving]=useState(false);
- const analysis=track.analysis;
- const timingStatus=alignmentStatus(analysis);
- function toggle(candidate:Candidate){setChosen(old=>old.includes(candidate.id)?old.filter(x=>x!==candidate.id):[...old.filter(id=>analysis?.candidates.find(x=>x.id===id)?.kind!==candidate.kind),candidate.id]);}
- async function select(){setSaving(true);setError('');try{await api(`/tracks/${encodeURIComponent(track.id)}/analysis/select`,{method:'POST',headers:{'If-Match':`"${track.sha256}"`},body:JSON.stringify({candidate_ids:chosen})});setChosen([]);onRefresh();}catch(e){setError(messageFor(e));}finally{setSaving(false);}}
- return <section className="panel analysis-panel"><div className="panel-heading"><div><h2>Источники и совпадения</h2><p className="muted small">Поиск по каталогам и аудиоотпечатку. Для каждого варианта показан источник.</p></div><button className="icon-button" disabled={changed} onClick={onRefresh} aria-label="Обновить результаты поиска"><RefreshCw size={18}/></button></div>
- <div className="button-row"><button className="button secondary" disabled={!enabled||busy||!!track.input_error} onClick={()=>void onJob('analyze')}><Search size={18}/>Найти теги, обложку и текст</button>{!enabled&&<span className="muted small">Внешние источники выключены</span>}</div>
- <div className="button-row"><button className="button secondary" disabled={!recognitionEnabled||busy||!!track.input_error||track.cue_album_image} onClick={()=>void onJob('recognize')}>Распознать по аудиоотпечатку</button><span className="muted small">ShazamIO · 12 секунд · передается только отпечаток</span></div><div className="button-row"><button className="button secondary" disabled={busy||!!track.input_error||track.cue_album_image} onClick={()=>void onJob('replaygain')}>Измерить ReplayGain</button><span className="muted small">Аудиосэмплы не меняются</span></div><div className="button-row asr-tools"><button className="button secondary" disabled={!asrEnabled||busy||!!track.input_error} onClick={()=>void onJob('transcribe')}>Проверить содержимое аудио</button><button className="button secondary" disabled={!asrEnabled||busy||changed||!(track.lrc||track.lyrics||track.proposal?.lrc)} onClick={()=>void onJob('align')}>Свести текст с аудио</button></div>
- {instrumentalTextConflict(track)&&<div className="notice warning"><CircleAlert size={19}/><p>В названии есть пометка инструментальной версии, но источник предложил слова. Сначала проверьте, есть ли в этой записи вокал и относится ли к ней текст. Одна пометка в названии не определяет содержимое аудио.</p></div>}
- {timingStatus&&<div className="notice info" role="status"><CircleAlert size={19}/><div><strong>{timingStatus.title}</strong><p className="small">{timingStatus.detail}</p></div></div>}
- {track.input_error&&<p className="notice error" role="alert"><CircleAlert size={18}/>{track.input_error.message}</p>}
- {error&&<p role="alert" className="warning-text">{error}</p>}
- {analysis?.asr&&<details className="asr-result" open><summary>ASR: черновик · {analysis.asr.model} · {analysis.asr.language}</summary><p className="muted small">Независимая расшифровка. Ошибки слов и пропуски вокала возможны; автоматическая запись выключена.</p>{!!analysis.asr.segments?.some(s=>s.uncertain)&&<p className="warning-text small">Есть фрагменты с низкой уверенностью. Проверьте их по аудио.</p>}<pre>{analysis.asr.text||'Надежно распознанных слов нет. Это не доказывает отсутствие вокала.'}</pre></details>}
- {analysis?.alignment&&<details className="asr-result" open><summary>Сопоставлено строк: {Math.round(analysis.alignment.coverage*100)}%</summary>{analysis.alignment.lines.map((line,index)=><p key={index} className="small"><strong>{line.start_ms==null?'Нет надежного времени':(line.start_ms/1000).toFixed(2)+' с'}</strong> · {line.text}{!!line.low_probability_words&&<span className="warning-text"> · Проверьте слова и начало строки</span>}</p>)}<p className="muted small">Несопоставленные строки не получают выдуманных таймкодов.</p></details>}
- {analysis&&<><div className="analysis-sources">{analysis.sources.map((s,i)=><span className="badge" key={s.provider+i}>{s.provider}: {states[s.state]||s.state}</span>)}</div>{analysis.stale&&<p className="warning-text">Файл изменился. Повторите поиск.</p>}{analysis.query_source==='filename_hint'&&<p className="muted small">Для запроса использованы подсказки из имени файла.</p>}
- {analysis.query_source==='audio_fingerprint'&&<p className="muted small">Поиск текста и релиза выполнен по результату распознавания аудио.</p>}<div className="analysis-candidates">{analysis.candidates.map(candidate=><article key={candidate.id} className={`analysis-candidate ${chosen.includes(candidate.id)?'selected':''}`}><label><input type="checkbox" checked={chosen.includes(candidate.id)} disabled={analysis.stale||changed||!track.can_write} onChange={()=>toggle(candidate)}/><strong>{candidate.kind==='cover'?'Обложка':text(candidate.tags?.title)||candidate.title||'Вариант'}</strong><span className="muted small">{text(candidate.tags?.artist)||candidate.artist||candidate.provider}</span></label>
- <div className="small">{candidate.match.reasons.length?candidate.match.reasons.map(x=>reasons[x]||x).join(' · '):'Название, исполнитель и длительность совпадают'}{candidate.match.duration_delta!=null&&` · Δ ${candidate.match.duration_delta.toFixed(1)} с`}</div>
- <ProviderCandidateUsage trackId={track.id} candidate={candidate as PolicyCandidate}/>
- {candidate.cover&&<img className="candidate-cover" src={candidate.cover} alt="Предлагаемая обложка" loading="lazy"/>}
- {(candidate.lrc||candidate.plain_lyrics)&&<details><summary>{candidate.lrc?'Текст с таймкодами источника':'Обычный текст без таймкодов'}</summary><pre>{candidate.lrc||candidate.plain_lyrics}</pre><p className="muted small">Совпадение с вокалом еще не проверено.</p></details>}
- {candidate.instrumental_claim&&<p className="small">Источник пометил запись как инструментальную; требуется проверка.</p>}
- {candidate.release&&<details><summary>Данные издания и треклист</summary><pre>{JSON.stringify(candidate.release,null,2)}</pre></details>}{candidate.source_url&&<a href={candidate.source_url} target="_blank" rel="noreferrer">Источник: {candidate.provider}</a>}{candidate.source_path&&<span className="small break-word">{candidate.source_path}</span>}</article>)}</div>
- {!!analysis.candidates.length&&<div className="button-row"><button className="button primary" disabled={!chosen.length||saving||changed||analysis.stale||!track.can_write} onClick={()=>void select()}><Check size={17}/>Сохранить выбранное как предложение</button><span className="muted small">Заменит прежнее предложение. Аудиофайл пока не изменяется.</span></div>}{changed&&<p className="warning-text">Сначала сохраните черновик редактора.</p>}</>}
- <AutomaticQualityPanel trackId={track.id} revision={track.sha256} proposalId={track.proposal?.id} changed={changed}/>
- </section>;
+import { useState } from "react";
+import { Search, RefreshCw, Check, CircleAlert } from "lucide-react";
+import { api, messageFor } from "./api";
+import type { Track, Candidate } from "./types";
+import { ProviderCandidateUsage } from "./ProviderPolicyPanel";
+import type { PolicyCandidate } from "./ProviderPolicyPanel";
+import { AutomaticQualityPanel } from "./AutomaticQualityPanel";
+import { alignmentStatus, instrumentalTextConflict } from "./alignmentStatus";
+const states: Record<string, string> = {
+  fingerprint_match: "Совпадение по отпечатку",
+  candidates: "Найдены варианты",
+  candidate: "Есть вариант",
+  no_match: "Не найдено",
+  key_required: "Нужен API-ключ",
+  insufficient_metadata: "Недостаточно исходных данных",
+  provider_cooldown: "Пауза после ошибок",
+  provider_unavailable: "Источник недоступен",
+  provider_unauthorized: "Нет доступа",
+  budget_exhausted: "Достигнут лимит",
+  rate_limited: "Ограничение частоты",
+  invalid_audio: "Ошибка аудио",
+};
+const reasons: Record<string, string> = {
+  album_differs: "Название альбома или исполнитель отличается",
+  confirm_album_group: "Проверьте состав измеренной группы альбома",
+  replaygain_preview: "Громкость измерена; применение запишет только теги",
+  recording_version_unverified: "Отпечаток совпал; проверьте версию и релиз",
+  human_timing_review_required: "Нужна проверка времен по вокалу",
+  title_differs: "Отличается название",
+  artist_differs: "Отличается исполнитель",
+  duration_differs: "Отличается длительность",
+  duration_unknown: "Длительность неизвестна",
+  lyrics_out_of_range: "Таймкоды вне длительности",
+  invalid_lyrics: "Ошибки LRC",
+  confirm_release: "Проверьте релиз",
+  confirm_album_cover: "Проверьте принадлежность обложки альбому",
+};
+const text = (value: unknown) => (Array.isArray(value) ? value.join(", ") : String(value || ""));
+export function AnalysisPanel({
+  track,
+  enabled,
+  recognitionEnabled,
+  asrEnabled,
+  busy,
+  changed,
+  onJob,
+  onRefresh,
+}: {
+  track: Track;
+  enabled: boolean;
+  recognitionEnabled: boolean;
+  asrEnabled: boolean;
+  busy: boolean;
+  changed: boolean;
+  onJob: (kind: string) => Promise<void>;
+  onRefresh: () => void;
+}) {
+  const [chosen, setChosen] = useState<string[]>([]),
+    [error, setError] = useState(""),
+    [saving, setSaving] = useState(false);
+  const analysis = track.analysis;
+  const timingStatus = alignmentStatus(analysis);
+  function toggle(candidate: Candidate) {
+    setChosen((old) =>
+      old.includes(candidate.id)
+        ? old.filter((x) => x !== candidate.id)
+        : [
+            ...old.filter(
+              (id) => analysis?.candidates.find((x) => x.id === id)?.kind !== candidate.kind,
+            ),
+            candidate.id,
+          ],
+    );
+  }
+  async function select() {
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/tracks/${encodeURIComponent(track.id)}/analysis/select`, {
+        method: "POST",
+        headers: { "If-Match": `"${track.sha256}"` },
+        body: JSON.stringify({ candidate_ids: chosen }),
+      });
+      setChosen([]);
+      onRefresh();
+    } catch (e) {
+      setError(messageFor(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <section className="panel analysis-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Источники и совпадения</h2>
+          <p className="muted small">
+            Поиск по каталогам и аудиоотпечатку. Для каждого варианта показан источник.
+          </p>
+        </div>
+        <button
+          className="icon-button"
+          disabled={changed}
+          onClick={onRefresh}
+          aria-label="Обновить результаты поиска"
+        >
+          <RefreshCw size={18} />
+        </button>
+      </div>
+      <div className="button-row">
+        <button
+          className="button secondary"
+          disabled={!enabled || busy || !!track.input_error}
+          onClick={() => void onJob("analyze")}
+        >
+          <Search size={18} />
+          Найти теги, обложку и текст
+        </button>
+        {!enabled && <span className="muted small">Внешние источники выключены</span>}
+      </div>
+      <details className="workflow-job-details">
+        <summary>Аудиоотпечаток, ASR и громкость</summary>
+        <div className="button-row">
+          <button
+            className="button secondary"
+            disabled={!recognitionEnabled || busy || !!track.input_error || track.cue_album_image}
+            onClick={() => void onJob("recognize")}
+          >
+            Распознать по аудиоотпечатку
+          </button>
+          <span className="muted small">ShazamIO · 12 секунд · передается только отпечаток</span>
+        </div>
+        <div className="button-row">
+          <button
+            className="button secondary"
+            disabled={busy || !!track.input_error || track.cue_album_image}
+            onClick={() => void onJob("replaygain")}
+          >
+            Измерить ReplayGain
+          </button>
+          <span className="muted small">Аудиосэмплы не меняются</span>
+        </div>
+        <div className="button-row asr-tools">
+          <button
+            className="button secondary"
+            disabled={!asrEnabled || busy || !!track.input_error}
+            onClick={() => void onJob("transcribe")}
+          >
+            Проверить содержимое аудио
+          </button>
+          <button
+            className="button secondary"
+            disabled={
+              !asrEnabled || busy || changed || !(track.lrc || track.lyrics || track.proposal?.lrc)
+            }
+            onClick={() => void onJob("align")}
+          >
+            Свести текст с аудио
+          </button>
+        </div>
+      </details>
+      {instrumentalTextConflict(track) && (
+        <div className="notice warning">
+          <CircleAlert size={19} />
+          <p>
+            В названии есть пометка инструментальной версии, но источник предложил слова. Сначала
+            проверьте, есть ли в этой записи вокал и относится ли к ней текст. Одна пометка в
+            названии не определяет содержимое аудио.
+          </p>
+        </div>
+      )}
+      {timingStatus && (
+        <div className="notice info" role="status">
+          <CircleAlert size={19} />
+          <div>
+            <strong>{timingStatus.title}</strong>
+            <p className="small">{timingStatus.detail}</p>
+          </div>
+        </div>
+      )}
+      {track.input_error && (
+        <p className="notice error" role="alert">
+          <CircleAlert size={18} />
+          {track.input_error.message}
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="warning-text">
+          {error}
+        </p>
+      )}
+      {analysis?.asr && (
+        <details className="asr-result">
+          <summary>
+            ASR: черновик · {analysis.asr.model} · {analysis.asr.language}
+          </summary>
+          <p className="muted small">
+            Независимая расшифровка. Ошибки слов и пропуски вокала возможны; автоматическая запись
+            выключена.
+          </p>
+          {!!analysis.asr.segments?.some((s) => s.uncertain) && (
+            <p className="warning-text small">
+              Есть фрагменты с низкой уверенностью. Проверьте их по аудио.
+            </p>
+          )}
+          <pre>
+            {analysis.asr.text ||
+              "Надежно распознанных слов нет. Это не доказывает отсутствие вокала."}
+          </pre>
+        </details>
+      )}
+      {analysis?.alignment && (
+        <details className="asr-result">
+          <summary>Сопоставлено строк: {Math.round(analysis.alignment.coverage * 100)}%</summary>
+          {analysis.alignment.lines.map((line, index) => (
+            <p key={index} className="small">
+              <strong>
+                {line.start_ms == null
+                  ? "Нет надежного времени"
+                  : (line.start_ms / 1000).toFixed(2) + " с"}
+              </strong>{" "}
+              · {line.text}
+              {!!line.low_probability_words && (
+                <span className="warning-text"> · Проверьте слова и начало строки</span>
+              )}
+            </p>
+          ))}
+          <p className="muted small">Несопоставленные строки не получают выдуманных таймкодов.</p>
+        </details>
+      )}
+      {analysis && !analysis.candidates.length && (
+        <p className="notice info">
+          Подходящих вариантов пока нет. Проверьте исполнителя и название, прослушайте запись или
+          используйте аудиоотпечаток. Можно заполнить поля вручную или вернуться к записи позже.
+        </p>
+      )}
+      {analysis && (
+        <>
+          <div className="analysis-sources">
+            {analysis.sources.map((s, i) => (
+              <span className="badge" key={s.provider + i}>
+                {s.provider}: {states[s.state] || s.state}
+              </span>
+            ))}
+          </div>
+          {analysis.stale && <p className="warning-text">Файл изменился. Повторите поиск.</p>}
+          {analysis.query_source === "filename_hint" && (
+            <p className="muted small">Для запроса использованы подсказки из имени файла.</p>
+          )}
+          {analysis.query_source === "audio_fingerprint" && (
+            <p className="muted small">
+              Поиск текста и релиза выполнен по результату распознавания аудио.
+            </p>
+          )}
+          <div className="analysis-candidates">
+            {analysis.candidates.map((candidate) => (
+              <article
+                key={candidate.id}
+                className={`analysis-candidate ${chosen.includes(candidate.id) ? "selected" : ""}`}
+              >
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={chosen.includes(candidate.id)}
+                    disabled={analysis.stale || changed || !track.can_write}
+                    onChange={() => toggle(candidate)}
+                  />
+                  <strong>
+                    {candidate.kind === "cover"
+                      ? "Обложка"
+                      : text(candidate.tags?.title) || candidate.title || "Вариант"}
+                  </strong>
+                  <span className="muted small">
+                    {text(candidate.tags?.artist) || candidate.artist || candidate.provider}
+                  </span>
+                </label>
+                <div className="small">
+                  {candidate.match.reasons.length
+                    ? candidate.match.reasons.map((x) => reasons[x] || x).join(" · ")
+                    : "Название, исполнитель и длительность совпадают"}
+                  {candidate.match.duration_delta != null &&
+                    ` · Δ ${candidate.match.duration_delta.toFixed(1)} с`}
+                </div>
+                <ProviderCandidateUsage
+                  trackId={track.id}
+                  candidate={candidate as PolicyCandidate}
+                />
+                {candidate.cover && (
+                  <img
+                    className="candidate-cover"
+                    src={candidate.cover}
+                    alt="Предлагаемая обложка"
+                    loading="lazy"
+                  />
+                )}
+                {(candidate.lrc || candidate.plain_lyrics) && (
+                  <details>
+                    <summary>
+                      {candidate.lrc
+                        ? "Текст с таймкодами источника"
+                        : "Обычный текст без таймкодов"}
+                    </summary>
+                    <pre>{candidate.lrc || candidate.plain_lyrics}</pre>
+                    <p className="muted small">Совпадение с вокалом еще не проверено.</p>
+                  </details>
+                )}
+                {candidate.instrumental_claim && (
+                  <p className="small">
+                    Источник пометил запись как инструментальную; требуется проверка.
+                  </p>
+                )}
+                {candidate.release && (
+                  <details>
+                    <summary>Данные издания и треклист</summary>
+                    <pre>{JSON.stringify(candidate.release, null, 2)}</pre>
+                  </details>
+                )}
+                {candidate.source_url && (
+                  <a href={candidate.source_url} target="_blank" rel="noreferrer">
+                    Источник: {candidate.provider}
+                  </a>
+                )}
+                {candidate.source_path && (
+                  <span className="small break-word">{candidate.source_path}</span>
+                )}
+              </article>
+            ))}
+          </div>
+          {!!analysis.candidates.length && (
+            <div className="button-row">
+              <button
+                className="button primary"
+                disabled={!chosen.length || saving || changed || analysis.stale || !track.can_write}
+                onClick={() => void select()}
+              >
+                <Check size={17} />
+                Сохранить выбранное как предложение
+              </button>
+              <span className="muted small">
+                Заменит прежнее предложение. Аудиофайл пока не изменяется.
+              </span>
+            </div>
+          )}
+          {changed && <p className="warning-text">Сначала сохраните черновик редактора.</p>}
+        </>
+      )}
+      <details className="workflow-job-details">
+        <summary>Проверки качества предложения</summary>
+        <AutomaticQualityPanel
+          trackId={track.id}
+          revision={track.sha256}
+          proposalId={track.proposal?.id}
+          changed={changed}
+        />
+      </details>
+    </section>
+  );
 }
