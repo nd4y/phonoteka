@@ -171,3 +171,17 @@ def test_report_counts_fallback_match_once(client, settings):
         conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(identity,sha,db.encode(payload),db.utcnow()))
     counts=reports.summary(settings)['counts']
     assert counts['fingerprint_matches'] == 1 and counts['fingerprint_no_match'] == 0 and counts['recognition_pending'] == 0
+
+
+@pytest.mark.parametrize('states,expected', [
+    ([{'provider':'acoustid','state':'key_required'}], (0,0,0)),
+    ([{'provider':'shazam','state':'no_match'},{'provider':'acoustid','state':'key_required'}], (0,1,0)),
+    ([{'provider':'shazam','state':'provider_unavailable'},{'provider':'acoustid','state':'disabled'}], (0,0,1)),
+])
+def test_report_legacy_configuration_placeholder_is_not_a_recognition_attempt(client, settings, states, expected):
+    identity, sha = seed(settings)
+    payload={'state':'no_match','candidates':[],'sources':states}
+    with db.transaction(settings.db_path) as conn:
+        conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(identity,sha,db.encode(payload),db.utcnow()))
+    counts=reports.summary(settings)['counts']
+    assert tuple(counts[key] for key in ('fingerprint_matches','fingerprint_no_match','fingerprint_unavailable'))==expected
