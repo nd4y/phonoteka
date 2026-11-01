@@ -71,9 +71,9 @@ export function DeliveryPanel({ onExport, busy }: { onExport: () => void; busy: 
     }
   }
   const labels: Record<string, string> = {
-    copy_reported: "Копирование отмечено владельцем",
+    copy_reported: "Копирование отмечено вручную",
     client_hashes_match: "Контрольные суммы клиента совпали",
-    poweramp_owner_verified: "Poweramp проверен владельцем",
+    poweramp_owner_verified: "Poweramp проверен вручную",
   };
   const snapshot = status?.export;
   return (

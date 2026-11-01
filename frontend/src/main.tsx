@@ -5,6 +5,7 @@ import "./styles.css";
 import "./motion.css";
 import "./accessibility.css";
 import "./Workflow.css";
+import "./UiClarity.css";
 import { registerPwa } from "./pwa";
 registerPwa();
 ReactDOM.createRoot(document.getElementById("root")!).render(
