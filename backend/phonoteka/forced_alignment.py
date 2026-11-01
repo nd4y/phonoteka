@@ -7,9 +7,20 @@ from .providers import normalized
 def align_reference(model,samples,text,language,words,duration):
     from faster_whisper.tokenizer import Tokenizer
     from faster_whisper.audio import pad_or_trim
+    tokenizer=Tokenizer(model.hf_tokenizer,model.model.is_multilingual,task='transcribe',language=language)
+    def provider(clip,reference):
+        tokens=tokenizer.encode(' '+reference)
+        if not 0<len(tokens)<=400:return None
+        features=model.feature_extractor(clip)
+        encoded=model.encode(pad_or_trim(features,length=3000,axis=-1))
+        return model.find_alignment(tokenizer,[tokens],encoded,len(clip)//160)[0]
+    return align_with_provider(samples,text,words,duration,provider)
+
+
+def align_with_provider(samples,text,words,duration,provider):
+    """All client-side independent anchors and timing gates apply to every engine."""
     preliminary=align_lines(text,words,duration)
     if len(preliminary['lines'])>500:raise ValueError('Alignment supports up to 500 lines')
-    tokenizer=Tokenizer(model.hf_tokenizer,model.model.is_multilingual,task='transcribe',language=language)
     lines=[{**line,'start_ms':None,'end_ms':None,'state':'unaligned','reason':'independent_anchor_missing'} for line in preliminary['lines']]
     groups=[];group=[]
     for index,line in enumerate(preliminary['lines']):
@@ -25,13 +36,11 @@ def align_reference(model,samples,text,language,words,duration):
         first=preliminary['lines'][group[0]];last=preliminary['lines'][group[-1]]
         start=max(0,first['start_ms']/1000-.25);end=min(duration,last['end_ms']/1000+.25)
         reference=' '.join(preliminary['lines'][index]['text'].strip() for index in group)
-        tokens=tokenizer.encode(' '+reference)
         for index in group:lines[index]['reason']='window_or_token_limit'
-        if not 0<end-start<=29.5 or not 0<len(tokens)<=400:continue
+        if not 0<end-start<=29.5:continue
         clip=samples[round(start*16000):round(end*16000)]
-        features=model.feature_extractor(clip)
-        encoded=model.encode(pad_or_trim(features,length=3000,axis=-1))
-        aligned=model.find_alignment(tokenizer,[tokens],encoded,len(clip)//160)[0]
+        aligned=provider(clip,reference)
+        if aligned is None:continue
         spoken=[];positions=[]
         for word in aligned:
             for token in normalized(word['word']).split():spoken.append(token);positions.append(word)

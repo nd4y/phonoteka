@@ -14,11 +14,14 @@ import logging
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import sys
+import threading
 import time
 import uuid
+from contextvars import copy_context
 
-from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube
+from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy, provider_attempts, input_readiness, automation, recording_review, processing_activity
 from .providers import Providers, ProviderError
 from .config import Settings
 from .telemetry import Metrics, configure_logging, context, log, opaque_id, bounded, KINDS, worker_server
@@ -26,6 +29,15 @@ from .telemetry import Metrics, configure_logging, context, log, opaque_id, boun
 LOG = logging.getLogger("phonoteka.worker")
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".aiff", ".ape", ".wv", ".wma", ".webm", ".cue", ".m4b", ".oga", ".aif", ".mp4", ".mka", ".mkv", ".dsf", ".dff", ".ac3", ".wave", ".bin"}
 EXCLUDED_DIRS = {"@eadir", "#recycle", ".trash", ".snapshot", ".phonoteka-staging", "@recycle"}
+DB_BUSY_RETRY_SECONDS = .5
+
+
+def sqlite_busy(exc):
+    """Extended BUSY/LOCKED codes are contention; other DB errors are fatal."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    return isinstance(exc, sqlite3.OperationalError) and isinstance(code, int) and (
+        code & 0xff
+    ) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
 
 
 @contextmanager
@@ -128,59 +140,123 @@ class Worker:
         self.normal_task = None
         self.metrics = Metrics('worker')
         self.item_started = {}
+        self.activity_generation = str(uuid.uuid4())
+        self.authorization_cursor = ''
+        # Keep a group's file rename and subsequent catalog/history commit in
+        # one lane. Other workers cannot observe our own half-persisted SHA.
+        # Storage/scheduler guards already restrict this domain to one Worker.
+        self.album_gain_mutation_lock = threading.RLock()
 
     async def io(self, fn, *args, **kwargs):
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.pool, lambda: fn(*args, **kwargs))
+        copied = copy_context()
+        return await loop.run_in_executor(self.pool, lambda: copied.run(fn, *args, **kwargs))
 
     def heartbeat(self):
         db.set_setting(self.settings.db_path, "worker_heartbeat", db.encode({"at": time.time(), "last_seen": db.utcnow(), "state": self.state,
-                        "instance_id": self.settings.instance_id, "read_only": not self.settings.writable,
+                        "instance_id": self.settings.instance_id, "activity_generation": self.activity_generation, "read_only": not self.settings.writable,
                         "file_workers": self.settings.file_workers, "io_threads": self.settings.io_threads}))
 
     async def heartbeats(self):
         while not self.stopping:
-            await asyncio.to_thread(self.heartbeat)
-            await asyncio.sleep(3)
+            delay = 3
+            try:
+                await asyncio.to_thread(self.heartbeat)
+            except sqlite3.OperationalError as exc:
+                if not sqlite_busy(exc):
+                    raise
+                log('worker_database_busy', logging.WARNING, operation='heartbeat')
+                delay = DB_BUSY_RETRY_SECONDS
+            await asyncio.sleep(delay)
 
     def claim_job(self):
         with db.transaction(self.settings.db_path) as conn:
+            # Rotate a bounded projection through queued/paused jobs, including
+            # provider waits not yet due. Expired grants cannot stay silently
+            # paused or cause another scheduled job to overtake this job.
+            rows=conn.execute(f"SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE state IN ('queued','paused') AND id>? ORDER BY id LIMIT 64",(self.authorization_cursor,)).fetchall()
+            if not rows:
+                self.authorization_cursor=''
+                rows=conn.execute(f"SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE state IN ('queued','paused') ORDER BY id LIMIT 64").fetchall()
+            for control in rows:
+                self.authorization_cursor=control['id']
+                reason=automation.grant_reason(conn,control)
+                if reason:automation.wait_for_authorization(conn,control['id'],reason)
             busy = bool(self.inference_task and not self.inference_task.done())
             ordinary_busy = bool(self.normal_task and not self.normal_task.done())
-            row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND COALESCE(json_extract(payload,'$.retry_at'),0)<=? AND (?=0 OR kind NOT IN ('transcribe','align')) AND (?=0 OR kind IN ('transcribe','align')) ORDER BY created_at,id LIMIT 1",(time.time(),int(busy),int(ordinary_busy))).fetchone()
-            if not row:
-                return None
-            conn.execute("UPDATE jobs SET state='running',stage=?,heartbeat=?,updated_at=? WHERE id=?", (row["kind"],time.time(),db.utcnow(),row["id"]))
-            db.event(conn, "job_started", {"job_id": row["id"]})
-            return dict(row)
+            for _ in range(64):
+                row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND COALESCE(json_extract(payload,'$.retry_at'),0)<=? AND (?=0 OR kind NOT IN ('transcribe','align')) AND (?=0 OR kind IN ('transcribe','align')) ORDER BY created_at,rowid LIMIT 1",(time.time(),int(busy),int(ordinary_busy))).fetchone()
+                if not row:return None
+                control=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(row['id'],)).fetchone()
+                reason=automation.grant_reason(conn,control)
+                if reason:
+                    automation.wait_for_authorization(conn,row['id'],reason)
+                    continue
+                conn.execute("UPDATE jobs SET state='running',stage=?,heartbeat=?,updated_at=? WHERE id=?", (row["kind"],time.time(),db.utcnow(),row["id"]))
+                db.event(conn, "job_started", {"job_id": row["id"]})
+                return dict(row)
+            return None
+
+    def job_control(self, job_id):
+        # Do not transfer/decode the full immutable 10,000-item payload for
+        # every admission check. Only these mutable controls leave SQLite.
+        return db.fetchone(self.settings.db_path, f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?', (job_id,))
+
+    def authorization_reason(self, job_id):
+        with db.connect(self.settings.db_path) as conn:
+            row=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(job_id,)).fetchone()
+            return automation.grant_reason(conn,row) if row else 'authorization_grant_invalid'
+
+    def user_cancelled(self, job_id):
+        row=self.job_control(job_id)
+        return self.stopping or not row or bool(row['cancel_requested'])
+
+    def control_cancelled(self, row):
+        if self.stopping or not row or bool(row['cancel_requested']):return True
+        with db.connect(self.settings.db_path) as conn:
+            return bool(automation.grant_reason(conn,row))
 
     def cancelled(self, job_id):
-        row = db.fetchone(self.settings.db_path, "SELECT cancel_requested,payload FROM jobs WHERE id=?", (job_id,))
-        if self.stopping or not row or bool(row['cancel_requested']):return True
-        token_id=json.loads(row['payload']).get('auth_token_id')
-        if token_id:
-            token=db.fetchone(self.settings.db_path,'SELECT revoked,expires,auth_epoch FROM api_tokens WHERE id=?',(token_id,))
-            return not token or token['revoked'] or token['expires']<=time.time() or token['auth_epoch']!=int(db.setting(self.settings.db_path,'auth_epoch','0'))
-        return False
+        return self.stopping or self.control_cancelled(self.job_control(job_id))
+
+    def authorize_grant(self, job):
+        if self.user_cancelled(job['id']):
+            raise media.MediaError('cancelled','Job was cancelled before its next effect')
+        reason=self.authorization_reason(job['id'])
+        if reason:raise media.MediaError(reason,'Owner approval is required before the next effect')
 
     def authorize(self, job):
         if db.setting(self.settings.db_path,'recovery_required','false')=='true':
             raise media.MediaError('recovery_required','Сначала завершите сверку восстановленного состояния')
         if not self.settings.writable:
             raise media.MediaError("read_only", "Music writes are disabled")
-        if int(db.setting(self.settings.db_path, "auth_epoch", "0")) != job["auth_epoch"]:
-            raise media.MediaError("authorization_revoked", "Owner authorization has been revoked")
-        if self.cancelled(job["id"]):
-            raise media.MediaError("cancelled", "Job was cancelled before its next effect")
+        self.authorize_grant(job)
 
     def item_result(self, job_id, key, state, result):
         with db.transaction(self.settings.db_path) as conn:
+            previous=conn.execute('SELECT state,result FROM job_items WHERE job_id=? AND item_key=?',(job_id,key)).fetchone()
+            if previous:
+                saved=json.loads(previous['result'])
+                # A grant renewal joins the same submitted inference request;
+                # neither a running checkpoint nor a denial loses its handle.
+                result={**{name:saved[name] for name in ('inference_job_id','model','model_revision','profile_revision') if name in saved},**result}
+            control=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(job_id,)).fetchone()
+            reason=automation.grant_reason(conn,control) if control and not control['cancel_requested'] else None
+            # An unbegun effect denied by its grant remains pending. A real
+            # media/provider failure and an interrupted journal remain facts.
+            if reason and (result.get('code') in automation.AUTHORIZATION_REASONS|{'cancelled','media_cancelled'} or state=='cancelled'):
+                if state!='interrupted' and not result.get('recovery_required'):
+                    if previous and previous['state'] in {'succeeded','failed','conflict','needs_review'}:return
+                    result={**(json.loads(previous['result']) if previous else {}),**result,'code':reason}
+                    state='deferred'
+                    automation.wait_for_authorization(conn,job_id,reason)
             conn.execute("INSERT INTO job_items VALUES(?,?,?,?) ON CONFLICT(job_id,item_key) DO UPDATE SET state=excluded.state,result=excluded.result", (job_id,key,state,db.encode(result)))
             completed = conn.execute("SELECT COUNT(*) FROM job_items WHERE job_id=? AND state='succeeded'", (job_id,)).fetchone()[0]
             failed = conn.execute("SELECT COUNT(*) FROM job_items WHERE job_id=? AND state IN ('failed','conflict','needs_review')", (job_id,)).fetchone()[0]
             conn.execute("UPDATE jobs SET completed=?,failed=?,updated_at=?,heartbeat=? WHERE id=?", (completed,failed,db.utcnow(),time.time(),job_id))
             db.event(conn, "job_progress", {"job_id": job_id, "completed": completed, "failed": failed, "track_id": key, "state": state})
             kind = conn.execute('SELECT kind FROM jobs WHERE id=?',(job_id,)).fetchone()['kind']
+        processing_activity.outcome(state)
         if state == 'running':
             self.item_started[job_id,key] = time.perf_counter()
         else:
@@ -192,28 +268,55 @@ class Worker:
             log('item_finished',logging.WARNING if state in {'failed','conflict','interrupted','needs_review','deferred'} else logging.INFO,
                 job_id=job_id,track_id=opaque_id(key),kind=kind,state=state,completed=completed,failed=failed,
                 duration_seconds=round(duration,6) if duration is not None else None,
-                code=bounded(result.get('code'),{'conflict','revision_conflict','needs_review','invalid_lyrics','unsupported_format','authorization_revoked','provider_unavailable','rate_limited','budget_exhausted','cancelled','storage_unavailable','decode_failed','internal_error'}) if result.get('code') else None)
+                code=bounded(result.get('code'),{'conflict','revision_conflict','needs_review','invalid_lyrics','unsupported_format','authorization_revoked','provider_unavailable','rate_limited','budget_exhausted','cancelled','storage_unavailable','decode_failed','internal_error','recognition_attempt_budget_exhausted','recognition_identity_required'}) if result.get('code') else None)
+
+    def item_action(self,job,item,action):
+        processing_activity.action(action)
+        with db.transaction(self.settings.db_path) as conn:
+            db.event(conn,'job_action',{'job_id':job['id'],'track_id':item['track_id'],'action':action})
+        log('item_action',job_id=job['id'],track_id=opaque_id(item['track_id']),kind=job['kind'],action=action)
 
     def finish(self, job_id, state, error=None):
         with db.transaction(self.settings.db_path) as conn:
+            row=conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+            control=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(job_id,)).fetchone()
+            reason=automation.grant_reason(conn,control) if control and not control['cancel_requested'] else None
+            if reason and state!='interrupted':
+                if not row['total'] or row['completed']+row['failed']<row['total']:
+                    automation.wait_for_authorization(conn,job_id,reason,drained=True)
+                    log('job_waiting_authorization',job_id=job_id,state='waiting_authorization',code=reason)
+                    return
+                # All actual outcomes were already committed before the grant
+                # changed. Do not label those effects as cancelled.
+                if state in {'cancelled','cancelled_partial'}:
+                    state='completed_with_errors' if row['failed'] else 'succeeded'
             conn.execute("UPDATE jobs SET state=?,stage=?,error=?,updated_at=? WHERE id=?", (state,state,error,db.utcnow(),job_id))
             db.event(conn, "job_finished", {"job_id": job_id, "state": state})
         log('job_finished',logging.ERROR if state in {'failed','interrupted'} else logging.INFO,job_id=job_id,state=state)
 
-    async def bounded_items(self, items, fn):
+    async def bounded_items(self, items, fn, *, should_stop=None):
         queue = asyncio.Queue(maxsize=self.settings.file_workers * 2)
+        def stopped():
+            return bool(should_stop and should_stop())
         async def consumer():
             while True:
                 item = await queue.get()
                 try:
                     if item is None:
                         return
-                    await fn(item)
+                    if not stopped():
+                        await fn(item)
                 finally:
                     queue.task_done()
         async def producer():
-            for item in items:
+            source=iter(items)
+            while not stopped():
+                try:item=next(source)
+                except StopIteration:break
                 await queue.put(item)
+            # Control requests stop admission and discard only the bounded
+            # pending queue. Already started fn calls finish normally; never
+            # cancel their asyncio futures or the executor's file operations.
             for _ in range(self.settings.file_workers):
                 await queue.put(None)
         # TaskGroup cancels the producer if any consumer fails, preventing a full
@@ -232,24 +335,32 @@ class Worker:
             if exc.code not in {'invalid_audio','unsupported_format'}: raise
             inspected = media.fallback_inventory(path, self.settings.roots, exc)
         meta = normalize_metadata(inspected)
+        recording_review.annotate(meta,meta['sha256'],False)
         if meta.get('format')!='cue' and not meta.get('input_error'):
             meta['youtube']=youtube.merge(youtube.discover(path,self.settings,meta))
         after = path.stat()
         if (before.st_size,before.st_mtime_ns,before.st_ino) != (after.st_size,after.st_mtime_ns,after.st_ino):
             raise media.MediaError("file_changing", "File changed during inventory")
+        # inspect_audio/fallback/CUE inventory performed a complete SHA-256 read.
+        # Publish this timestamp only after the inventory's stability check; an
+        # old record's date is never carried onto an external replacement.
+        meta['hash_verified_at'] = db.utcnow()
         with db.transaction(self.settings.db_path) as conn:
             current = conn.execute("SELECT * FROM tracks WHERE relative_path=? AND is_current=1", (relative,)).fetchone()
             now = db.utcnow()
             if current:
                 identity = current["id"]
                 old = json.loads(current["metadata"])
+                meta['input_readiness'] = input_readiness.observed(meta, old, scan_id)
                 for key in ("cue_sheets", "cue_album_image"):
                     if key in old:
                         meta[key] = old[key]
                 if current["sha256"] == meta["sha256"]:
-                    for key in ("audit", "publication", "cue_sheets", "cue_album_image", "derived_from", "cue_export", "audio_export"):
+                    for key in ("audit", "publication", "cue_sheets", "cue_album_image", "derived_from", "cue_export", "audio_export", "usage_provenance", "preferred_lyrics_slot", "lyrics_selection_empty", "preferred_cover", "artwork_transform", "recording_classification", "possible_mix", "record_type"):
                         if key in old:
                             meta[key] = old[key]
+                    if old.get('preferred_lyrics_slot') or old.get('lyrics_selection_empty'):
+                        meta['lrc'], meta['lyrics'] = old.get('lrc', ''), old.get('lyrics', '')
                     if 'youtube' in meta:
                         if old.get('derived_from'):
                             meta['youtube']=youtube.discover(path,self.settings,old)
@@ -270,6 +381,7 @@ class Worker:
                     status = 'needs_review' if meta.get('cue', {}).get('errors') else 'indexed'
                 conn.execute("UPDATE tracks SET sha256=?,metadata=?,status=?,scan_id=?,updated_at=? WHERE id=?", (meta["sha256"],db.encode(meta),status,scan_id,now,identity))
             else:
+                meta['input_readiness'] = input_readiness.observed(meta, {}, scan_id)
                 identity = str(uuid.uuid4())
                 conn.execute("INSERT INTO tracks(id,relative_path,sha256,metadata,scan_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (identity,relative,meta["sha256"],db.encode(meta),scan_id,now,now))
                 if meta.get('cue', {}).get('errors'):
@@ -278,10 +390,28 @@ class Worker:
                 conn.execute("UPDATE tracks SET status='error' WHERE id=?", (identity,))
         return {"track_id": identity, "relative_path": relative, **({'input_error':meta['input_error']} if meta.get('input_error') else {})}
 
+    def confirm_scan_inputs(self, scan_id, coverage_complete):
+        """Unrelated invalid audio does not invalidate a fully observed good file.
+
+        Root/enumeration/cancellation failures never establish a second pass.
+        Unseen and changed entries lose readiness, including after partial scans.
+        """
+        with db.transaction(self.settings.db_path) as conn:
+            for row in conn.execute('SELECT id,scan_id,metadata FROM tracks WHERE is_current=1').fetchall():
+                meta=json.loads(row['metadata'])
+                if row['scan_id'] == scan_id:
+                    value=input_readiness.confirm(meta,scan_id,complete=coverage_complete,
+                        grace_seconds=self.settings.input_grace_seconds)
+                else:
+                    value=input_readiness.observed(meta,{},None)
+                if value is not None:
+                    meta['input_readiness']=value
+                    conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),row['id']))
+
     def link_cue_sheets(self):
         """Mark album images explicitly; individual CUE songs never write their tags."""
         with db.transaction(self.settings.db_path) as conn:
-            rows = conn.execute("SELECT id,relative_path,metadata FROM tracks WHERE is_current=1 AND status<>'missing'").fetchall()
+            rows = conn.execute("SELECT id,relative_path,sha256,metadata FROM tracks WHERE is_current=1 AND status<>'missing'").fetchall()
             links = {}
             uncertain = any(json.loads(row['metadata']).get('cue', {}).get('errors') for row in rows)
             for row in rows:
@@ -304,6 +434,7 @@ class Worker:
                     continue
                 meta['cue_sheets'] = links.get(row['relative_path'], [])
                 meta['cue_album_image'] = any(x['track_count'] > 1 for x in meta['cue_sheets'])
+                recording_review.annotate(meta,row['sha256'],False)
                 conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), row['id']))
 
     async def scan(self, job):
@@ -314,19 +445,27 @@ class Worker:
         if not previous:
             db.set_setting(self.settings.db_path, "work_root_identity", db.encode(identity))
         paths, errors = await self.io(enumerate_audio, self.settings.work_root)
+        done={r['item_key'] for r in db.fetchall(self.settings.db_path,"SELECT item_key FROM job_items WHERE job_id=? AND state IN ('succeeded','failed','conflict','needs_review')",(job['id'],))}
         with db.transaction(self.settings.db_path) as conn:
             conn.execute("UPDATE jobs SET total=? WHERE id=?", (len(paths),job["id"]))
+        halted=False
+        def stop_admission():
+            nonlocal halted
+            halted=halted or self.cancelled(job['id'])
+            return halted
         async def one(relative):
-            if self.cancelled(job["id"]):
+            if stop_admission():
                 return
             try:
+                self.authorize_grant(job)
                 result = await self.io(self.scan_one, relative, job["id"])
                 self.item_result(job["id"], relative, "failed" if result.get("input_error") else "succeeded", result)
             except Exception as exc:
                 self.item_result(job["id"], relative, "failed", self.failure(exc))
-        await self.bounded_items(paths, one)
+        await self.bounded_items((path for path in paths if path not in done), one, should_stop=stop_admission)
         stats = db.fetchone(self.settings.db_path, "SELECT * FROM jobs WHERE id=?", (job["id"],))
         final_identity = await self.io(root_identity, self.settings.work_root)
+        await self.io(self.confirm_scan_inputs,job['id'],not errors and not self.cancelled(job['id']) and final_identity == identity)
         complete = not errors and not stats["failed"] and not self.cancelled(job["id"]) and final_identity == identity
         if complete:
             with db.transaction(self.settings.db_path) as conn:
@@ -346,43 +485,90 @@ class Worker:
         return {"code": "internal_error", "message": "Ошибка обработки файла", "retryable": False}
 
     def persist_mutation(self, job, item, result, metadata=None):
+        if job['kind'] in {'publish', 'rollback_ready'}:
+            from . import publication
+            return publication.persist(self.settings, job, item, result)
         track_id = item["track_id"]
         path = self.settings.work_root / item["relative_path"]
         metadata = normalize_metadata(metadata or media.inspect_audio(path, self.settings.roots))
+        from . import media_slots
+        metadata['hash_verified_at'] = db.utcnow()
         result = dict(result)
         result["after_sha256"] = result.get("after_sha256", result.get("sha256"))
         with db.transaction(self.settings.db_path) as conn:
             current = conn.execute("SELECT * FROM tracks WHERE id=?", (track_id,)).fetchone()
             old = json.loads(current["metadata"])
+            result['canonical_before'] = media_slots.canonical_snapshot(old)
+            if old.get('artwork_transform'): result['artwork_transform_before'] = old['artwork_transform']
+            provenance=old.get('usage_provenance',{})
+            if job['kind']=='apply':provenance={**provenance,**item['proposal'].get('field_sources',{})}
+            elif job['kind']=='rollback':
+                previous_history=conn.execute('SELECT details FROM history WHERE id=? AND track_id=?',(item['history_id'],track_id)).fetchone()
+                if previous_history:
+                    previous_details = json.loads(previous_history['details'])
+                    provenance = previous_details.get('usage_before',provenance)
+                    metadata = media_slots.restore_canonical(path, metadata, previous_details.get('canonical_before'))
+                    if previous_details.get('artwork_transform_before'): metadata['artwork_transform'] = previous_details['artwork_transform_before']
+            if provenance:metadata['usage_provenance']=provenance
+            if job['kind'] == 'apply':
+                metadata = media_slots.committed_metadata(old, metadata, item['proposal'], result)
+            result['usage_before']=old.get('usage_provenance',{})
+            result['usage_after']=provenance
             for field in ('derived_from','cue_sheets','cue_album_image','youtube'):
                 if field in old: metadata[field]=old[field]
-            if job["kind"] == "publish":
-                metadata = old
-                metadata["publication"] = {"sha256": item["sha256"], "relative_path": intake.publication_relative(item["relative_path"],metadata), "published_at": db.utcnow(), "job_id": job["id"],
-                                           "exception": json.loads(job["payload"]).get("params", {}).get("exception_reason")}
-                status = current["status"]
-            else:
-                if old.get("publication"):
-                    metadata["publication"] = old["publication"]
-                if result.get("audio_identity") and old.get("audit", {}).get("audio_identity") == result["audio_identity"]:
-                    metadata["audit"] = {**old["audit"], "sha256": metadata["sha256"], "reused_by_audio_identity": True}
-                status = "accepted" if job["kind"] == "apply" else "indexed"
+            if old.get('recording_classification') and result.get('audio_identity'):
+                # Native edits verified identical audio packets. The explicit
+                # recording decision follows those packets, not a new song.
+                metadata['recording_classification']={**old['recording_classification'], 'input_sha256':metadata['sha256']}
+            recording_review.annotate(metadata,metadata['sha256'],False)
+            metadata['input_readiness']=input_readiness.observed(metadata,{},None)
+            if old.get("publication"):
+                metadata["publication"] = old["publication"]
+            if result.get("audio_identity") and old.get("audit", {}).get("audio_identity") == result["audio_identity"]:
+                metadata["audit"] = {**old["audit"], "sha256": metadata["sha256"], "reused_by_audio_identity": True}
+            status = recording_review.catalog_status("accepted" if job["kind"] == "apply" else "indexed",metadata['possible_mix'])
+            from . import lyrics_document
+            lyrics_document.committed(conn, current, metadata, item.get('proposal', {}) if job['kind'] == 'apply' else {})
             conn.execute("UPDATE tracks SET sha256=?,metadata=?,status=?,updated_at=? WHERE id=?", (metadata["sha256"],db.encode(metadata),status,db.utcnow(),track_id))
             effect_id = result.get("operation_id", str(uuid.uuid4()))
             conn.execute("INSERT OR IGNORE INTO history VALUES(?,?,?,?,?,?,?,?)", (effect_id,track_id,job["id"],job["kind"],result.get("before_sha256"),result.get("after_sha256"),db.encode(result),db.utcnow()))
             db.event(conn, "file_committed", {"track_id": track_id, "job_id": job["id"], "kind": job["kind"]})
 
     def process_item(self, job, item):
+        from . import album_gain_policy
+        if job['kind'] == 'apply' and album_gain_policy.depends_on_group(item.get('proposal', {})):
+            with self.album_gain_mutation_lock:
+                return self._process_item(job, item)
+        return self._process_item(job, item)
+
+    def _process_item(self, job, item):
+        from . import publication
+        self.item_action(job,item,'preflight')
         path = self.settings.work_root / item["relative_path"]
         current = db.fetchone(self.settings.db_path, "SELECT * FROM tracks WHERE id=? AND is_current=1", (item["track_id"],))
         if not current or current["sha256"] != item["sha256"]:
             raise media.MediaError("conflict", "Input revision is no longer current")
         meta = json.loads(current['metadata'])
+        if job['kind'] in {'apply','publish','publish_sidecars','normalize_audio'} and recording_review.possible_mix(meta,item['sha256']):
+            raise media.MediaError('possible_mix_requires_manual_review', 'Составная запись не получает теги отдельной песни; подтвердите тип записи вручную')
+        if job['kind'] == 'rollback_ready':
+            from . import publication
+            return publication.rollback(self.settings, job, item, lambda: self.authorize(job))
+        if job['kind'] in {'publish','extract_cue','normalize_audio'}:
+            provider_policy.require_track(self.settings,current,'export')
         if job['kind'] in {'extract_cue','normalize_audio'}:
+            self.item_action(job,item,'cue_extract' if job['kind']=='extract_cue' else 'normalize')
             self.authorize(job)
             from . import derivatives
             exporter=cue_export if job['kind']=='extract_cue' else derivatives
-            result=exporter.export(path,meta,self.settings,lambda:self.authorize(job))
+            def authorize_export():
+                self.authorize(job)
+                fresh=db.fetchone(self.settings.db_path,'SELECT sha256,metadata FROM tracks WHERE id=? AND is_current=1',(item['track_id'],))
+                if not fresh or fresh['sha256']!=item['sha256']:
+                    raise media.MediaError('conflict','Source revision changed before derivative commit')
+                if job['kind']=='normalize_audio' and recording_review.possible_mix(json.loads(fresh['metadata']),item['sha256']):
+                    raise media.MediaError('possible_mix_requires_manual_review','Классификация записи изменилась до создания производной')
+            result=exporter.export(path,meta,self.settings,authorize_export)
             derived=[]
             for entry in result['files']:
                 indexed=self.scan_one(entry['relative_path'],None)
@@ -393,21 +579,47 @@ class Worker:
                     conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(data),indexed['track_id']))
                 derived.append(indexed['track_id'])
             with db.transaction(self.settings.db_path) as conn:
-                meta['cue_export' if job['kind']=='extract_cue' else 'audio_export']={'identity':result['identity'],'track_ids':derived,'count':len(derived),'gap_policy':result.get('gap_policy')}
-                conn.execute('UPDATE tracks SET metadata=?,updated_at=? WHERE id=? AND sha256=?',(db.encode(meta),db.utcnow(),item['track_id'],item['sha256']))
+                fresh=conn.execute('SELECT sha256,metadata FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
+                if not fresh or fresh['sha256']!=item['sha256']:
+                    raise media.MediaError('conflict','Source revision changed before derivative catalog commit')
+                latest=json.loads(fresh['metadata'])
+                if job['kind']=='normalize_audio' and recording_review.possible_mix(latest,item['sha256']):
+                    # A commit already in progress may finish after the owner
+                    # marks its source. The whole-file derivative inherits the
+                    # safety flag, never a forged owner confirmation.
+                    for derived_id in derived:
+                        child=conn.execute('SELECT sha256,metadata,status FROM tracks WHERE id=? AND is_current=1',(derived_id,)).fetchone()
+                        if not child:raise media.MediaError('conflict','Derivative catalog revision changed before source bookkeeping')
+                        child_meta=json.loads(child['metadata'])
+                        if recording_review.decision(child_meta,child['sha256']).get('origin')!='owner':
+                            child_meta['possible_mix']=True
+                            recording_review.annotate(child_meta,child['sha256'],False)
+                            conn.execute('UPDATE tracks SET metadata=?,status=? WHERE id=?',
+                                (db.encode(child_meta),recording_review.catalog_status(child['status'],True),derived_id))
+                latest['cue_export' if job['kind']=='extract_cue' else 'audio_export']={'identity':result['identity'],'track_ids':derived,'count':len(derived),'gap_policy':result.get('gap_policy')}
+                conn.execute('UPDATE tracks SET metadata=?,updated_at=? WHERE id=? AND sha256=?',(db.encode(latest),db.utcnow(),item['track_id'],item['sha256']))
                 db.event(conn,'cue_extracted' if job['kind']=='extract_cue' else 'audio_normalized',{'track_id':item['track_id'],'count':len(derived),'export_identity':result['identity']})
             return {'state':'succeeded','derived_track_ids':derived,'reused':result.get('reused',False),'identity':result['identity']}
         if meta.get('format') == 'cue' or (meta.get('cue_album_image') and job['kind'] not in {'audit','analyze'}):
             raise media.MediaError('cue_read_only', 'CUE и альбомные образы открыты только для чтения')
+        if job['kind'] == 'publish':
+            from . import lyrics_review
+            lyrics_review.assert_publication_frozen(self.settings, current, item.get('publication_review'))
         if job["kind"] == "audit":
+            self.item_action(job,item,'decode')
             result = media.audit_audio(path, self.settings.roots)
             if result.get("sha256") != item["sha256"]:
                 raise media.MediaError("conflict", "File changed before audit")
             result["checked_at"] = db.utcnow()
             with db.transaction(self.settings.db_path) as conn:
-                meta = json.loads(current["metadata"])
-                meta["audit"] = result
-                conn.execute("UPDATE tracks SET metadata=?,status=?,updated_at=? WHERE id=? AND sha256=?", (db.encode(meta),"error" if result["state"] == "failed" else current["status"],db.utcnow(),item["track_id"],item["sha256"]))
+                fresh=conn.execute('SELECT sha256,metadata,status FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
+                if not fresh or fresh['sha256']!=item['sha256']:
+                    raise media.MediaError('conflict','Input revision changed during audio audit')
+                latest=json.loads(fresh['metadata'])
+                latest["audit"] = result
+                if result.get('hash_verified_at'):
+                    latest['hash_verified_at'] = result['hash_verified_at']
+                conn.execute("UPDATE tracks SET metadata=?,status=?,updated_at=? WHERE id=? AND sha256=?", (db.encode(latest),"error" if result["state"] == "failed" else fresh["status"],db.utcnow(),item["track_id"],item["sha256"]))
             if result["state"] != "passed":
                 raise media.MediaError("audit_failed", "Audio did not pass decoding audit")
             return {"audit": result}
@@ -427,39 +639,84 @@ class Worker:
                 db.event(conn,'loudness_measured',{'track_id':item['track_id'],'sha256':item['sha256']})
             return {'state':'needs_review','tags':candidate['tags'],'audio_unchanged':True}
         self.authorize(job)
+        provider_policy.require_track(self.settings,current,'cache')
         backup_dir = self.settings.state_dir / "backups" / item["track_id"] / job["id"]
-        authorize = lambda: self.authorize(job)
+        commit_announced=False
+        def authorize():
+            nonlocal commit_announced
+            self.authorize(job)
+            if job['kind'] in {'apply','publish'}:
+                latest=db.fetchone(self.settings.db_path,'SELECT sha256,metadata FROM tracks WHERE id=? AND is_current=1',(item['track_id'],))
+                if not latest or latest['sha256']!=item['sha256']:
+                    raise media.MediaError('conflict','Input revision changed before commit')
+                if recording_review.possible_mix(json.loads(latest['metadata']),item['sha256']):
+                    raise media.MediaError('possible_mix_requires_manual_review','Классификация записи изменилась до файлового эффекта')
+            provider_policy.require_track(self.settings,current,'cache')
+            if job['kind']=='apply':
+                from . import automatic_quality
+                from . import album_gain_policy
+                automatic_quality.assert_frozen(self.settings, current, item, job)
+                with db.connect(self.settings.db_path) as connection:
+                    field_policy.assert_apply(self.settings,current,item['proposal'],conn=connection)
+                    provider_policy.require_payload(connection,current,item['proposal'],'embed')
+                    album_gain_policy.payload(self.settings,connection,current,item['proposal'],verify_files=True)
+            elif job['kind']=='publish':
+                from . import comparison, lyrics_review
+                fresh = db.fetchone(self.settings.db_path, 'SELECT * FROM tracks WHERE id=? AND is_current=1', (item['track_id'],))
+                if not fresh or fresh['sha256'] != item['sha256']:
+                    raise media.MediaError('conflict', 'Publication input revision changed before commit')
+                provider_policy.require_track(self.settings,fresh,'export')
+                comparison.assert_publish_allowed(self.settings,item['track_id'])
+                lyrics_review.assert_publish_allowed(self.settings,fresh,audit=audit,frozen=item.get('publication_review'))
+                publication.assert_target(self.settings, fresh, item.get('publication_target'))
+            if not commit_announced:
+                self.item_action(job,item,'commit');commit_announced=True
         if job["kind"] == "apply":
+            from . import automatic_quality
+            automatic_quality.assert_frozen(self.settings, current, item, job)
+            self.item_action(job,item,'write_tags')
             proposal = item["proposal"]
+            field_policy.assert_apply(self.settings, current, proposal)
+            with db.connect(self.settings.db_path) as connection:
+                provider_policy.require_payload(connection,current,proposal,'embed')
+                from . import album_gain_policy
+                album_gain_policy.payload(self.settings,connection,current,proposal,verify_files=True)
             cover = base64.b64decode(proposal["cover"].split(",", 1)[1], validate=True) if proposal.get("cover") else None
-            result = media.apply_changes(path, proposal.get("tags", {}), proposal.get("lrc"), item["sha256"], backup_dir, self.settings.roots, cover, authorize=authorize)
+            result = media.apply_changes(path, proposal.get("tags", {}), proposal.get("lrc"), item["sha256"], backup_dir, self.settings.roots, cover, authorize=authorize, slot_selection=proposal.get('slot_selection'))
+            mode = item.get('acceptance_mode', 'manual')
+            result.update(acceptance_mode=mode, automatic_acceptance=mode == 'automatic')
+            if mode == 'automatic':
+                result['automatic_quality'] = {**item['automatic_quality'], 'state': 'passed'}
         elif job["kind"] == "rollback":
+            self.item_action(job,item,'rollback')
             history = db.fetchone(self.settings.db_path, "SELECT * FROM history WHERE id=? AND track_id=?", (item["history_id"],item["track_id"]))
             if not history:
                 raise media.MediaError("rollback_unavailable", "Rollback history is unavailable")
             previous = json.loads(history["details"])
+            with db.connect(self.settings.db_path) as connection:
+                provider_policy.require_sources(connection,provider_policy.references({'field_sources':previous.get('usage_before',{})}),'embed')
             result = media.rollback(path, previous["backup_path"], item["sha256"], self.settings.roots,
                                     backup_sha256=history["before_sha256"], backup_dir=backup_dir, authorize=authorize)
         elif job["kind"] == "publish":
+            self.item_action(job,item,'publication')
+            from . import comparison, lyrics_review
+            comparison.assert_publish_allowed(self.settings, item['track_id'])
             meta = json.loads(current["metadata"])
-            params = json.loads(job["payload"]).get("params", {})
-            missing = [name for name in ("title", "artist", "album") if not meta.get("tags", {}).get(name)]
-            if not meta.get("has_art"):
-                missing.append("cover")
-            if not meta.get("lrc"):
-                missing.append("synced_lyrics")
-            if missing and not params.get("allow_incomplete"):
-                raise media.MediaError("needs_review", "Publication profile requires: " + ", ".join(missing))
             audit = media.audit_audio(path, self.settings.roots)
             if audit.get("state") != "passed" or audit.get("sha256") != item["sha256"]:
                 raise media.MediaError("audit_failed", "Publication requires a current successful audio audit")
+            gate = lyrics_review.assert_publish_allowed(self.settings, current, audit=audit, frozen=item.get('publication_review'))
             previous_pub = meta.get("publication", {})
+            publication.assert_target(self.settings,current,item.get('publication_target'))
             destination = self.settings.publication_root / "Ready" / intake.publication_relative(item["relative_path"],meta)
-            if previous_pub.get("sha256") == item["sha256"] and destination.is_file() and media.sha256_file(destination) == item["sha256"]:
-                return {"skipped": True, "reason": "already_published", "sha256": item["sha256"]}
+            if previous_pub.get("sha256") == item["sha256"] and previous_pub.get('profile') == gate['profile'] and previous_pub.get('review_version') == gate['review_version'] and destination.is_file() and media.sha256_file(destination) == item["sha256"]:
+                return {"skipped": True, "reason": "already_published", "sha256": item["sha256"], 'publication_gate': gate}
+            from . import publication
+            publication.publish_intent(self.settings, job, item, current, gate, audit)
             result = media.publish(path, destination, item["sha256"], self.settings.roots, self.settings.publication_root,
-                                   expected_destination_sha256=previous_pub.get("sha256"), backup_dir=backup_dir, authorize=authorize)
+                                   expected_destination_sha256=item['publication_target']['expected_ready_sha256'], backup_dir=backup_dir, authorize=authorize)
             result["audit"] = audit
+            result['publication_gate'] = gate
         else:
             raise media.MediaError("unsupported_job", "Unsupported job")
         self.persist_mutation(job, item, result)
@@ -483,31 +740,79 @@ class Worker:
             if int(db.setting(self.settings.db_path,'auth_epoch','0'))!=job['auth_epoch'] or self.cancelled(job['id']):
                 raise media.MediaError('authorization_revoked','Analysis authorization revoked')
         authorized()
-        identified=None; recognition_source=None
+        identified=None; recognition_source=None; segment_result=None
         if fingerprint:
-            audio, offset=await self.io(recognition.sample,path,self.settings.roots,float(meta.get('duration',0)))
-            try:
-                identified=await recognition.recognize(self.providers,audio,offset,authorized)
-                alternate=min(max(0,float(meta.get('duration',0))-12),float(meta.get('duration',0))*.65)
-                if not identified and abs(alternate-offset)>=5:
-                    audio,offset=await self.io(recognition.sample,path,self.settings.roots,float(meta.get('duration',0)),alternate)
-                    identified=await recognition.recognize(self.providers,audio,offset,authorized)
-                recognition_source={'provider':'shazam','state':'fingerprint_match' if identified else 'no_match'}
-            except ProviderError as exc:
-                recognition_source={'provider':'shazam','state':exc.code,'message':str(exc)}
+            def current_audit(value):
+                return (isinstance(value,dict) and value.get('state')=='passed'
+                        and value.get('sha256')==item['sha256']
+                        and value.get('profile')=='full_decode_all_audio_streams'
+                        and isinstance(value.get('audio_identity'),str)
+                        and media._SHA.fullmatch(value['audio_identity']))
+            audit=meta.get('audit')
+            if not current_audit(audit):
+                await self.io(self.item_action,job,item,'decode')
+                audit=dict(await self.io(media.audit_audio,path,self.settings.roots))
+                if audit.get('sha256')!=item['sha256']:
+                    raise media.MediaError('conflict','File changed before recognition audit')
+                audit['checked_at']=db.utcnow()
+                if audit.get('state')=='passed' and not current_audit(audit):
+                    audit.update(state='unsupported',error='audit_profile_unsupported')
+                authorized()
+                def save_audit():
+                    with db.transaction(self.settings.db_path) as conn:
+                        fresh=conn.execute('SELECT metadata,status FROM tracks WHERE id=? AND sha256=? AND is_current=1',
+                                           (item['track_id'],item['sha256'])).fetchone()
+                        if not fresh:raise media.MediaError('conflict','Input revision changed during recognition audit')
+                        data=json.loads(fresh['metadata']);data['audit']=audit
+                        if audit.get('hash_verified_at'):data['hash_verified_at']=audit['hash_verified_at']
+                        conn.execute('UPDATE tracks SET metadata=?,status=?,updated_at=? WHERE id=? AND sha256=? AND is_current=1',
+                            (db.encode(data),'error' if audit.get('state')=='failed' else fresh['status'],db.utcnow(),item['track_id'],item['sha256']))
+                        return data
+                meta=await self.io(save_audit)
+            if not current_audit(audit):
+                raise media.MediaError('audit_failed','Полная проверка всех аудиопотоков не пройдена; внешнее распознавание не отправлено')
+            # Reuse only server audit evidence for this exact file revision.
+            # The packet identity survives tag-only changes; no second packet
+            # probe is needed after the full audit.
+            audio_identity=audit['audio_identity']
+            await self.io(self.item_action,job,item,'fingerprint_sample')
+            async def sample_audio(offset):
+                await self.io(self.item_action,job,item,'fingerprint_sample')
+                value=await self.io(recognition.sample,path,self.settings.roots,float(meta.get('duration',0)),offset)
+                await self.io(self.item_action,job,item,'fingerprint_lookup')
+                return value
+            segment_result=await recognition.identify_segments(self.providers,sample_audio,float(meta.get('duration',0)),authorized,
+                input_revision=item['sha256'],audio_identity=audio_identity,batch_id=job['id'])
+            matches=[entry['candidate'] for entry in segment_result['segments'] if entry.get('candidate')]
+            identified=matches[0] if matches and not segment_result['possible_mix'] else None
+            failures=[entry['state'] for entry in segment_result['segments'] if entry['state'] not in {'match','no_match'}]
+            recognition_source={'provider':'shazam','state':failures[0] if failures else 'needs_review' if segment_result['possible_mix'] else 'fingerprint_match' if identified else 'no_match'}
         else:
             previous=await self.io(db.fetchone,self.settings.db_path,'SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256']))
             if previous:
-                identified=next((c for c in json.loads(previous['payload']).get('candidates',[]) if c.get('provider')=='shazam'),None)
-        if self.settings.external_metadata:
+                identified=next((c for c in json.loads(previous['payload']).get('candidates',[]) if c.get('provider')=='shazam' and c.get('tags')),None)
+        if (segment_result and segment_result['possible_mix']) or recording_review.possible_mix(meta,item['sha256']):
+            # Never use the first song of a compilation as a whole-file query.
+            result={'input_sha256':item['sha256'],'query_source':'conflicting_audio_segments','candidates':[],
+                    'sources':[],'automatic_apply':False,'state':'needs_review'}
+        elif self.settings.external_metadata:
+            await self.io(self.item_action,job,item,'metadata_lookup')
             result = await self.providers.analyze(meta, item['relative_path'],identified,authorized)
         else:
             result={'input_sha256':item['sha256'],'query_source':'audio_fingerprint','candidates':[],'sources':[],
                     'automatic_apply':False,'state':'incomplete'}
         if recognition_source:
             result['sources'].insert(0,recognition_source)
-            if identified:
-                result['candidates'].insert(0,identified);result['state']='candidates'
+            if segment_result:
+                matches={entry['candidate']['id']:entry['candidate'] for entry in segment_result['segments'] if entry.get('candidate')}
+                result['candidates'][:0]=matches.values()
+                result['recognition_segments']=[{**{key:value for key,value in entry.items() if key!='candidate'},
+                    **({'provider':entry['candidate'].get('provider'),'provider_recording_id':entry['candidate'].get('provider_recording_id') or entry['candidate']['id'],
+                        'isrc':entry['candidate'].get('isrc')} if entry.get('candidate') else {})}
+                    for entry in segment_result['segments']]
+                result['recording_confirmation']=segment_result['state']
+                result['possible_mix']=segment_result['possible_mix']
+                if matches and not segment_result['possible_mix']:result['state']='candidates'
         # Album artwork already next to the track is a local candidate, never an arbitrary path.
         if not meta.get('has_art'):
             local = await self.io(self.local_cover, path)
@@ -518,7 +823,7 @@ class Worker:
         if int(db.setting(self.settings.db_path, 'auth_epoch', '0')) != job['auth_epoch'] or self.cancelled(job['id']):
             raise media.MediaError('authorization_revoked','Analysis authorization revoked')
         with db.transaction(self.settings.db_path) as conn:
-            current = conn.execute('SELECT sha256 FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
+            current = conn.execute('SELECT sha256,metadata,status FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
             if not current or current['sha256'] != item['sha256']: raise media.MediaError('conflict','File revision changed')
             previous=conn.execute('SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256'])).fetchone()
             if previous:
@@ -529,10 +834,19 @@ class Worker:
                 if not fingerprint:
                     result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider')=='shazam')
                     result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider')=='shazam')
+                    for key in ('recognition_segments','recording_confirmation','possible_mix'):
+                        if key in old:result[key]=old[key]
+            if segment_result:
+                fresh_meta=recording_review.annotate(json.loads(current['metadata']),item['sha256'],segment_result['possible_mix'])
+                conn.execute('UPDATE tracks SET metadata=?,status=?,updated_at=? WHERE id=?',
+                    (db.encode(fresh_meta),recording_review.catalog_status(current['status'],fresh_meta['possible_mix']),db.utcnow(),item['track_id']))
+            result=provider_policy.prepare_analysis(conn,result)
             conn.execute('INSERT OR REPLACE INTO analyses VALUES(?,?,?,?)',(item['track_id'],item['sha256'],db.encode(result),db.utcnow()))
             db.event(conn,'analysis_completed',{'track_id':item['track_id'],'state':result['state']})
         retry=[]
         for source in result['sources']:
+            if source.get('state') in {'recognition_attempt_budget_exhausted','recognition_identity_required'}:
+                raise media.MediaError(source['state'],'Бюджет распознавания этой аудиозаписи исчерпан или не подтверждена аудиоревизия; требуется ручное решение')
             if source['provider'] not in ({'shazam'} if fingerprint else {'musicbrainz','lrclib','coverartarchive'}):continue
             if source['state'] not in {'rate_limited','provider_cooldown','provider_unavailable','budget_exhausted'}:continue
             breaker=json.loads(db.setting(self.settings.db_path,'provider_breaker:'+source['provider'],'{}'))
@@ -540,7 +854,8 @@ class Worker:
             if source['state']=='budget_exhausted':
                 first=db.fetchone(self.settings.db_path,'SELECT MIN(at) AS at FROM provider_calls WHERE provider=?',(source['provider'],))
                 due=(first['at'] if first and first['at'] else time.time())+86401
-            retry.append(max(time.time()+10,due))
+            source['retry_at'] = max(time.time()+10,due)
+            retry.append(source['retry_at'])
         return {'state':result['state'],'candidates':len(result['candidates']),'sources':result['sources'],**({'retry_at':max(retry)} if retry else {})}
 
     async def process_youtube(self, job, item):
@@ -597,19 +912,33 @@ class Worker:
         return None
 
     async def process(self, job):
+        from .providers import authorization
+        with authorization(lambda:self.authorize_grant(job)):
+            return await self._process(job)
+
+    async def _process(self, job):
         self.state = job["kind"]
         if job["kind"] == "scan":
             return await self.scan(job)
+        if job['kind'] == 'release_audit':
+            from . import release_review
+            return await release_review.process(self, job)
+        if job['kind'] == 'publish_sidecars':
+            from . import publication_sidecars
+            return await publication_sidecars.process(self, job)
         if job['kind']=='replaygain_album':
-            from . import album_loudness
+            from . import album_loudness, album_gain_policy
             items=json.loads(job['payload'])['items']
             def authorized():
                 if self.cancelled(job['id']) or int(db.setting(self.settings.db_path,'auth_epoch','0'))!=job['auth_epoch']:
                     raise media.MediaError('authorization_revoked','Album analysis authorization revoked')
             try:
                 values=await self.io(album_loudness.analyze,[{**i,'path':self.settings.work_root/i['relative_path']} for i in items],self.settings.roots,authorized)
+                album_context=await self.io(album_gain_policy.build,self.settings,items,json.loads(job['payload']).get('params',{}),authorized)
                 with db.transaction(self.settings.db_path) as conn:
+                    album_gain_policy.register(conn,album_context)
                     for item,candidate in zip(items,values):
+                        candidate['album_gain_group']={'id':album_context['id'],'context_sha256':album_context['context_sha256']}
                         current=conn.execute('SELECT sha256 FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
                         if not current or current['sha256']!=item['sha256']:raise media.MediaError('conflict','Album input changed')
                         previous=conn.execute('SELECT * FROM analyses WHERE track_id=?',(item['track_id'],)).fetchone()
@@ -632,17 +961,46 @@ class Worker:
             with db.transaction(self.settings.db_path) as conn:conn.execute('UPDATE jobs SET total=1 WHERE id=?',(job['id'],))
             try:
                 result=await self.io(exports.generate,self.settings,authorized)
-                self.item_result(job['id'],'export','succeeded',result);self.finish(job['id'],'succeeded')
+                self.item_result(job['id'],'export','succeeded',result);self.finish(job['id'],'cancelled_partial' if self.cancelled(job['id']) else 'succeeded')
             except Exception as exc:
-                self.item_result(job['id'],'export','failed',self.failure(exc));self.finish(job['id'],'failed',self.failure(exc)['code'])
+                failure=self.failure(exc)
+                if failure['code']=='insufficient_space' and not self.cancelled(job['id']):
+                    retry_at=time.time()+60;payload=json.loads(job['payload']);payload.update(retry_at=retry_at,wait_reason='storage')
+                    self.item_result(job['id'],'export','deferred',{**failure,'retry_at':retry_at})
+                    with db.transaction(self.settings.db_path) as conn:
+                        conn.execute("UPDATE jobs SET state='queued',stage='waiting_storage',payload=?,updated_at=? WHERE id=?",(db.encode(payload),db.utcnow(),job['id']))
+                        db.event(conn,'job_waiting',{'job_id':job['id'],'retry_at':retry_at,'reason':'storage'})
+                else:
+                    self.item_result(job['id'],'export','failed',failure);self.finish(job['id'],'cancelled' if self.cancelled(job['id']) else 'failed',failure['code'])
             return
-        payload=json.loads(job['payload']);items=payload['items'];retry_at=0
+        payload=json.loads(job['payload']);items=payload['items'];retry_at=0;waiting_storage=False
         done={r['item_key'] for r in db.fetchall(self.settings.db_path,"SELECT item_key FROM job_items WHERE job_id=? AND state IN ('succeeded','failed','conflict','needs_review')",(job['id'],))}
+        if job['kind']=='publish' and payload.get('params',{}).get('publication_plan_id'):
+            from . import api_facades
+            try:
+                with db.connect(self.settings.db_path) as conn:
+                    plan=api_facades.load(conn,payload['params']['publication_plan_id'])
+                await self.io(api_facades.validate_plan,self.settings,plan,skip=done)
+            except Exception as exc:
+                result=self.failure(exc)
+                for item in items:
+                    if item['track_id'] not in done:self.item_result(job['id'],item['track_id'],'conflict',result)
+                self.finish(job['id'],'conflict',result['code'])
+                return
         items=[i for i in items if i['track_id'] not in done]
+        halted=False
+        def stop_admission():
+            nonlocal halted
+            if not halted:
+                if retry_at:
+                    halted=True
+                else:
+                    control=self.job_control(job['id'])
+                    halted=self.control_cancelled(control) or bool(control and control['pause_requested'])
+            return halted
         async def one_inner(item):
-            nonlocal retry_at
-            pause=json.loads(db.fetchone(self.settings.db_path,'SELECT payload FROM jobs WHERE id=?',(job['id'],))['payload']).get('pause_requested')
-            if retry_at or pause or self.cancelled(job["id"]):
+            nonlocal retry_at,waiting_storage
+            if stop_admission():
                 return
             key = item["track_id"]
             self.item_result(job["id"], key, "running", {})
@@ -659,16 +1017,37 @@ class Worker:
             except Exception as exc:
                 result = self.failure(exc)
                 journals = self.settings.state_dir / "backups" / key / job["id"]
-                has_intent = job["kind"] in {"apply", "rollback", "publish"} and journals.exists() and any(journals.glob("*.json"))
-                state = "interrupted" if has_intent else "conflict" if result["code"] in {"conflict", "revision_conflict"} else "needs_review" if result["code"] in {"needs_review", "invalid_lyrics", "unsupported_format", "authorization_revoked"} else "failed"
+                has_intent = job["kind"] in {"apply", "rollback", "publish", "rollback_ready"} and journals.exists() and any(journals.glob("*.json"))
+                reason=self.authorization_reason(job['id']) if not self.user_cancelled(job['id']) else None
+                if has_intent and reason and result['code'] in automation.AUTHORIZATION_REASONS:
+                    try:
+                        # Only a proven unbegun prepared write can wait for a
+                        # fresh grant. An uncertain rename/fsync remains recovery.
+                        retired=[await self.io(media.retire_authorization_intent,path,self.settings.roots,reason)
+                                 for path in journals.glob('*.json')]
+                        has_intent=not retired or not all(retired)
+                    except Exception:
+                        LOG.exception('Could not prove an unbegun authorization-denied intent',extra={'event':'authorization_intent_reconciliation_failed'})
+                        has_intent=True
+                if result['code']=='insufficient_space' and not has_intent:
+                    # Only a failed reservation before any journal/effect may
+                    # resume automatically. ENOSPC after intent stays recovery.
+                    waiting_storage=True;retry_at=max(retry_at,time.time()+60)
+                    self.item_result(job['id'],key,'deferred',{**result,'retry_at':retry_at,'wait_reason':'storage'})
+                    return
+                state = "interrupted" if has_intent else "conflict" if result["code"] in {"conflict", "revision_conflict"} else "needs_review" if result["code"] in {"needs_review", "invalid_lyrics", "unsupported_format", "authorization_revoked", "publication_snapshot_required", "publication_review_stale", "lyrics_document_stale", "lyrics_line_locked", "lyrics_document_conflict", "partial_lyrics", "recognition_attempt_budget_exhausted", "recognition_identity_required", "possible_mix_requires_manual_review"} else "failed"
                 if has_intent:
                     with db.transaction(self.settings.db_path) as conn:
                         conn.execute("UPDATE tracks SET status='needs_review' WHERE id=?", (key,))
                     result["recovery_required"] = True
                 self.item_result(job["id"], key, state, result)
         async def one(item):
-            with context(track_id=opaque_id(item['track_id'])): await one_inner(item)
-        await self.bounded_items(items, one)
+            if stop_admission(): return
+            with context(track_id=opaque_id(item['track_id'])), processing_activity.attempt(
+                    self.settings.db_path, job['id'], item['track_id'], self.activity_generation,
+                    json.loads(job['payload']).get('_trace')):
+                await one_inner(item)
+        await self.bounded_items(items, one, should_stop=stop_admission)
         current=db.fetchone(self.settings.db_path,'SELECT * FROM jobs WHERE id=?',(job['id'],))
         paused=json.loads(current['payload']).get('pause_requested')
         if paused and current['completed']+current['failed']<current['total'] and not self.cancelled(job['id']):
@@ -678,11 +1057,12 @@ class Worker:
             log('job_paused',job_id=job['id'],kind=job['kind'])
             return
         if retry_at and not self.cancelled(job['id']):
-            payload=json.loads(current['payload']);payload['retry_at']=retry_at
+            payload=json.loads(current['payload']);payload['retry_at']=retry_at;payload['wait_reason']='storage' if waiting_storage else 'provider'
+            stage='waiting_storage' if waiting_storage else 'waiting_provider'
             with db.transaction(self.settings.db_path) as conn:
-                conn.execute("UPDATE jobs SET state='queued',stage='waiting_provider',payload=?,updated_at=? WHERE id=?",(db.encode(payload),db.utcnow(),job['id']))
-                db.event(conn,'job_waiting',{'job_id':job['id'],'retry_at':retry_at})
-            log('job_waiting_provider',logging.WARNING,job_id=job['id'],kind=job['kind'],retry_at=retry_at)
+                conn.execute("UPDATE jobs SET state='queued',stage=?,payload=?,updated_at=? WHERE id=?",(stage,db.encode(payload),db.utcnow(),job['id']))
+                db.event(conn,'job_waiting',{'job_id':job['id'],'retry_at':retry_at,'reason':payload['wait_reason']})
+            log('job_'+stage,logging.WARNING,job_id=job['id'],kind=job['kind'],retry_at=retry_at)
             return
         stats = db.fetchone(self.settings.db_path, "SELECT * FROM jobs WHERE id=?", (job["id"],))
         interrupted = db.fetchone(self.settings.db_path, "SELECT COUNT(*) AS n FROM job_items WHERE job_id=? AND state='interrupted'", (job["id"],))["n"]
@@ -694,7 +1074,11 @@ class Worker:
         elif self.cancelled(job["id"]):
             state = "cancelled_partial" if stats["completed"] else "cancelled"
         elif stats["failed"]:
-            state = "completed_with_errors" if stats["completed"] else "failed"
+            if stats['completed']:
+                state='completed_with_errors'
+            else:
+                failures={row['state'] for row in db.fetchall(self.settings.db_path,"SELECT DISTINCT state FROM job_items WHERE job_id=? AND state IN ('failed','conflict','needs_review')",(job['id'],))}
+                state=next(iter(failures)) if len(failures)==1 else 'failed'
         else:
             state = "succeeded"
         self.finish(job["id"], state)
@@ -704,7 +1088,19 @@ class Worker:
         rows = db.fetchall(self.settings.db_path, "SELECT * FROM jobs WHERE state IN ('running','interrupted')")
         for job in rows:
             self.finish(job["id"], "interrupted", "worker_restarted")
-            if not self.settings.writable or job["kind"] not in {"apply", "publish", "rollback"}:
+            if job['kind'] == 'publish_sidecars' and self.settings.writable:
+                # The owner grants a fresh retry before any uncommitted effect.
+                # That retry reconciles existing per-object journals first.
+                from . import publication_sidecars
+                plan_id = json.loads(job['payload'])['params']['plan_id']
+                plan = publication_sidecars.load_plan(self.settings, plan_id)
+                if plan['state'] == 'complete':
+                    self.finish(job['id'], 'succeeded', 'sidecar_plan_already_committed')
+                else:
+                    publication_sidecars.update_plan(self.settings, plan_id, state='partial' if plan['results'] else 'interrupted', error='worker_restarted')
+                    self.finish(job['id'], 'needs_review', 'sidecar_recovery_required')
+                continue
+            if not self.settings.writable or job["kind"] not in {"apply", "publish", "rollback", "rollback_ready"}:
                 continue
             for item in json.loads(job["payload"]).get("items", []):
                 directory = self.settings.state_dir / "backups" / item["track_id"] / job["id"]
@@ -719,6 +1115,7 @@ class Worker:
                             result = {"operation_id": restored["operation_id"], "before_sha256": restored.get("before_sha256"),
                                       "after_sha256": restored["after_sha256"], "sha256": restored["after_sha256"],
                                       "backup_path": restored.get("backup"), "journal_path": str(journal), "state": "committed", "recovered": True}
+                            if 'metadata_slot_targets' in restored: result['metadata_slot_targets'] = restored['metadata_slot_targets']
                             self.persist_mutation(job, item, result)
                             self.item_result(job["id"], item["track_id"], "succeeded", {"recovered": True, "sha256": result["sha256"]})
                     except Exception as exc:
@@ -734,7 +1131,7 @@ class Worker:
         try:
             await self.process(job)
         except Exception as exc:
-            state = 'interrupted' if job['kind'] in {'apply','rollback','publish'} else 'failed'
+            state = 'interrupted' if job['kind'] in {'apply','rollback','publish','rollback_ready','publish_sidecars'} else 'failed'
             self.finish(job['id'],state,self.failure(exc)['code'])
             if state=='interrupted': self.stopping=True
         finally:
@@ -744,7 +1141,7 @@ class Worker:
 
     async def run(self, once=False):
         self.settings.validate()
-        db.initialize(self.settings.db_path)
+        db.initialize(self.settings.db_path, settings=self.settings)
         with ExitStack() as stack:
             stack.enter_context(scheduler_guard(self.settings.state_dir))
             verify_storage(self.settings)
@@ -752,22 +1149,48 @@ class Worker:
                 stack.enter_context(media.writer_guard(self.settings.storage_guard_dir, self.settings.instance_id))
             await self.io(self.recover_jobs)
             self.state = "idle"
-            self.heartbeat()
+            await asyncio.to_thread(self.heartbeat)
             heartbeat_task = asyncio.create_task(self.heartbeats())
             next_schedule=0
             try:
                 while not self.stopping:
-                    if time.monotonic()>=next_schedule:
-                        await self.io(scheduling.tick,self.settings)
-                        next_schedule=time.monotonic()+30
-                    job = self.claim_job()
+                    if heartbeat_task.done():
+                        # A schema/I/O error must remain visible, rather than
+                        # silently losing the heartbeat task permanently.
+                        heartbeat_task.result()
+                    try:
+                        if time.monotonic()>=next_schedule:
+                            await self.io(provider_policy.cleanup_cache,self.settings)
+                            from . import provider_attempts
+                            await self.io(provider_attempts.recover_stale,self.settings)
+                            await self.io(scheduling.tick,self.settings)
+                            next_schedule=time.monotonic()+30
+                        # SQLite's busy_timeout can wait 15s. Keep this wait off
+                        # both the event loop and the bounded media I/O pool.
+                        job = await asyncio.to_thread(self.claim_job)
+                    except sqlite3.OperationalError as exc:
+                        if not sqlite_busy(exc):
+                            raise
+                        # The transaction context rolled back and closed its
+                        # connection. Retry a fresh poll after a bounded await;
+                        # never acknowledge or restart a partially claimed job.
+                        log('worker_database_busy', logging.WARNING, operation='scheduler')
+                        await asyncio.sleep(DB_BUSY_RETRY_SECONDS)
+                        continue
                     if job:
                         task=asyncio.create_task(self.background_job(job))
                         if job['kind'] in {'transcribe','align'}: self.inference_task=task
                         else: self.normal_task=task
                         continue
                     pending=[task for task in (self.normal_task,self.inference_task) if task and not task.done()]
-                    if once and not pending: break
+                    if once and not pending:
+                        # A lane can finish while the threaded claim still
+                        # observes it busy. Poll again without those completed
+                        # lane handles before declaring the eligible queue empty.
+                        if self.normal_task is not None or self.inference_task is not None:
+                            self.normal_task = self.inference_task = None
+                            continue
+                        break
                     # Poll claims while either lane runs, so a newly queued ASR
                     # can start during a long metadata batch (and vice versa).
                     if pending:
@@ -800,6 +1223,8 @@ def main():
     parser.add_argument("--health", action="store_true", help="Check worker heartbeat")
     args = parser.parse_args()
     configure_logging('worker')
+    from . import tracing
+    tracing.configure('worker')
     settings = Settings.from_env()
     if args.health:
         heartbeat = json.loads(db.setting(settings.db_path, "worker_heartbeat", "{}"))
@@ -812,9 +1237,13 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try: asyncio.run(worker.run(args.once))
+    except Exception:
+        LOG.exception('Worker failed', extra={'event':'worker_failed'})
+        return 1
     finally:
         if server: server.shutdown(); server.server_close()
         log('worker_stopped')
+        tracing.shutdown()
     return 0
 
 

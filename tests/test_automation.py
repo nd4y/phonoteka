@@ -3,10 +3,10 @@ import json
 import time
 
 from fastapi.testclient import TestClient
-from phonoteka import db
+from phonoteka import db,webhooks
 from phonoteka.app import create_app
 from phonoteka.worker import Worker
-from test_backend import settings, authenticated, seed
+from test_backend import settings,client,authenticated,seed
 
 
 def test_scopes_token_hash_only_and_revocation(settings):
@@ -28,7 +28,8 @@ def test_scopes_token_hash_only_and_revocation(settings):
             assert client.post('/api/tokens',json={'name':'new','scopes':['jobs:write']},headers=auth).status_code==403
             assert owner.delete('/api/tokens/'+token['id'],headers=headers).status_code==200
             assert client.get('/api/tracks',headers=auth).status_code==401
-            assert owner.get('/api/jobs/'+jid).json()['state']=='cancelled'
+            state=owner.get('/api/jobs/'+jid).json()
+            assert state['state']=='waiting_authorization' and not state['cancel_requested']
 
 
 def test_expiry_stops_pending_worker_effects_and_cross_origin(settings):
@@ -45,3 +46,37 @@ def test_expiry_stops_pending_worker_effects_and_cross_origin(settings):
             assert worker.cancelled(queued['id'])
         finally:worker.pool.shutdown()
         assert owner.get('/api/tracks',headers=auth).status_code==401
+
+
+def test_revocation_retains_nonterminal_notification_reservations_atomically(client,settings):
+    headers=authenticated(client,settings);tid,_=seed(settings)
+    # The app was started with notifications disabled, so its sender cannot
+    # transmit. Only durable enqueue policy is enabled for this synthetic test.
+    key=settings.state_dir/'synthetic-webhook-key';key.write_bytes(b'synthetic-notification-signing-key-123456')
+    cfg=replace(settings,webhook_enabled=True,webhook_url='https://receiver.example/hook',
+                webhook_allowed_hosts=('receiver.example',),webhook_secret_file=key)
+    webhooks.configure(cfg)
+    token=client.post('/api/tokens',json={'name':'cancel-test','scopes':['read','jobs:analysis']},headers=headers).json()
+    ids=[]
+    for index in range(3):
+        response=client.post('/api/jobs',json={'kind':'audit','track_ids':[tid]},headers={'Authorization':'Bearer '+token['token'],'Idempotency-Key':f'revoke-{index}'})
+        assert response.status_code==202;ids.append(response.json()['id'])
+    with db.transaction(settings.db_path) as conn:
+        conn.execute("UPDATE jobs SET state='paused',stage='paused',completed=1,total=2 WHERE id=?",(ids[1],))
+        conn.execute("UPDATE jobs SET state='running',stage='audit' WHERE id=?",(ids[2],))
+    assert webhooks.status(cfg)['reserved_jobs']==3
+    assert client.delete('/api/tokens/'+token['id'],headers=headers).status_code==200
+    assert client.get('/api/jobs/'+ids[0]).json()['state']=='waiting_authorization'
+    assert client.get('/api/jobs/'+ids[1]).json()['state']=='waiting_authorization'
+    running=client.get('/api/jobs/'+ids[2]).json()
+    assert running['state']=='running' and running['stage']=='waiting_authorization' and not running['cancel_requested']
+    status=webhooks.status(cfg)
+    assert status['reserved_jobs']==3 and status['counts'].get('pending',0)==0
+    with db.connect(settings.db_path) as conn:
+        documents=[json.loads(row['payload']) for row in conn.execute('SELECT payload FROM webhook_outbox')]
+    assert not documents
+    # Only a subsequent explicit user cancellation is terminal and consumes
+    # the reservation, with cancellation separate from grant withdrawal.
+    assert client.post('/api/jobs/'+ids[0]+'/cancel',headers=headers).status_code==200
+    assert webhooks.status(cfg)['reserved_jobs']==2
+    assert token['token'] not in json.dumps(documents)

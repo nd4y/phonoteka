@@ -3,3 +3,4 @@
 *.jpg binary
 *.mp3 binary
 *.flac binary
+docs/requirements-register.md -text

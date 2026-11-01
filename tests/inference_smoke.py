@@ -16,6 +16,7 @@ with tempfile.TemporaryDirectory() as directory:
             try: request('/health');break
             except Exception:time.sleep(1)
         body={'relative_path':'speech.wav','sha256':hashlib.sha256((root/'work'/'speech.wav').read_bytes()).hexdigest()}
+        health=request('/health');assert health['contract']=='transcribe-v3' and health['resource_profile']['resident_models']==1
         first=request('/jobs',body);second=request('/jobs',body);assert first['id']==second['id']
         for _ in range(180):
             status=request('/jobs/'+first['id'])
@@ -25,6 +26,7 @@ with tempfile.TemporaryDirectory() as directory:
         result=status['result'];assert 'test' in result['text'].lower(),result
         assert len(result['words'])>5 and all(0<=w['start']<=w['end']<=result['duration']+.1 for w in result['words'])
         assert result['automatic_acceptance'] is False
+        assert result['resource_profile']==health['profile_revision']
         alignment_body={**body,'reference_text':'This is a music library test.\nWe are checking the words and their timing.'}
         aligned_job=request('/jobs',alignment_body)
         assert aligned_job['id']!=first['id']
@@ -48,11 +50,28 @@ with tempfile.TemporaryDirectory() as directory:
         req=urllib.request.Request('http://127.0.0.1:18001/metrics',headers={'Authorization':'Bearer test-metrics-key-distinct-from-inference'})
         with urllib.request.urlopen(req) as response:
             metrics=response.read().decode();assert 'phonoteka_inference_model_loaded 1.0' in metrics and 'phonoteka_collector_up 1.0' in metrics and 'phonoteka_inference_duration_seconds_count 3.0' in metrics
+        assert 'phonoteka_inference_model_process_starts_total 1.0' in metrics
+        values={line.split()[0]:float(line.split()[1]) for line in metrics.splitlines() if line.startswith('phonoteka_inference_model_process_peak_bytes ')}
+        assert 0<values['phonoteka_inference_model_process_peak_bytes']<health['resource_profile']['model_process_rss_bytes']
+        assert not list((root/'state').glob('model-*'))
         logs=subprocess.run(['docker','logs',name],capture_output=True,text=True,check=True)
         events=[json.loads(line) for line in logs.stdout.splitlines() if line.strip()]
         assert any(e['event']=='inference_finished' for e in events)
         assert 'speech.wav' not in logs.stdout and 'test-metrics-key' not in logs.stdout and not logs.stderr
-        print(json.dumps({'real_model':result['model'],'revision':result['model_revision'],'words':len(result['words']),'timeline_valid':True,'deduplication':True,'forced_alignment_coverage':alignment['coverage']}))
+        low_probe="""import hashlib
+from pathlib import Path
+from phonoteka import inference
+from phonoteka.inference_budget import BudgetError
+p=Path('/work/speech.wav')
+try:inference.execute({'relative_path':p.name,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+except BudgetError as e:
+ assert e.code=='inference_container_budget' and inference.MODEL_INSTANCE is None
+ print('UNDERSIZED_CPU_REFUSED_BEFORE_MODEL_LOAD')
+else:raise AssertionError('Undersized CPU profile was accepted')
+"""
+        low=subprocess.run(['docker','run','--rm','--no-healthcheck','--memory','1280m','--memory-swap','1280m','--cpus','1','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','64','--user','10001:10001','--tmpfs','/tmp:size=64m,mode=1777','-v',str(root/'work')+':/work:ro','--entrypoint','python','phonoteka-inference:ci','-c',low_probe],capture_output=True,text=True,timeout=45,check=True)
+        assert 'UNDERSIZED_CPU_REFUSED_BEFORE_MODEL_LOAD' in low.stdout
+        print(json.dumps({'real_model':result['model'],'revision':result['model_revision'],'words':len(result['words']),'timeline_valid':True,'deduplication':True,'forced_alignment_coverage':alignment['coverage'],'undersized_cpu_no_oom':True}))
     except BaseException:
         subprocess.run(['docker','logs','--tail','100',name],check=False)
         raise

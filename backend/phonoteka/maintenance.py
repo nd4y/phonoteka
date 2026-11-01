@@ -10,7 +10,8 @@ import shutil
 import sqlite3
 import tempfile
 import time
-from . import __version__,db,media
+import uuid
+from . import __version__,db,media,provider_policy
 from .config import Settings
 from .worker import scheduler_guard
 
@@ -36,7 +37,7 @@ def verify(directory):
     for item in manifest['files']:
         relative=Path(item['path'])
         if relative.is_absolute() or '..' in relative.parts or str(relative) in seen:raise ValueError('Invalid backup path')
-        if relative.parts[0] not in {'phonoteka.sqlite3','backups','exports'}:raise ValueError('Unexpected backup artifact')
+        if relative.parts[0] not in {'phonoteka.sqlite3','backups','exports','retention'}:raise ValueError('Unexpected backup artifact')
         seen.add(str(relative));path=root/relative;media._no_links(path)
         if path.stat().st_size!=item['size'] or digest(path)!=item['sha256']:raise ValueError('Backup artifact hash mismatch')
     if 'phonoteka.sqlite3' not in seen:raise ValueError('Database missing')
@@ -50,17 +51,21 @@ def backup(settings,destination):
     with scheduler_guard(settings.state_dir),media.writer_guard(settings.storage_guard_dir,settings.instance_id):
         active=db.fetchone(settings.db_path,"SELECT COUNT(*) AS n FROM jobs WHERE state IN ('running','interrupted')")['n']
         if active:raise ValueError('Reconcile running jobs before backup')
+        provider_policy.require_backup(settings)
         with tempfile.TemporaryDirectory(prefix='.phonoteka-backup-',dir=dest.parent) as folder:
             stage=Path(folder)/'snapshot';stage.mkdir(mode=0o700)
             with db.connect(settings.db_path) as src,closing(sqlite3.connect(stage/'phonoteka.sqlite3')) as dst:
                 src.backup(dst)
+                db.configure_connection(dst)
                 # Caches and active credentials are not portable backup artifacts.
                 dst.execute('DELETE FROM provider_cache');dst.execute('DELETE FROM sessions');dst.execute('DELETE FROM api_tokens');dst.commit()
+                dst.row_factory=sqlite3.Row
+                provider_policy.sanitize_backup(dst);dst.commit()
                 dst.execute('PRAGMA wal_checkpoint(TRUNCATE)');dst.execute('PRAGMA journal_mode=DELETE')
                 # DELETE alone leaves cached/private rows in SQLite free pages.
                 # Compact the copy so excluded rows are absent from backup bytes.
                 dst.execute('VACUUM')
-            for name in ('backups','exports'):
+            for name in ('backups','exports','retention'):
                 source=settings.state_dir/name
                 if not source.exists():continue
                 for path in source.rglob('*'):
@@ -68,6 +73,7 @@ def backup(settings,destination):
                     if not path.is_file() and not path.is_dir():raise ValueError('Special backup artifact rejected')
                 shutil.copytree(source,stage/name)
             manifest={'contract':'phonoteka-state-v1','schema':db.SCHEMA_VERSION,'version':__version__,'created_at':db.utcnow(),
+                      'source_state_dir':str(settings.state_dir.absolute()),
                       'music_included':False,'secrets_included':False,'authentication_hash_included':True,'files':[]}
             for path in sorted(stage.rglob('*')):
                 if path.is_file():
@@ -80,6 +86,43 @@ def backup(settings,destination):
     return {'path':str(dest),'files':len(manifest['files']),'verified':True,'music_included':False}
 
 
+def _restore_handles(stage, destination, manifest):
+    """Relocate internal handles to verified copied artifacts, never old state.
+
+    Older v1 snapshots have no source root. Their unique backups/... suffix is
+    accepted only when that exact artifact is in the verified manifest.
+    Music target/staging paths and immutable export contents are not rewritten.
+    """
+    names={item['path'] for item in manifest['files']}
+    source_root=Path(manifest['source_state_dir']) if manifest.get('source_state_dir') else None
+    def relative_handle(value):
+        if not value or not isinstance(value,str):return None
+        path=Path(value)
+        if not path.is_absolute() or '..' in path.parts:return None
+        if source_root is not None:
+            try:relative=path.relative_to(source_root).as_posix()
+            except ValueError:return None
+            return relative if relative.startswith('backups/') and relative in names else None
+        candidates=[name for name in names if name.startswith('backups/') and path.as_posix().endswith('/'+name)]
+        return candidates[0] if len(candidates)==1 else None
+    with db.transaction(stage/'phonoteka.sqlite3') as conn:
+        for row in conn.execute('SELECT id,details FROM history').fetchall():
+            details=json.loads(row['details'])
+            for key in ('backup_path','journal_path'):
+                if details.get(key):
+                    relative=relative_handle(details[key])
+                    details[key]=str(destination/relative) if relative else None
+            conn.execute('UPDATE history SET details=? WHERE id=?',(db.encode(details),row['id']))
+    for name in names:
+        if not name.startswith('backups/') or not name.endswith('.json'):continue
+        path=stage/name
+        document=json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(document,dict) and document.get('backup'):
+            relative=relative_handle(document['backup'])
+            document['backup']=str(destination/relative) if relative else None
+            media._journal(path,document)
+
+
 def restore(directory,destination):
     source=Path(directory).absolute();manifest=verify(source)
     dest=safe_destination(destination,[source]);media._no_links(dest.parent)
@@ -89,12 +132,18 @@ def restore(directory,destination):
             target=stage/entry['path'];target.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(source/entry['path'],target);os.chmod(target,0o600)
             if digest(target)!=entry['sha256']:raise ValueError('Backup changed during restore')
+        _restore_handles(stage,dest,manifest)
         with db.transaction(stage/'phonoteka.sqlite3') as conn:
             conn.execute('DELETE FROM sessions');conn.execute('DELETE FROM api_tokens')
+            conn.execute("DELETE FROM settings WHERE key LIKE 'export_lease:%'")
             conn.execute("UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='auth_epoch'")
             conn.execute("INSERT OR REPLACE INTO settings VALUES('recovery_required','true')")
             conn.execute("INSERT OR REPLACE INTO settings VALUES('schedule',?)",(db.encode({'enabled':False,'remaining':[]}),))
-            conn.execute("UPDATE jobs SET state='cancelled',stage='cancelled',cancel_requested=1 WHERE state IN ('running','queued','paused','interrupted')")
+            conn.execute("INSERT OR REPLACE INTO settings VALUES('webhook_paused','true')")
+            conn.execute("INSERT OR REPLACE INTO settings VALUES('webhook_event_epoch',?)",(str(uuid.uuid4()),))
+            cancelled=[row['id'] for row in conn.execute("SELECT id FROM jobs WHERE state IN ('running','queued','paused','waiting_authorization','interrupted')")]
+            conn.execute("UPDATE jobs SET state='cancelled',stage='cancelled',cancel_requested=1,error='state_restored' WHERE state IN ('running','queued','paused','waiting_authorization','interrupted')")
+            for identity in cancelled:db.event(conn,'job_finished',{'job_id':identity,'state':'cancelled','reason':'state_restored'})
             db.event(conn,'state_restored',{'version':manifest['version'],'music_restored':False,'recovery_required':True})
         media._sync_directory(stage);media._replace(stage,dest,no_replace=True);media._sync_directory(dest.parent)
     return {'path':str(dest),'recovery_required':True,'music_restored':False,'credentials_revoked':True}

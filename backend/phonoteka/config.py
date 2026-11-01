@@ -27,7 +27,10 @@ class Settings:
     allow_insecure_localhost: bool = False
     file_workers: int = 2
     io_threads: int = 2
+    input_grace_seconds: int = 60
     session_hours: int = 12
+    session_idle_minutes: int = 60
+    session_absolute_hours: int | None = None
     provider_daily_limit: int = 2500
     external_metadata: bool = False
     external_fingerprints: bool = False
@@ -40,8 +43,22 @@ class Settings:
     inference_url: str = ""
     inference_secret_file: Path | None = None
     metrics_token_file: Path | None = None
+    webhook_enabled: bool = False
+    webhook_url: str = ""
+    webhook_allowed_hosts: tuple[str, ...] = ()
+    webhook_secret_file: Path | None = None
+    webhook_allow_private: bool = False
+    webhook_max_pending: int = 10000
 
     def __post_init__(self):
+        if type(self.input_grace_seconds) is not int or not 0 <= self.input_grace_seconds <= 86400:
+            raise ValueError("INPUT_GRACE_SECONDS must be an integer in 0..86400")
+        if type(self.session_hours) is not int or not 1 <= self.session_hours <= 720:
+            raise ValueError("SESSION_HOURS must be an integer in 1..720")
+        if type(self.session_idle_minutes) is not int or not 1 <= self.session_idle_minutes <= 1440:
+            raise ValueError("SESSION_IDLE_MINUTES must be an integer in 1..1440")
+        if self.session_absolute_hours is not None and (type(self.session_absolute_hours) is not int or not 1 <= self.session_absolute_hours <= 720):
+            raise ValueError("SESSION_ABSOLUTE_HOURS must be an integer in 1..720")
         if self.musicbrainz_host not in {"musicbrainz.org", "beta.musicbrainz.org"}:
             raise ValueError("MUSICBRAINZ_HOST must be an official MusicBrainz endpoint")
 
@@ -70,6 +87,12 @@ class Settings:
             external_fingerprints=boolean("EXTERNAL_FINGERPRINTS", False),
             youtube_enabled=boolean('YOUTUBE_ENABLED',False),
             metrics_token_file=Path(os.environ['METRICS_TOKEN_FILE']) if os.environ.get('METRICS_TOKEN_FILE') else None,
+            webhook_enabled=boolean('WEBHOOK_ENABLED',False),
+            webhook_url=os.environ.get('WEBHOOK_URL',''),
+            webhook_allowed_hosts=tuple(value.strip().lower() for value in os.environ.get('WEBHOOK_ALLOWED_HOSTS','').split(',') if value.strip()),
+            webhook_secret_file=Path(os.environ['WEBHOOK_SECRET_FILE']) if os.environ.get('WEBHOOK_SECRET_FILE') else None,
+            webhook_allow_private=boolean('WEBHOOK_ALLOW_PRIVATE',False),
+            webhook_max_pending=max(10,min(100000,int(os.environ.get('WEBHOOK_MAX_PENDING','10000')))),
             theaudiodb_enabled=boolean('THEAUDIODB_ENABLED',False),
             theaudiodb_artwork=boolean('THEAUDIODB_ARTWORK',False),
             discogs_enabled=boolean('DISCOGS_ENABLED',False),
@@ -77,7 +100,19 @@ class Settings:
             musicbrainz_host=os.environ.get("MUSICBRAINZ_HOST", "musicbrainz.org"),
             provider_daily_limit=max(1,min(int(os.environ.get("PROVIDER_DAILY_LIMIT","2500")),10000)),
             io_threads=max(1, min(int(os.environ.get("IO_THREADS", "2")), 8)),
+            input_grace_seconds=int(os.environ.get('INPUT_GRACE_SECONDS', '60')),
+            session_hours=int(os.environ.get('SESSION_HOURS', '12')),
+            session_idle_minutes=int(os.environ.get('SESSION_IDLE_MINUTES', '60')),
+            session_absolute_hours=int(os.environ['SESSION_ABSOLUTE_HOURS']) if 'SESSION_ABSOLUTE_HOURS' in os.environ else None,
         )
+
+    @property
+    def session_absolute_seconds(self) -> int:
+        return (self.session_hours if self.session_absolute_hours is None else self.session_absolute_hours) * 3600
+
+    @property
+    def session_idle_seconds(self) -> int:
+        return self.session_idle_minutes * 60
 
     @property
     def roots(self) -> dict:

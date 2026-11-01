@@ -128,6 +128,12 @@ def main():
             assert 'Verified fixture' in str(changed['tags']['title'])
             assert request('/api/tracks/'+tid+'/art')==png
             job('audit',[tid])
+            review=request('/api/tracks/'+tid+'/lyrics-review')
+            request('/api/tracks/'+tid+'/lyrics-review','PUT',{
+                'base_version':review['version'],'document_revision':review['document_revision'],
+                'profile':'lyrics_required','accept_revision':True,'listened_sections':['start','middle','end'],
+                'lines':[{'line_id':line['line_id'],'words_state':'accepted','timing_state':'accepted'} for line in review['lines']],
+            },{'If-Match':changed['sha256']})
             job('publish',[tid])
             published=root/'publication/Ready/fixture.flac'
             assert published.is_file(),list((root/'publication').rglob('*'))

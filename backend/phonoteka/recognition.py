@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import tempfile
 from pathlib import Path
 import time
@@ -12,7 +13,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from . import db, media
+from . import db, media,provider_attempts
 from .providers import ProviderError
 
 POLICY = 'shazamio-0.8.1-sample-v1'
@@ -43,9 +44,10 @@ def sample(path, roots, duration, offset=None):
 
 class SignatureTransport:
     """Replace the library's 20 retries with one bounded HTTPS signature request."""
-    def __init__(self, providers, authorize=lambda: None):
+    def __init__(self, providers, authorize=lambda: None,revision=None,input_kind='sample_sha256'):
         self.providers = providers
         self.authorize = authorize
+        self.revision=revision;self.input_kind=input_kind
 
     async def request(self, method, url, *args, **kwargs):
         with self.providers.metrics.provider('shazam','fingerprint'):
@@ -66,17 +68,20 @@ class SignatureTransport:
                 or len(signature['uri']) > 100000 or not 0 < signature.get('samplems', 0) <= 13000):
             raise ProviderError('unsafe_provider_request', 'shazam', 'Недопустимый аудиоотпечаток')
         self.authorize()
-        await self.providers.throttle('shazam')
-        self.authorize()
+        from . import provider_policy
+        try:await asyncio.to_thread(provider_policy.check,self.providers.settings,'shazam','metadata','fetch')
+        except media.MediaError as exc:raise ProviderError(exc.code,'shazam',exc.message) from exc
         try:
-            async with self.providers.client.stream('POST', url, headers=kwargs.get('headers'), json=payload) as response:
+            async with self.providers.request('shazam','fingerprint','POST',url,headers=kwargs.get('headers'),json=payload,
+                    revision=self.revision,input_kind=self.input_kind,authorize=self.authorize) as response:
                 if response.status_code == 429:
                     value = response.headers.get('retry-after', '300')
                     delay = min(86400, max(60, int(value))) if value.isdigit() else 300
                     await asyncio.to_thread(db.set_setting, self.providers.settings.db_path, 'provider_breaker:shazam',
                                             db.encode({'until': time.time() + delay, 'reason': 'rate_limited'}))
                     interval=float(await asyncio.to_thread(db.setting,self.providers.settings.db_path,'provider_interval:shazam','10'))
-                    await asyncio.to_thread(db.set_setting,self.providers.settings.db_path,'provider_interval:shazam',str(min(120,interval*2)))
+                    self.providers.intervals['shazam']=min(120,interval*2)
+                    await asyncio.to_thread(db.set_setting,self.providers.settings.db_path,'provider_interval:shazam',str(self.providers.intervals['shazam']))
                     raise ProviderError('rate_limited', 'shazam', 'Shazam ограничил частоту запросов')
                 if response.status_code in (401, 403):
                     raise ProviderError('provider_unauthorized', 'shazam', 'Shazam отклонил доступ')
@@ -89,42 +94,57 @@ class SignatureTransport:
                         raise ProviderError('response_too_large', 'shazam', 'Ответ Shazam превышает лимит')
                 result = json.loads(raw)
                 if not isinstance(result, dict): raise ValueError('Expected object')
+                track=result.get('track') or {}
+                if not isinstance(track,dict) or not all(track.get(field) for field in ('key','title','subtitle')):
+                    response.extensions['phonoteka_no_match']=True
                 return result
         except (httpx.HTTPError, ValueError) as exc:
             raise ProviderError('provider_unavailable', 'shazam', 'Ошибка сети или ответа Shazam: '+type(exc).__name__) from exc
 
 
-async def recognize(providers, audio, offset, authorize=lambda: None):
+async def recognize(providers, audio, offset, authorize=lambda: None,*,input_revision=None):
     from shazamio import Shazam
-    key = hashlib.sha256(POLICY.encode() + audio).hexdigest()
+    from . import provider_policy,media
+    try:usage=await asyncio.to_thread(provider_policy.check,providers.settings,'shazam','metadata','fetch')
+    except media.MediaError as exc:raise ProviderError(exc.code,'shazam',exc.message) from exc
+    key = hashlib.sha256((POLICY+usage['policy_version']).encode() + audio).hexdigest()
     # Single flight also avoids concurrent identical samples consuming quota twice.
     lock = providers.locks.setdefault('shazam-flight', asyncio.Lock())
     async with lock:
         cached = await asyncio.to_thread(db.fetchone, providers.settings.db_path,
-                                        'SELECT payload FROM provider_cache WHERE key=? AND expires>?', (key, time.time()))
+                                        'SELECT payload FROM provider_cache WHERE key=? AND expires>?', (key, time.time())) if usage['allow_cache'] else None
         if cached:
             data = json.loads(cached['payload'])
         else:
+            # Cached evidence spends no HTTP allowance. A miss checks capacity
+            # before ShazamIO can return a local empty/no-query result, while
+            # reserve still performs atomic admission before every real send.
+            try:
+                await asyncio.to_thread(provider_attempts.require_recognition_capacity,providers.settings,
+                                        provider_attempts.RECOGNITION.get()[0])
+            except provider_attempts.UsageError as exc:
+                raise ProviderError(exc.code,'shazam','Бюджет распознавания этой аудиозаписи исчерпан или не подтверждена аудиоревизия') from exc
             breaker = json.loads(await asyncio.to_thread(db.setting, providers.settings.db_path, 'provider_breaker:shazam', '{}'))
             if breaker.get('until', 0) > time.time():
                 raise ProviderError('provider_cooldown', 'shazam', 'Shazam временно приостановлен')
-            try:
-                shazam = Shazam(http_client=SignatureTransport(providers, authorize), segment_duration_seconds=12)
-                # The core uses a filename hint for WAV. Byte probing first tries MPEG
-                # and emits hundreds of misleading errors for valid PCM samples.
-                with tempfile.TemporaryDirectory(prefix='phonoteka-fingerprint-') as tmp:
-                    wav=Path(tmp)/'sample.wav';wav.write_bytes(audio)
-                    data = await asyncio.wait_for(shazam.recognize(str(wav)), timeout=50)
-                await asyncio.to_thread(providers.cache, key, 'shazam', data)
-            except (ProviderError, asyncio.TimeoutError) as exc:
-                code = getattr(exc, 'code', 'provider_unavailable')
-                if code=='provider_unavailable':
-                    await asyncio.to_thread(providers.unavailable,'shazam')
-                elif code=='provider_unauthorized':
-                    await asyncio.to_thread(db.set_setting, providers.settings.db_path, 'provider_breaker:shazam',
-                                            db.encode({'until': time.time() + 1200, 'reason': code}))
-                if isinstance(exc, ProviderError): raise
-                raise ProviderError(code, 'shazam', 'Превышено время распознавания') from exc
+            with provider_attempts.request_scope() as attempt_state:
+                try:
+                    revision=input_revision or hashlib.sha256(audio).hexdigest()
+                    shazam = Shazam(http_client=SignatureTransport(providers,authorize,revision,'file_sha256' if input_revision else 'sample_sha256'), segment_duration_seconds=12)
+                    # WAV filename avoids the library probing PCM as MPEG.
+                    with tempfile.TemporaryDirectory(prefix='phonoteka-fingerprint-') as tmp:
+                        wav=Path(tmp)/'sample.wav';wav.write_bytes(audio)
+                        data = await asyncio.wait_for(shazam.recognize(str(wav)), timeout=50)
+                    await asyncio.to_thread(providers.cache, key, 'shazam', data)
+                except (ProviderError, asyncio.TimeoutError) as exc:
+                    code=getattr(exc,'code','unknown_outcome' if attempt_state['unknown'] else 'provider_unavailable')
+                    if code=='provider_unavailable':
+                        await asyncio.to_thread(providers.unavailable,'shazam')
+                    elif code=='provider_unauthorized':
+                        await asyncio.to_thread(db.set_setting, providers.settings.db_path, 'provider_breaker:shazam',
+                                                db.encode({'until': time.time() + 1200, 'reason': code}))
+                    if isinstance(exc, ProviderError):raise
+                    raise ProviderError(code,'shazam','Превышено время распознавания; отправленная попытка не повторяется автоматически') from exc
         track = data.get('track') or {}
         if not track.get('key') or not track.get('title') or not track.get('subtitle'):
             return None
@@ -137,7 +157,66 @@ async def recognize(providers, audio, offset, authorize=lambda: None):
         source = str(track.get('url', ''))
         if urlsplit(source).scheme != 'https' or urlsplit(source).hostname not in {'www.shazam.com', 'shazam.com'}: source = ''
         with wave.open(io.BytesIO(audio)) as wav: seconds=wav.getnframes()/wav.getframerate()
+        isrc = str(track.get('isrc', '')).upper()
         return {'id': 'shazam:' + str(track['key'])[:100], 'provider': 'shazam', 'kind': 'metadata', 'tags': tags,
+                'provider_recording_id': str(track['key'])[:100],
+                'isrc': isrc if re.fullmatch('[A-Z]{2}[A-Z0-9]{3}[0-9]{7}', isrc) else None,
+                'sample_sha256': hashlib.sha256(audio).hexdigest(), 'extractor_profile': POLICY,
                 'identification': 'audio_fingerprint', 'source_url': source, 'sample_offset': offset,
                 'sample_seconds': seconds, 'recording_version_verified': False,
                 'match': {'state': 'fingerprint_match', 'reasons': ['recording_version_unverified']}}
+
+
+def offsets(duration):
+    """Two separated real fragments when the recording is long enough."""
+    if not math.isfinite(duration) or duration <= 0:
+        return [None]
+    first = min(45., max(0., duration * .25))
+    second = min(max(0., duration - 12), duration * .65)
+    return [first, second] if abs(second - first) >= 5 else [first]
+
+
+def segment_verdict(segments):
+    matches = [item['candidate'] for item in segments if item.get('state') == 'match']
+    identities = {(item.get('provider'), item.get('provider_recording_id') or item.get('id')) for item in matches
+                  if isinstance(item.get('provider_recording_id') or item.get('id'), str) and (item.get('provider_recording_id') or item.get('id'))}
+    isrcs = {item['isrc'] for item in matches if item.get('isrc')}
+    conflict = len(identities) > 1 or len(isrcs) > 1
+    matched_offsets=[item['offset'] for item in segments if item.get('state')=='match']
+    separated=len(matched_offsets)>=2 and max(matched_offsets)-min(matched_offsets)>=5
+    agreed = len(matches) >= 2 and len(identities) == 1 and separated and not conflict
+    return {'state': 'conflict' if conflict else 'agreement' if agreed else 'insufficient',
+            'possible_mix': conflict, 'recording_only': True,
+            'release_verified': False, 'lyrics_verified': False}
+
+
+async def identify_segments(providers, sample_audio, duration, authorize, *, input_revision,
+                            audio_identity, batch_id):
+    """No hidden retry: all fragments share the existing durable call budget.
+
+    sample_audio is the Worker's bounded I/O lane. recognize retains its exact
+    per-fragment cache/transport policy, including unknown-outcome accounting.
+    """
+    segments = []
+    with provider_attempts.recognition_scope(audio_identity, batch_id):
+        for requested in offsets(duration):
+            authorize()
+            audio, offset = await sample_audio(requested)
+            authorize()
+            # A truncated tail fallback may resolve to the same first sample.
+            digest = hashlib.sha256(audio).hexdigest()
+            if any(item['offset'] == offset and item['sample_sha256'] == digest for item in segments):
+                continue
+            entry = {'offset': offset, 'sample_sha256': digest, 'extractor_profile': POLICY}
+            try:
+                candidate = await recognize(providers, audio, offset, authorize, input_revision=input_revision)
+                authorize()
+                entry.update(state='match' if candidate else 'no_match', candidate=candidate)
+                if candidate: entry['sample_seconds'] = candidate.get('sample_seconds')
+            except ProviderError as exc:
+                entry.update(state=exc.code, candidate=None)
+                segments.append(entry)
+                # Cooldown/unknown/budget must not create another network send.
+                break
+            segments.append(entry)
+    return {'segments': segments, **segment_verdict(segments)}
