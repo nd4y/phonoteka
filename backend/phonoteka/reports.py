@@ -77,7 +77,10 @@ def summary(settings, conn=None):
             for candidate in data.get('candidates',[]):
                 if candidate.get('provider') in {'shazam','acoustid'} and candidate.get('identification')=='audio_fingerprint' and candidate.get('id'):
                     candidates[('fingerprint_candidate',candidate['id'])].append(by_id[row['track_id']])
-        fingerprints=[s['state'] for s in data.get('sources',[]) if s['provider'] in {'shazam','acoustid'}]
+        # Older analyses appended an AcoustID key_required placeholder even
+        # when no fingerprint lookup ran. Configuration is not an attempt.
+        fingerprints=[s['state'] for s in data.get('sources',[]) if s['provider'] in {'shazam','acoustid'}
+            and s['state'] not in {'key_required','disabled','provider_disabled','insufficient_metadata'}]
         if fingerprints:
             counts['fingerprint_matches' if 'fingerprint_match' in fingerprints else 'fingerprint_no_match' if all(s=='no_match' for s in fingerprints) else 'fingerprint_unavailable']+=1
         counts['metadata_pending_retry']+=any(s.get('provider') in {'musicbrainz','lrclib'} and s.get('state') not in {'candidates','no_match'} for s in data.get('sources',[]))

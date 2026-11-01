@@ -1,5 +1,7 @@
 # AcoustID connection
 
+Legacy key-required or disabled markers describe configuration, not recognition attempts, and are excluded from recognition report counters. A fallback match is counted once per file.
+
 AcoustID supplements Shazam recognition. When there is no unambiguous match and the recording is not marked as a mix, a Recognize job computes Chromaprint and looks up linked MusicBrainz recordings. Multiple matches remain review candidates. Recording versions are not considered verified and tags are never applied automatically.
 
 ## UI setup
