@@ -3165,16 +3165,23 @@ function SettingsView({
   onDirtyChange: (dirty: boolean) => void;
   onLogoutAll: () => void;
 }) {
+  const [acoustidDirty, setAcoustidDirty] = useState(false);
+  const [retentionDirty, setRetentionDirty] = useState(false);
+  useEffect(
+    () => onDirtyChange(acoustidDirty || retentionDirty),
+    [acoustidDirty, retentionDirty, onDirtyChange],
+  );
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
   return (
     <div className="settings-grid">
       <OperationsPanel />
-      <ProvidersPanel />
+      <ProvidersPanel onDirtyChange={setAcoustidDirty} />
       <ProviderPolicyPanel />
       <SourcePriorityPanel />
       <SchedulePanel />
       <AutomationPanel />
       <WebhooksPanel />
-      <RetentionPanel onDirtyChange={onDirtyChange} />
+      <RetentionPanel onDirtyChange={setRetentionDirty} />
       <section className="panel settings-panel">
         <div className="section-icon">
           <Settings2 size={21} />
@@ -3249,7 +3256,7 @@ function SettingsView({
             },
             { label: "Публикация готовой коллекции", ready: summary?.capabilities.publish },
             { label: "Поиск метаданных и текстов", ready: summary?.capabilities.metadata_search },
-            { label: "Распознавание ShazamIO", ready: summary?.capabilities.recognition },
+            { label: "Распознавание по аудиоотпечатку", ready: summary?.capabilities.recognition },
             { label: "ASR и выравнивание текста", ready: summary?.capabilities.asr },
           ].map((item) => (
             <div key={item.label}>
@@ -3263,7 +3270,8 @@ function SettingsView({
         <p className="muted small">
           MusicBrainz, LRCLIB и Cover Art Archive подготавливают предложения. ShazamIO распознает
           локально подготовленные аудиоотпечатки без API-ключа, если отправка включена в
-          конфигурации. Платные запросы отключены.
+          конфигурации. Для дополнительного поиска AcoustID добавьте ключ приложения в форме
+          подключения выше. Платные запросы отключены.
         </p>
       </section>
       <section className="panel settings-panel settings-wide">

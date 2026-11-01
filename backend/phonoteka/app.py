@@ -205,6 +205,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     exports.install(app,settings)
     comparison.install(app,settings)
     provider_policy.install(app,settings)
+    from . import acoustid
+    acoustid.install(app,settings)
     operations.install(app,settings)
     youtube.install(app,settings)
     field_policy.install(app,settings)
@@ -892,13 +894,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       {'id':'shazam','configured':settings.external_fingerprints,'capabilities':['fingerprint'],'unofficial':True},
                       {'id':'theaudiodb','configured':settings.external_metadata and settings.theaudiodb_enabled,'capabilities':['release']+(['cover'] if settings.theaudiodb_artwork else [])},
                       {'id':'discogs','configured':bool(settings.external_metadata and settings.discogs_enabled and settings.discogs_token_file and settings.discogs_token_file.is_file()),'capabilities':['release']},
-                      *[{'id':x,'configured':False,'state':'key_required'} for x in ['acoustid','audd','acrcloud']]]
+                      {'id':'acoustid','configured':acoustid.public_connection(settings)['configured'],'capabilities':['fingerprint']},
+                      *[{'id':x,'configured':False,'state':'key_required'} for x in ['audd','acrcloud']]]
         for provider in providers:
             provider['calls_24h']=db.fetchone(settings.db_path,'SELECT COUNT(*) AS n FROM provider_calls WHERE provider=? AND at>?',(provider['id'],time.time()-86400))['n']
             breaker=json.loads(db.setting(settings.db_path,'provider_breaker:'+provider['id'],'{}'))
             provider['retry_at']=breaker.get('until') if breaker.get('until',0)>time.time() else None
             provider['state']='disabled' if not provider['configured'] else breaker.get('reason','ready') if provider['retry_at'] else 'ready'
-            if provider['id'] in {'acoustid','audd','acrcloud'}:provider['state']='key_required'
+            if provider['id'] in {'audd','acrcloud'}:provider['state']='key_required'
+            if provider['id']=='acoustid' and not acoustid.public_connection(settings)['key_set']:provider['state']='key_required'
         return {'external_metadata':settings.external_metadata,'external_fingerprints':settings.external_fingerprints,'daily_limit':settings.provider_daily_limit,'providers':providers}
 
     @app.post('/api/tracks/{track_id}/analysis/select',status_code=201)

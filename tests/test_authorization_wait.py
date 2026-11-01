@@ -197,6 +197,14 @@ def test_revocation_during_provider_throttle_sends_no_new_call_and_context_does_
             engine=providers.Providers(cfg,transport=httpx.MockTransport(handler))
             worker.providers=engine
             engine.next['musicbrainz']=time.monotonic()+.15
+            entered=asyncio.Event();release=asyncio.Event()
+            original_throttle=engine.throttle
+            async def held_throttle(*args,**kwargs):
+                if not entered.is_set():
+                    entered.set()
+                    await release.wait()
+                return await original_throttle(*args,**kwargs)
+            engine.throttle=held_throttle
             def valid_other():
                 # to_thread retains the requesting task's context, including
                 # while a different job is waiting in this same Providers.
@@ -210,8 +218,12 @@ def test_revocation_during_provider_throttle_sends_no_new_call_and_context_does_
                 with providers.authorization(valid_other):
                     assert await engine.get('musicbrainz','https://musicbrainz.org/ws/2/recording',{'query':'other'})=={'ok':True}
             denied=asyncio.create_task(worker.process(worker.claim_job()))
-            await asyncio.sleep(.03)
-            await asyncio.to_thread(client.delete,'/api/tokens/'+token['id'],headers=owner)
+            # Revoke while admission is held, not after an assumed number of
+            # wall-clock milliseconds on a contended build server.
+            await asyncio.wait_for(entered.wait(),5)
+            response=await asyncio.to_thread(client.delete,'/api/tokens/'+token['id'],headers=owner)
+            assert response.status_code==200 and response.json()=={'revoked':True}
+            release.set()
             await unaffected_job();await denied
             waiting=current(client,identity)
             assert waiting['state']=='waiting_authorization' and waiting['authorization']['reason']=='authorization_revoked'

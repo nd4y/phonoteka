@@ -55,7 +55,7 @@ def summary(settings, conn=None):
             sources={s.get('provider'):s.get('state') for s in json.loads(row['analysis_payload']).get('sources',[])} if current else {}
             done={'candidates','candidate','no_match','fingerprint_match'}
             counts['metadata_pending']+=any(sources.get(provider) not in done for provider in ('musicbrainz','lrclib'))
-            counts['recognition_pending']+=sources.get('shazam') not in done
+            counts['recognition_pending']+=not any(sources.get(provider) in done for provider in ('shazam','acoustid'))
         counts['input_errors']+=bool(meta.get('input_error'))
         counts['writable_profiles']+=bool(meta.get('write_supported')) and not meta.get('cue_album_image',False)
         counts['with_lyrics']+=bool(meta.get('lrc'));counts['with_cover']+=bool(meta.get('has_art'))
@@ -75,11 +75,11 @@ def summary(settings, conn=None):
         data=json.loads(row['payload']);counts['analyzed']+=1;counts['with_candidates']+=bool(data.get('candidates'));counts['no_match']+=data.get('state')=='no_match';counts['asr_drafts']+=bool(data.get('asr'))
         if row['track_id'] in by_id:
             for candidate in data.get('candidates',[]):
-                if candidate.get('provider')=='shazam' and candidate.get('identification')=='audio_fingerprint' and candidate.get('id'):
+                if candidate.get('provider') in {'shazam','acoustid'} and candidate.get('identification')=='audio_fingerprint' and candidate.get('id'):
                     candidates[('fingerprint_candidate',candidate['id'])].append(by_id[row['track_id']])
-        for source in data.get('sources',[]):
-            if source['provider']=='shazam':
-                counts['fingerprint_matches' if source['state']=='fingerprint_match' else 'fingerprint_no_match' if source['state']=='no_match' else 'fingerprint_unavailable']+=1
+        fingerprints=[s['state'] for s in data.get('sources',[]) if s['provider'] in {'shazam','acoustid'}]
+        if fingerprints:
+            counts['fingerprint_matches' if 'fingerprint_match' in fingerprints else 'fingerprint_no_match' if all(s=='no_match' for s in fingerprints) else 'fingerprint_unavailable']+=1
         counts['metadata_pending_retry']+=any(s.get('provider') in {'musicbrainz','lrclib'} and s.get('state') not in {'candidates','no_match'} for s in data.get('sources',[]))
     album_report=[]
     for items in albums.values():

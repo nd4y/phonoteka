@@ -741,6 +741,7 @@ class Worker:
                 raise media.MediaError('authorization_revoked','Analysis authorization revoked')
         authorized()
         identified=None; recognition_source=None; segment_result=None
+        acoustid_candidates=[]; acoustid_source=None
         if fingerprint:
             def current_audit(value):
                 return (isinstance(value,dict) and value.get('state')=='passed'
@@ -787,10 +788,31 @@ class Worker:
             identified=matches[0] if matches and not segment_result['possible_mix'] else None
             failures=[entry['state'] for entry in segment_result['segments'] if entry['state'] not in {'match','no_match'}]
             recognition_source={'provider':'shazam','state':failures[0] if failures else 'needs_review' if segment_result['possible_mix'] else 'fingerprint_match' if identified else 'no_match'}
+            from . import acoustid
+            configured=await self.io(acoustid.public_connection,self.settings)
+            if (configured['configured'] and not identified and not segment_result['possible_mix']
+                    and not recording_review.possible_mix(meta,item['sha256'])
+                    and not any(state in {'unknown_outcome','recognition_attempt_budget_exhausted','recognition_identity_required','budget_exhausted'} for state in failures)):
+                try:
+                    authorized()
+                    await self.io(self.item_action,job,item,'fingerprint_sample')
+                    signature=await self.io(acoustid.fingerprint,path,self.settings.roots)
+                    authorized()
+                    await self.io(media._expect,path,item['sha256'])
+                    await self.io(self.item_action,job,item,'fingerprint_lookup')
+                    with provider_attempts.recognition_scope(audio_identity,job['id']), provider_attempts.input_revision(item['sha256']):
+                        acoustid_candidates=await acoustid.identify(self.providers,signature,float(meta['duration']),authorized)
+                    if len(acoustid_candidates)==1:identified=acoustid_candidates[0]
+                    acoustid_source={'provider':'acoustid','state':'fingerprint_match' if acoustid_candidates else 'no_match','count':len(acoustid_candidates)}
+                except ProviderError as exc:
+                    acoustid_source={'provider':'acoustid','state':exc.code}
         else:
             previous=await self.io(db.fetchone,self.settings.db_path,'SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256']))
             if previous:
-                identified=next((c for c in json.loads(previous['payload']).get('candidates',[]) if c.get('provider')=='shazam' and c.get('tags')),None)
+                old_candidates=json.loads(previous['payload']).get('candidates',[])
+                identified=next((c for c in old_candidates if c.get('provider')=='shazam' and c.get('tags')),None)
+                acoustic=[c for c in old_candidates if c.get('provider')=='acoustid' and c.get('tags')]
+                if identified is None and len(acoustic)==1:identified=acoustic[0]
         if (segment_result and segment_result['possible_mix']) or recording_review.possible_mix(meta,item['sha256']):
             # Never use the first song of a compilation as a whole-file query.
             result={'input_sha256':item['sha256'],'query_source':'conflicting_audio_segments','candidates':[],
@@ -813,6 +835,10 @@ class Worker:
                 result['recording_confirmation']=segment_result['state']
                 result['possible_mix']=segment_result['possible_mix']
                 if matches and not segment_result['possible_mix']:result['state']='candidates'
+        if acoustid_source:
+            result['sources'].insert(0,acoustid_source)
+            result['candidates'][:0]=acoustid_candidates
+            if acoustid_candidates:result['state']='candidates'
         # Album artwork already next to the track is a local candidate, never an arbitrary path.
         if not meta.get('has_art'):
             local = await self.io(self.local_cover, path)
@@ -832,8 +858,8 @@ class Worker:
                     if key in old: result[key]=old[key]
                 result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider') in {'independent_asr','local_replaygain'})
                 if not fingerprint:
-                    result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider')=='shazam')
-                    result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider')=='shazam')
+                    result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider') in {'shazam','acoustid'})
+                    result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider') in {'shazam','acoustid'})
                     for key in ('recognition_segments','recording_confirmation','possible_mix'):
                         if key in old:result[key]=old[key]
             if segment_result:
@@ -847,7 +873,7 @@ class Worker:
         for source in result['sources']:
             if source.get('state') in {'recognition_attempt_budget_exhausted','recognition_identity_required'}:
                 raise media.MediaError(source['state'],'Бюджет распознавания этой аудиозаписи исчерпан или не подтверждена аудиоревизия; требуется ручное решение')
-            if source['provider'] not in ({'shazam'} if fingerprint else {'musicbrainz','lrclib','coverartarchive'}):continue
+            if source['provider'] not in ({'shazam','acoustid'} if fingerprint else {'musicbrainz','lrclib','coverartarchive'}):continue
             if source['state'] not in {'rate_limited','provider_cooldown','provider_unavailable','budget_exhausted'}:continue
             breaker=json.loads(db.setting(self.settings.db_path,'provider_breaker:'+source['provider'],'{}'))
             due=breaker.get('until',time.time()+60)

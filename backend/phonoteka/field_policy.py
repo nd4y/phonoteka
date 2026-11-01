@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import db, media, security
 
 FIELDS = tuple(sorted(set(media._TEXT_FRAMES) | set(media._CUSTOM_FIELDS))) + ('cover', 'lrc')
-PROVIDERS = ('musicbrainz', 'shazam', 'coverartarchive', 'lrclib', 'local_cover', 'local_replaygain', 'theaudiodb', 'discogs')
+PROVIDERS = ('musicbrainz', 'shazam', 'acoustid', 'coverartarchive', 'lrclib', 'local_cover', 'local_replaygain', 'theaudiodb', 'discogs')
 SOURCE_KEY = 'field_source_priorities'
 
 
