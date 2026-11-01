@@ -73,7 +73,7 @@
         "name": "kind",
         "label": "Этап",
         "type": "custom",
-        "query": "scan,audit,apply,rollback,publish,analyze,recognize,transcribe,align,extract_cue,replaygain,replaygain_album,export_ready,normalize_audio,youtube",
+        "query": "scan,audit,apply,rollback,rollback_ready,publish,analyze,recognize,transcribe,align,extract_cue,replaygain,replaygain_album,export_ready,normalize_audio,youtube,release_audit,publish_sidecars",
         "multi": true,
         "includeAll": true,
         "allValue": ".*",
@@ -1066,19 +1066,291 @@
     },
     {
       "id": 17,
+      "title": "Задачи ждут освобождения места",
+      "description": "Ожидание безопасного резервирования до появления journal/эффекта. ENOSPC после intent требует recovery и не повторяется скрытно.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_storage_wait_jobs{app=\"phonoteka\",instance=~\"$instance\",kind=~\"$kind\"}",
+          "legendFormat": "{{kind}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "title": "Повтор проверки места через",
+      "description": "",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 42,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_storage_retry_wait_seconds{app=\"phonoteka\",instance=~\"$instance\",kind=~\"$kind\"}",
+          "legendFormat": "{{kind}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "title": "Элементы ожидают места",
+      "description": "",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 50,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_storage_wait_items_remaining{app=\"phonoteka\",instance=~\"$instance\",kind=~\"$kind\"}",
+          "legendFormat": "{{kind}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "title": "Задачи ожидают внешнего провайдера",
+      "description": "",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 50,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_provider_retry_jobs{app=\"phonoteka\",instance=~\"$instance\",kind=~\"$kind\"}",
+          "legendFormat": "{{kind}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 21,
       "type": "row",
       "title": "03 / MusicBrainz, LRCLIB, CAA, Shazam и YouTube",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 42,
+        "y": 58,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 18,
+      "id": 22,
       "title": "Операции / мин",
       "description": "Логическая операция, включает кеш; HTTP-повторы внутри операции не считаются отдельными успехами.",
       "type": "timeseries",
@@ -1088,7 +1360,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 43,
+        "y": 59,
         "w": 12,
         "h": 8
       },
@@ -1146,7 +1418,7 @@
       }
     },
     {
-      "id": 19,
+      "id": 23,
       "title": "P95 операции с ожиданием и повторами",
       "description": "",
       "type": "timeseries",
@@ -1156,7 +1428,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 43,
+        "y": 59,
         "w": 12,
         "h": 8
       },
@@ -1214,7 +1486,7 @@
       }
     },
     {
-      "id": 20,
+      "id": 24,
       "title": "Остаток бюджета запросов / 24ч",
       "description": "",
       "type": "bargauge",
@@ -1224,7 +1496,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 51,
+        "y": 67,
         "w": 12,
         "h": 8
       },
@@ -1279,7 +1551,7 @@
       }
     },
     {
-      "id": 21,
+      "id": 25,
       "title": "Пауза после ограничений / ошибок",
       "description": "",
       "type": "timeseries",
@@ -1289,7 +1561,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 51,
+        "y": 67,
         "w": 12,
         "h": 8
       },
@@ -1347,7 +1619,7 @@
       }
     },
     {
-      "id": 22,
+      "id": 26,
       "title": "Зарезервировано запросов за скользящие 24ч",
       "description": "Gauge: значение уменьшается при выходе запросов из окна. Не применять increase/rate.",
       "type": "timeseries",
@@ -1357,7 +1629,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 59,
+        "y": 75,
         "w": 12,
         "h": 8
       },
@@ -1415,7 +1687,7 @@
       }
     },
     {
-      "id": 23,
+      "id": 27,
       "title": "Попадания в кеш / мин",
       "description": "",
       "type": "timeseries",
@@ -1425,7 +1697,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 59,
+        "y": 75,
         "w": 12,
         "h": 8
       },
@@ -1483,7 +1755,7 @@
       }
     },
     {
-      "id": 24,
+      "id": 28,
       "title": "Размер действующего кеша",
       "description": "",
       "type": "timeseries",
@@ -1493,7 +1765,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 67,
+        "y": 83,
         "w": 12,
         "h": 8
       },
@@ -1551,7 +1823,7 @@
       }
     },
     {
-      "id": 25,
+      "id": 29,
       "title": "Записей в действующем кеше",
       "description": "",
       "type": "timeseries",
@@ -1561,7 +1833,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 67,
+        "y": 83,
         "w": 12,
         "h": 8
       },
@@ -1619,20 +1891,146 @@
       }
     },
     {
-      "id": 26,
+      "id": 30,
+      "title": "Запреты политики источников / мин",
+      "description": "Реально отклоненные fetch/cache/embed/export/derived_analysis. Метки ограничены известными источниками и операциями; чтение отчета не увеличивает счетчик.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 91,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider,operation)(rate(phonoteka_provider_policy_denials_total{app=\"phonoteka\",instance=~\"$instance\",provider=~\"$provider\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{provider}} / {{operation}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 31,
+      "title": "Запретов политики · выбранный интервал",
+      "description": "",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 91,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider,operation)(increase(phonoteka_provider_policy_denials_total{app=\"phonoteka\",instance=~\"$instance\",provider=~\"$provider\"}[$__range]))",
+          "legendFormat": "{{provider}} / {{operation}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "id": 32,
       "type": "row",
       "title": "04 / Коллекция и результаты распознавания",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 75,
+        "y": 99,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 27,
+      "id": 33,
       "title": "Форматы файлов",
       "description": "",
       "type": "bargauge",
@@ -1642,7 +2040,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 76,
+        "y": 100,
         "w": 12,
         "h": 8
       },
@@ -1697,7 +2095,7 @@
       }
     },
     {
-      "id": 28,
+      "id": 34,
       "title": "Состояние записей",
       "description": "",
       "type": "bargauge",
@@ -1707,7 +2105,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 76,
+        "y": 100,
         "w": 12,
         "h": 8
       },
@@ -1762,7 +2160,7 @@
       }
     },
     {
-      "id": 29,
+      "id": 35,
       "title": "Обложки и синхронизированный текст",
       "description": "",
       "type": "timeseries",
@@ -1772,7 +2170,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 84,
+        "y": 108,
         "w": 12,
         "h": 8
       },
@@ -1830,7 +2228,7 @@
       }
     },
     {
-      "id": 30,
+      "id": 36,
       "title": "Ошибки входных файлов и редактируемые форматы",
       "description": "",
       "type": "timeseries",
@@ -1840,7 +2238,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 84,
+        "y": 108,
         "w": 12,
         "h": 8
       },
@@ -1898,7 +2296,7 @@
       }
     },
     {
-      "id": 31,
+      "id": 37,
       "title": "Результаты источников · текущая версия аудио",
       "description": "Только анализ, SHA которого соответствует текущему файлу; совпадения требуют проверки.",
       "type": "bargauge",
@@ -1908,7 +2306,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 92,
+        "y": 116,
         "w": 12,
         "h": 8
       },
@@ -1963,7 +2361,7 @@
       }
     },
     {
-      "id": 32,
+      "id": 38,
       "title": "YouTube · происхождение и кандидаты",
       "description": "recorded: URL сохранен в локальном источнике; owner_confirmed: выбор владельца. Поиск остается кандидатом.",
       "type": "bargauge",
@@ -1973,7 +2371,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 92,
+        "y": 116,
         "w": 12,
         "h": 8
       },
@@ -2028,20 +2426,20 @@
       }
     },
     {
-      "id": 33,
+      "id": 39,
       "type": "row",
       "title": "05 / ASR и выравнивание текста",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 100,
+        "y": 124,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 34,
+      "id": 40,
       "title": "ASR · задания",
       "description": "",
       "type": "bargauge",
@@ -2051,7 +2449,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 101,
+        "y": 125,
         "w": 8,
         "h": 8
       },
@@ -2106,7 +2504,7 @@
       }
     },
     {
-      "id": 35,
+      "id": 41,
       "title": "ASR · модель в памяти",
       "description": "0 до первого запроса ASR; это не отказ сервиса.",
       "type": "stat",
@@ -2116,7 +2514,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 101,
+        "y": 125,
         "w": 8,
         "h": 8
       },
@@ -2172,7 +2570,7 @@
       }
     },
     {
-      "id": 36,
+      "id": 42,
       "title": "ASR · возраст очереди",
       "description": "",
       "type": "stat",
@@ -2182,7 +2580,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 101,
+        "y": 125,
         "w": 8,
         "h": 8
       },
@@ -2238,7 +2636,7 @@
       }
     },
     {
-      "id": 37,
+      "id": 43,
       "title": "ASR · P95 длительности",
       "description": "",
       "type": "timeseries",
@@ -2248,7 +2646,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 109,
+        "y": 133,
         "w": 12,
         "h": 8
       },
@@ -2306,7 +2704,7 @@
       }
     },
     {
-      "id": 38,
+      "id": 44,
       "title": "ASR · выполнения / мин",
       "description": "",
       "type": "timeseries",
@@ -2316,7 +2714,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 109,
+        "y": 133,
         "w": 12,
         "h": 8
       },
@@ -2374,20 +2772,154 @@
       }
     },
     {
-      "id": 39,
+      "id": 45,
+      "title": "ASR · память model worker",
+      "description": "Резидентные веса, буферы и decoder контролируемого model worker; CPU профиль ограничен 2 ГиБ внутри контейнера 3 ГиБ.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 141,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_inference_model_process_resident_bytes{app=\"phonoteka\",instance=~\"$instance\",service=\"inference\"}",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 46,
+      "title": "ASR · запуски model worker",
+      "description": "Один resident process разделяют ASR и alignment; после отказа веса выгружаются. Повтор того же job автоматически не запускается.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 141,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(phonoteka_inference_model_process_starts_total{app=\"phonoteka\",instance=~\"$instance\",service=\"inference\"}[$__range])",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": false,
+          "instant": true,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 47,
       "type": "row",
       "title": "06 / HTTP API",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 117,
+        "y": 149,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 40,
+      "id": 48,
       "title": "Запросы / с",
       "description": "",
       "type": "timeseries",
@@ -2397,7 +2929,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 118,
+        "y": 150,
         "w": 12,
         "h": 8
       },
@@ -2455,7 +2987,7 @@
       }
     },
     {
-      "id": 41,
+      "id": 49,
       "title": "P95 полного ответа",
       "description": "Включает передачу потокового аудио. /health и /metrics исключены.",
       "type": "timeseries",
@@ -2465,7 +2997,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 118,
+        "y": 150,
         "w": 12,
         "h": 8
       },
@@ -2523,7 +3055,7 @@
       }
     },
     {
-      "id": 42,
+      "id": 50,
       "title": "HTTP 4xx / 5xx",
       "description": "",
       "type": "timeseries",
@@ -2533,7 +3065,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 126,
+        "y": 158,
         "w": 12,
         "h": 8
       },
@@ -2591,7 +3123,7 @@
       }
     },
     {
-      "id": 43,
+      "id": 51,
       "title": "Текущие запросы",
       "description": "",
       "type": "timeseries",
@@ -2601,7 +3133,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 126,
+        "y": 158,
         "w": 12,
         "h": 8
       },
@@ -2659,20 +3191,20 @@
       }
     },
     {
-      "id": 44,
+      "id": 52,
       "type": "row",
       "title": "07 / Ресурсы процессов и достоверность мониторинга",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 134,
+        "y": 166,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 45,
+      "id": 53,
       "title": "CPU · ядра, 100% = одно ядро",
       "description": "Только процесс Python, без дочерних ffmpeg/yt-dlp. Нагрузка всего контейнера доступна в общем дашборде Docker.",
       "type": "timeseries",
@@ -2682,7 +3214,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 135,
+        "y": 167,
         "w": 12,
         "h": 8
       },
@@ -2740,7 +3272,7 @@
       }
     },
     {
-      "id": 46,
+      "id": 54,
       "title": "Резидентная память Python",
       "description": "Без дочерних процессов и page cache контейнера.",
       "type": "timeseries",
@@ -2750,7 +3282,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 135,
+        "y": 167,
         "w": 12,
         "h": 8
       },
@@ -2808,7 +3340,7 @@
       }
     },
     {
-      "id": 47,
+      "id": 55,
       "title": "Открытые файловые дескрипторы",
       "description": "",
       "type": "timeseries",
@@ -2818,7 +3350,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 143,
+        "y": 175,
         "w": 12,
         "h": 8
       },
@@ -2876,7 +3408,7 @@
       }
     },
     {
-      "id": 48,
+      "id": 56,
       "title": "Время работы процесса",
       "description": "",
       "type": "timeseries",
@@ -2886,7 +3418,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 143,
+        "y": 175,
         "w": 12,
         "h": 8
       },
@@ -2944,7 +3476,7 @@
       }
     },
     {
-      "id": 49,
+      "id": 57,
       "title": "Доступность endpoint",
       "description": "",
       "type": "timeseries",
@@ -2954,7 +3486,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 151,
+        "y": 183,
         "w": 12,
         "h": 8
       },
@@ -3012,7 +3544,7 @@
       }
     },
     {
-      "id": 50,
+      "id": 58,
       "title": "SQLite · достоверность снимка",
       "description": "Присутствует у app и inference. 0 означает, что значения SQLite устарели; HTTP up отдельно.",
       "type": "timeseries",
@@ -3022,7 +3554,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 151,
+        "y": 183,
         "w": 12,
         "h": 8
       },
@@ -3080,7 +3612,7 @@
       }
     },
     {
-      "id": 51,
+      "id": 59,
       "title": "SQLite · давность успешного снимка",
       "description": "",
       "type": "timeseries",
@@ -3090,7 +3622,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 159,
+        "y": 191,
         "w": 12,
         "h": 8
       },
@@ -3148,7 +3680,7 @@
       }
     },
     {
-      "id": 52,
+      "id": 60,
       "title": "Heartbeat обработчика · давность",
       "description": "",
       "type": "timeseries",
@@ -3158,7 +3690,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 159,
+        "y": 191,
         "w": 12,
         "h": 8
       },
@@ -3216,20 +3748,571 @@
       }
     },
     {
-      "id": 53,
+      "id": 61,
       "type": "row",
-      "title": "08 / Журналы stdout",
+      "title": "08 / Уведомления и надежность outbox",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 167,
+        "y": 199,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 54,
+      "id": 62,
+      "title": "Webhook · записи по состояниям",
+      "description": "Gauge из SQLite. Pending/in-flight не удаляются по TTL; delivered/dead ограничены сроком и количеством.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 200,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_webhook_outbox{app=\"phonoteka\",instance=~\"$instance\"}",
+          "legendFormat": "{{state}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 63,
+      "title": "Webhook · занято / емкость",
+      "description": "Включает зарезервированный terminal slot для каждой принятой музыкальной задачи. При заполнении новые задачи не принимаются до освобождения места.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 200,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_webhook_queue_slots_used{app=\"phonoteka\",instance=~\"$instance\"} / clamp_min(phonoteka_webhook_queue_capacity{app=\"phonoteka\",instance=~\"$instance\"},1)",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 64,
+      "title": "Webhook · зарезервировано задачами",
+      "description": "",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 208,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_webhook_reserved_jobs{app=\"phonoteka\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": false,
+          "instant": true,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 65,
+      "title": "Webhook · окончательные отказы",
+      "description": "Явный retry сохраняет event ID и не запускает повторную музыкальную обработку.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 208,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_webhook_outbox{app=\"phonoteka\",instance=~\"$instance\",state=\"dead\"}",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": false,
+          "instant": true,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 66,
+      "title": "Webhook · прежний получатель",
+      "description": "После смены endpoint старые уведомления не перенаправляются новому получателю.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 208,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_webhook_other_destination_pending{app=\"phonoteka\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": false,
+          "instant": true,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 67,
+      "title": "Webhook · возраст недоставленного",
+      "description": "",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 216,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_webhook_oldest_pending_age_seconds{app=\"phonoteka\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 68,
+      "title": "Webhook · ближайшая повторная попытка",
+      "description": "",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 216,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "phonoteka_webhook_retry_wait_seconds{app=\"phonoteka\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 69,
+      "title": "Webhook · включение / пауза / recovery",
+      "description": "Интеграция условная: enabled=0 при отсутствии явной конфигурации оператора. Ни адреса, ни секреты не являются метками.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 224,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{__name__=~\"phonoteka_webhook_delivery_enabled|phonoteka_webhook_delivery_paused|phonoteka_webhook_recovery_suspended\",app=\"phonoteka\",instance=~\"$instance\"}",
+          "legendFormat": "{{__name__}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 70,
+      "type": "row",
+      "title": "09 / Журналы stdout",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 232,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 71,
       "title": "Все события",
       "description": "JSON stdout из Docker через существующий Alloy и VictoriaLogs. Логи до обновления могут иметь прежний текстовый формат.",
       "type": "logs",
@@ -3239,7 +4322,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 168,
+        "y": 233,
         "w": 24,
         "h": 12
       },
@@ -3291,7 +4374,7 @@
       }
     },
     {
-      "id": 55,
+      "id": 72,
       "title": "Ошибки и предупреждения",
       "description": "JSON stdout из Docker через существующий Alloy и VictoriaLogs. Логи до обновления могут иметь прежний текстовый формат.",
       "type": "logs",
@@ -3301,7 +4384,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 180,
+        "y": 245,
         "w": 24,
         "h": 12
       },

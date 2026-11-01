@@ -44,6 +44,10 @@ def build():
     panel('Файлы в текущем состоянии · сохраненный прогресс',f'sum by (kind,state)(phonoteka_job_items{{{work}}}) > 0','{{kind}} / {{state}}',kind='table',description='Gauge из SQLite. Не применять increase/rate: повторная попытка меняет состояние элемента.')
     panel('Возраст самого старого задания',f'phonoteka_oldest_queued_age_seconds{{{work}}}','{{kind}}','s')
     panel('Ожидание повторов провайдеров',f'phonoteka_provider_retry_wait_seconds{{{work}}}','{{kind}}','s')
+    panel('Задачи ждут освобождения места',f'phonoteka_storage_wait_jobs{{{work}}}','{{kind}}',description='Ожидание безопасного резервирования до появления journal/эффекта. ENOSPC после intent требует recovery и не повторяется скрытно.')
+    panel('Повтор проверки места через',f'phonoteka_storage_retry_wait_seconds{{{work}}}','{{kind}}','s')
+    panel('Элементы ожидают места',f'phonoteka_storage_wait_items_remaining{{{work}}}','{{kind}}')
+    panel('Задачи ожидают внешнего провайдера',f'phonoteka_provider_retry_jobs{{{work}}}','{{kind}}')
     row('03 / MusicBrainz, LRCLIB, CAA, Shazam и YouTube')
     panel('Операции / мин',f'sum by (provider,outcome)(rate(phonoteka_provider_operations_total{{{providers}}}[$__rate_interval])) * 60','{{provider}} / {{outcome}}',description='Логическая операция, включает кеш; HTTP-повторы внутри операции не считаются отдельными успехами.')
     panel('P95 операции с ожиданием и повторами',f'histogram_quantile(0.95,sum by (le,provider)(rate(phonoteka_provider_duration_seconds_bucket{{{providers}}}[$__rate_interval])))','{{provider}}','s')
@@ -53,6 +57,8 @@ def build():
     panel('Попадания в кеш / мин',f'sum by (provider)(rate(phonoteka_provider_cache_hits_total{{{providers}}}[$__rate_interval])) * 60','{{provider}}')
     panel('Размер действующего кеша',f'phonoteka_provider_cache_bytes{{{providers}}}','{{provider}}','bytes')
     panel('Записей в действующем кеше',f'phonoteka_provider_cache_entries{{{providers}}}','{{provider}}')
+    panel('Запреты политики источников / мин',f'sum by (provider,operation)(rate(phonoteka_provider_policy_denials_total{{{providers}}}[$__rate_interval])) * 60','{{provider}} / {{operation}}',description='Реально отклоненные fetch/cache/embed/export/derived_analysis. Метки ограничены известными источниками и операциями; чтение отчета не увеличивает счетчик.')
+    panel('Запретов политики · выбранный интервал',f'sum by (provider,operation)(increase(phonoteka_provider_policy_denials_total{{{providers}}}[$__range]))','{{provider}} / {{operation}}',kind='table')
     row('04 / Коллекция и результаты распознавания')
     panel('Форматы файлов',f'phonoteka_collection_formats{{{base}}}','{{format}}',kind='bargauge')
     panel('Состояние записей',f'phonoteka_collection_states{{{base}}}','{{state}}',kind='bargauge')
@@ -66,6 +72,8 @@ def build():
     panel('ASR · возраст очереди',f'phonoteka_inference_oldest_queued_age_seconds{{{base}}}',unit='s',kind='stat',width=8)
     panel('ASR · P95 длительности',f'histogram_quantile(0.95,sum by (le)(rate(phonoteka_inference_duration_seconds_bucket{{{base},service="inference"}}[$__rate_interval])))',unit='s')
     panel('ASR · выполнения / мин',f'sum by (state)(rate(phonoteka_inference_attempts_total{{{base},service="inference"}}[$__rate_interval])) * 60','{{state}}')
+    panel('ASR · память model worker',f'phonoteka_inference_model_process_resident_bytes{{{base},service="inference"}}',unit='bytes',description='Резидентные веса, буферы и decoder контролируемого model worker; CPU профиль ограничен 2 ГиБ внутри контейнера 3 ГиБ.')
+    panel('ASR · запуски model worker',f'increase(phonoteka_inference_model_process_starts_total{{{base},service="inference"}}[$__range])',kind='stat',description='Один resident process разделяют ASR и alignment; после отказа веса выгружаются. Повтор того же job автоматически не запускается.')
     row('06 / HTTP API')
     panel('Запросы / с',f'sum by (service,status)(rate(phonoteka_http_requests_total{{{selected}}}[$__rate_interval]))','{{service}} / {{status}}','reqps')
     panel('P95 полного ответа',f'histogram_quantile(0.95,sum by (le,service)(rate(phonoteka_http_request_duration_seconds_bucket{{{selected}}}[$__rate_interval])))','{{service}}','s',description='Включает передачу потокового аудио. /health и /metrics исключены.')
@@ -80,7 +88,16 @@ def build():
     panel('SQLite · достоверность снимка',f'phonoteka_collector_up{{{base}}}','{{service}}',description='Присутствует у app и inference. 0 означает, что значения SQLite устарели; HTTP up отдельно.')
     panel('SQLite · давность успешного снимка',f'time() - phonoteka_collector_last_success_timestamp_seconds{{{base}}}','{{service}}','s')
     panel('Heartbeat обработчика · давность',f'phonoteka_worker_heartbeat_age_seconds{{{base}}}',unit='s')
-    row('08 / Журналы stdout')
+    row('08 / Уведомления и надежность outbox')
+    panel('Webhook · записи по состояниям',f'phonoteka_webhook_outbox{{{base}}}','{{state}}',description='Gauge из SQLite. Pending/in-flight не удаляются по TTL; delivered/dead ограничены сроком и количеством.')
+    panel('Webhook · занято / емкость',f'phonoteka_webhook_queue_slots_used{{{base}}} / clamp_min(phonoteka_webhook_queue_capacity{{{base}}},1)',unit='percentunit',description='Включает зарезервированный terminal slot для каждой принятой музыкальной задачи. При заполнении новые задачи не принимаются до освобождения места.')
+    panel('Webhook · зарезервировано задачами',f'phonoteka_webhook_reserved_jobs{{{base}}}',kind='stat',width=8)
+    panel('Webhook · окончательные отказы',f'phonoteka_webhook_outbox{{{base},state="dead"}}',kind='stat',width=8,description='Явный retry сохраняет event ID и не запускает повторную музыкальную обработку.')
+    panel('Webhook · прежний получатель',f'phonoteka_webhook_other_destination_pending{{{base}}}',kind='stat',width=8,description='После смены endpoint старые уведомления не перенаправляются новому получателю.')
+    panel('Webhook · возраст недоставленного',f'phonoteka_webhook_oldest_pending_age_seconds{{{base}}}',unit='s')
+    panel('Webhook · ближайшая повторная попытка',f'phonoteka_webhook_retry_wait_seconds{{{base}}}',unit='s')
+    panel('Webhook · включение / пауза / recovery',f'{{__name__=~"phonoteka_webhook_delivery_enabled|phonoteka_webhook_delivery_paused|phonoteka_webhook_recovery_suspended",{base}}}','{{__name__}}',description='Интеграция условная: enabled=0 при отсутствии явной конфигурации оператора. Ни адреса, ни секреты не являются метками.')
+    row('09 / Журналы stdout')
     for title,extra in [('Все события',''),('Ошибки и предупреждения',' | filter level:in(warning,error,critical)')]:
         p=panel(title,'',kind='logs',width=24,height=12,description='JSON stdout из Docker через существующий Alloy и VictoriaLogs. Логи до обновления могут иметь прежний текстовый формат.')
         p['datasource']={'type':'victoriametrics-logs-datasource','uid':'${DS_LOGS}'}
@@ -89,7 +106,7 @@ def build():
     variables=[{'name':'DS_METRICS','label':'Метрики','type':'datasource','query':'prometheus','current':{'text':'VictoriaMetrics Prometheus-compatible API','value':'afjapivs17a4gc'}},
                {'name':'DS_LOGS','label':'Логи','type':'datasource','query':'victoriametrics-logs-datasource','current':{'text':'VictoriaLogs','value':'cfpyxan0zupkwf'}},
                {'name':'instance','label':'Экземпляр','type':'query','datasource':source,'query':{'query':'label_values(phonoteka_build_info{app="phonoteka"}, instance)','refId':'instance'},'refresh':1,'current':{'text':'st1','value':'st1'}}]
-    for name,label,values in [('service','Компонент','app,worker,inference'),('kind','Этап','scan,audit,apply,rollback,publish,analyze,recognize,transcribe,align,extract_cue,replaygain,replaygain_album,export_ready,normalize_audio,youtube'),('provider','Источник','musicbrainz,lrclib,coverartarchive,shazam,youtube,acoustid,theaudiodb,discogs')]:
+    for name,label,values in [('service','Компонент','app,worker,inference'),('kind','Этап','scan,audit,apply,rollback,rollback_ready,publish,analyze,recognize,transcribe,align,extract_cue,replaygain,replaygain_album,export_ready,normalize_audio,youtube,release_audit,publish_sidecars'),('provider','Источник','musicbrainz,lrclib,coverartarchive,shazam,youtube,acoustid,theaudiodb,discogs')]:
         variables.append({'name':name,'label':label,'type':'custom','query':values,'multi':True,'includeAll':True,'allValue':'.*','current':{'text':'All','value':'$__all'}})
     for name,label in [('job_id','Job ID · логи'),('request_id','Request ID · логи')]:
         variables.append({'name':name,'label':label,'type':'textbox','query':'.*','current':{'text':'.*','value':'.*'}})

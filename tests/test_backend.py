@@ -68,6 +68,21 @@ def drain(settings):
     asyncio.run(Worker(settings).run(once=True))
 
 
+def accept_publication_review(client, headers, track_id, *, profile='relaxed', reason='Explicit synthetic owner exception without full metadata'):
+    """Exercise the actual owner API instead of bypassing the publication gate."""
+    url = f'/api/tracks/{track_id}/lyrics-review'
+    review = client.get(url).json()
+    body = {'base_version': review['version'], 'document_revision': review['document_revision'],
+            'profile': profile, 'reason': reason, 'accept_revision': True,
+            'instrumental_confirmed': profile == 'instrumental',
+            'lines': [{'line_id': line['line_id'], 'words_state': 'accepted', 'timing_state': 'accepted'}
+                      for line in review['lines'] if line['timing_valid']],
+            'listened_sections': ['start', 'middle', 'end'] if review['lines'] else []}
+    response = client.put(url, json=body, headers={**headers, 'If-Match': f'"{review["file_revision"]}"'})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def synthetic(settings, ext="flac"):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg required for integration fixtures")
@@ -94,13 +109,17 @@ def test_auth_cookie_csrf_and_private_endpoints(client, settings):
 
 def test_fingerprint_opt_in_and_preserved_asr(settings, monkeypatch):
     from phonoteka import recognition
+    synthetic(settings)
     with TestClient(create_app(settings),base_url=settings.app_url) as client:
-        headers=authenticated(client,settings);tid,sha=seed(settings)
+        headers=authenticated(client,settings);job(client,headers,'scan');drain(settings)
+        track=client.get('/api/tracks').json()['items'][0];tid,sha=track['id'],track['sha256']
         response=client.post('/api/jobs',json={'kind':'recognize','track_ids':[tid]},headers={**headers,'Idempotency-Key':'disabled-fp'})
         assert response.status_code==409
     cfg=replace(settings,external_fingerprints=True)
     monkeypatch.setattr(recognition,'sample',lambda *args:(b'sample',1))
-    async def found(*args):return {'id':'shazam:1','provider':'shazam','kind':'metadata','tags':{'title':'Actual','artist':'Singer'},'identification':'audio_fingerprint','match':{'state':'fingerprint_match','reasons':[]}}
+    async def found(*args,input_revision=None):
+        assert input_revision==sha
+        return {'id':'shazam:1','provider':'shazam','kind':'metadata','tags':{'title':'Actual','artist':'Singer'},'identification':'audio_fingerprint','match':{'state':'fingerprint_match','reasons':[]}}
     monkeypatch.setattr(recognition,'recognize',found)
     with db.transaction(cfg.db_path) as conn:
         conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(tid,sha,db.encode({'asr':{'text':'retained'},'candidates':[]}),db.utcnow()))
@@ -111,7 +130,10 @@ def test_fingerprint_opt_in_and_preserved_asr(settings, monkeypatch):
         assert client.get('/api/jobs/'+queued['id']).json()['state']=='succeeded'
         detail=client.get('/api/tracks/'+tid).json()
         assert detail['analysis']['asr']['text']=='retained'
-        assert detail['analysis']['candidates'][0]['tags']['title']=='Actual'
+        identified=detail['analysis']['candidates'][0]
+        assert identified['provider']=='shazam' and identified['identification']=='audio_fingerprint'
+        assert identified['transient_only'] and 'tags' not in identified
+        assert identified['usage']['allow_cache'] is False and identified['usage']['license_verified'] is False
         assert detail['sha256']==sha and not detail.get('proposal')
         assert client.get('/api/reports/collection').json()['counts']['fingerprint_matches']==1
         pending=client.post('/api/jobs',json={'kind':'recognize','params':{'scope':'pending'}},headers={**headers,'Idempotency-Key':'pending-fp'})
@@ -173,7 +195,9 @@ def test_proposal_base_retains_cover_and_rejects_stale_draft(client, settings):
     headers = authenticated(client, settings)
     tid, sha = seed(settings)
     h = {**headers, "If-Match": sha}
-    cover = "data:image/png;base64,iVBORw0KGgo="
+    import base64
+    from test_media import cover_bytes
+    cover = 'data:image/png;base64,' + base64.b64encode(cover_bytes()).decode()
     first = client.post(f"/api/tracks/{tid}/proposal", json={"tags": {"title": "Draft"}, "cover": cover}, headers=h)
     assert first.status_code == 201
     body = {"base_proposal_id": first.json()["id"], "tags": {"album": "Draft album"}}
@@ -257,10 +281,23 @@ def test_manual_roundtrip_recovery_publish_and_rollback(settings, monkeypatch):
         changed = client.get(f"/api/tracks/{track['id']}").json()
         assert changed["sha256"] == media.sha256_file(path)
         assert len(changed["history"]) == 1
+        unreviewed = job(client, headers, 'publish', [track['id']], {'allow_incomplete': True, 'exception_reason': 'Legacy flag must not bypass owner review'})
+        drain(settings)
+        assert client.get('/api/jobs/' + unreviewed['id']).json()['state'] == 'needs_review'
+        assert not (settings.publication_root / 'Ready' / path.name).exists()
+        accept_publication_review(client, headers, track['id'], reason='Synthetic acceptance fixture without artwork')
         publication = job(client, headers, "publish", [track["id"]], {"allow_incomplete": True, "exception_reason": "Synthetic acceptance fixture without artwork"})
         drain(settings)
         assert client.get("/api/jobs/"+publication["id"]).json()["state"] == "succeeded"
         assert media.sha256_file(settings.publication_root/"Ready"/path.name) == changed["sha256"]
+        published = client.get(f"/api/tracks/{track['id']}").json()['publication']
+        assert published['profile'] == 'relaxed' and published['review_version'] == 1
+        assert published['lyrics_gate']['state'] == 'passed'
+        from phonoteka import exports
+        exported = exports.manifest(settings, exports.generate(settings)['export_id'])['files'][0]
+        assert exported['publication_profile'] == 'relaxed'
+        assert exported['lyrics_review_version'] == 1
+        assert exported['publication_exception_reason'] == 'Synthetic acceptance fixture without artwork'
         rollback = job(client, headers, "rollback", [track["id"]])
         drain(settings)
         assert client.get("/api/jobs/"+rollback["id"]).json()["state"] == "succeeded"
@@ -400,7 +437,7 @@ def test_cue_inventory_preview_and_write_protection(client, settings):
     assert media.sha256_file(path) == original_sha == media.sha256_file(settings.source_root/path.name)
     assert client.get('/api/tracks?search=Searchable').json()['total'] == 1
     with pytest.raises(media.MediaError) as exc:
-        Worker(settings).process_item({'kind': 'publish'}, {'track_id': audio['id'], 'sha256': audio['sha256'], 'relative_path': audio['relative_path']})
+        Worker(settings).process_item({'id': 'fixture-cue-guard', 'kind': 'publish'}, {'track_id': audio['id'], 'sha256': audio['sha256'], 'relative_path': audio['relative_path']})
     assert exc.value.code == 'cue_read_only'
     # A damaged sheet cannot unlock a previously known album image.
     valid_cue = cue_path.read_text()
@@ -426,7 +463,7 @@ def test_cue_inventory_preview_and_write_protection(client, settings):
 def test_analysis_is_read_only_select_requires_current_revision(client, settings, monkeypatch):
     headers=authenticated(client,settings)
     track_id,sha=seed(settings)
-    candidate={'id':'fake:1','kind':'metadata','provider':'fixture','tags':{'title':'Proposed'},'match':{'state':'needs_review','reasons':[]}}
+    candidate={'id':'fake:1','kind':'metadata','provider':'musicbrainz','tags':{'title':'Proposed'},'match':{'state':'needs_review','reasons':[]}}
     with db.transaction(settings.db_path) as conn:
         conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(track_id,sha,db.encode({'input_sha256':sha,'candidates':[candidate],'sources':[]}),db.utcnow()))
     before=(settings.work_root/'a.mp3').read_bytes()
@@ -475,7 +512,7 @@ def test_collection_reports_auth_duplicates_and_csv_formula(client,settings):
 
 def test_analysis_plain_lyrics_are_an_untimed_draft(client,settings):
     headers=authenticated(client,settings);identity,sha=seed(settings)
-    candidate={'id':'plain:1','kind':'lyrics','provider':'fixture','plain_lyrics':'Words without times'}
+    candidate={'id':'plain:1','kind':'lyrics','provider':'independent_asr','plain_lyrics':'Words without times'}
     with db.transaction(settings.db_path) as conn:
         conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(identity,sha,db.encode({'candidates':[candidate],'sources':[]}),db.utcnow()))
     endpoint=f'/api/tracks/{identity}/analysis/select';headers={**headers,'If-Match':'"'+sha+'"'}
@@ -534,13 +571,16 @@ def test_metadata_refresh_retains_same_revision_asr(client,settings):
     with db.transaction(settings.db_path) as conn:conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(identity,sha,db.encode(previous),db.utcnow()))
     class Fixture:
         async def analyze(self,*args):return {'input_sha256':sha,'candidates':[],'sources':[],'state':'no_match'}
-    task={'id':'fixture','auth_epoch':int(db.setting(settings.db_path,'auth_epoch','0'))}
+    task={'id':'fixture','kind':'analyze','auth_epoch':int(db.setting(settings.db_path,'auth_epoch','0'))}
     worker=Worker(settings);worker.providers=Fixture();worker.cancelled=lambda _:False
     try:asyncio.run(worker.analyze_item(task,{'track_id':identity,'sha256':sha,'relative_path':'a.mp3'}))
     finally:worker.pool.shutdown()
     result=json.loads(db.fetchone(settings.db_path,'SELECT payload FROM analyses WHERE track_id=?',(identity,))['payload'])
     assert result['asr']==previous['asr'] and result['alignment']==previous['alignment']
-    assert result['candidates']==previous['candidates']
+    assert len(result['candidates'])==1
+    assert all(result['candidates'][0][key]==value for key,value in previous['candidates'][0].items())
+    assert result['candidates'][0]['usage']['origin']=='owner_supplied'
+    assert result['candidates'][0]['usage']['license_verified'] is False
 
 
 def test_alignment_freezes_reference_at_enqueue(settings):
@@ -573,6 +613,7 @@ def test_extensionless_and_wrong_suffix_audio_cycle(settings):
         apply=job(client,headers,'apply',[track['id']]);drain(settings)
         assert client.get('/api/jobs/'+apply['id']).json()['state']=='succeeded'
         assert noext.exists() and media.audio_identity(noext)==before
+        accept_publication_review(client,headers,track['id'],reason='Controlled fixture without full metadata')
         published=job(client,headers,'publish',[track['id']],params={'allow_incomplete':True,'exception_reason':'Controlled fixture without full metadata'})
         drain(settings);assert client.get('/api/jobs/'+published['id']).json()['state']=='succeeded'
         target=settings.publication_root/'Ready'/'download_123.mp3'
@@ -601,3 +642,30 @@ def test_search_matches_values_not_json_keys_with_unicode_case(client, settings)
         result=client.get('/api/tracks',params={'search':term}).json()
         assert result['total']==1 and result['items'][0]['id']==expected
     assert client.get('/api/tracks',params={'search':'tracknumber'}).json()['total']==0
+
+
+def test_logout_all_revokes_two_sessions_without_revoking_approved_jobs(client, settings):
+    headers = authenticated(client, settings)
+    track_id, _ = seed(settings)
+    pending = job(client, headers, "audit", [track_id])
+    before_epoch = db.setting(settings.db_path, 'auth_epoch', '0')
+    track_before = dict(db.fetchone(settings.db_path, 'SELECT * FROM tracks WHERE id=?', (track_id,)))
+    with TestClient(create_app(settings), base_url=settings.app_url) as second:
+        other_headers = authenticated(second, settings)
+        assert client.get('/api/tracks').status_code == 200
+        assert second.get('/api/tracks').status_code == 200
+        denied = client.post('/api/auth/logout-all', headers={'Origin':settings.app_url})
+        assert denied.status_code == 403
+        assert second.get('/api/tracks').status_code == 200
+        response = client.post('/api/auth/logout-all', headers=headers)
+        assert response.status_code == 200
+        assert response.json()['authenticated'] is False
+        assert 'Max-Age=0' in response.headers['set-cookie']
+        assert client.get('/api/tracks').status_code == 401
+        assert second.get('/api/tracks').status_code == 401
+        assert second.post('/api/auth/logout-all', headers=other_headers).status_code == 401
+    assert db.setting(settings.db_path, 'auth_epoch', '0') == before_epoch
+    assert db.fetchone(settings.db_path, 'SELECT state FROM jobs WHERE id=?', (pending['id'],))['state'] == 'queued'
+    assert dict(db.fetchone(settings.db_path, 'SELECT * FROM tracks WHERE id=?', (track_id,))) == track_before
+    event = db.fetchone(settings.db_path, "SELECT * FROM events WHERE kind='owner_sessions_revoked'")
+    assert json.loads(event['payload']) == {'sessions':2}

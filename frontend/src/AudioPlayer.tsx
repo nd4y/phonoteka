@@ -1,22 +1,43 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, RefObject } from 'react';
-import { AudioLines, CornerDownLeft, LoaderCircle, Pause, Play, RefreshCw, Repeat1, RotateCcw, RotateCw, Square, Volume2, VolumeX } from 'lucide-react';
+import { Music2, MoreHorizontal, SkipBack, SkipForward, X, CornerDownLeft, LoaderCircle, Pause, Play, RefreshCw, Repeat1, RotateCcw, RotateCw, Square, Volume2, VolumeX } from 'lucide-react';
 import { clampPosition, defaultPreferences, parsePlayerTime, playbackRates, playbackWindow, playerTime, preferences } from './player';
 import './AudioPlayer.css';
+import { useBackLayer } from './useAppHistory';
 
 type Props = {
+  cover?: string; navigationBusy?: boolean; navigationLabel?: string;
+  onPrevious?: (playing: boolean) => void; onNext?: (playing: boolean) => void;
+  onOpen?: () => void; onClose?: () => void;
   src: string; title?: string; subtitle?: string; duration?: number;
   start?: number; end?: number; autoPlay?: boolean;
+  initialPosition?: number;
   mediaRef?: RefObject<HTMLAudioElement | null>;
   onPosition?: (seconds: number) => void; onReady?: (ready: boolean) => void;
 };
 const preferenceKey = 'phonoteka-player';
 
-export function AudioPlayer({ src, title = 'Прослушать аудио', subtitle = 'Текущая версия файла', duration = 0, start = 0, end, autoPlay = false, mediaRef, onPosition, onReady }: Props) {
+export function AudioPlayer({ src, title = 'Прослушать аудио', subtitle = 'Текущая версия файла', duration = 0, cover, navigationBusy = false, navigationLabel, onPrevious, onNext, onOpen, onClose, start = 0, end, autoPlay = false, initialPosition, mediaRef, onPosition, onReady }: Props) {
   const internalRef = useRef<HTMLAudioElement>(null);
   const audio = mediaRef ?? internalRef;
   const id = useId();
+  const autoplayPending = useRef(autoPlay);
   const [settings, setSettings] = useState(() => { try { return preferences(JSON.parse(localStorage.getItem(preferenceKey) || 'null')); } catch { return defaultPreferences; } });
+  const [expanded, setExpanded] = useState(false);
+  useBackLayer(expanded, () => setExpanded(false), 50);
+  const [coverFailed, setCoverFailed] = useState(false);
+  const container = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!expanded) return;
+    const outside = (event: PointerEvent) => {
+      // Back owns this click: closing on pointerdown would remove its layer
+      // before click, causing the same gesture to navigate one screen too far.
+      if (event.target instanceof Element && event.target.closest('[data-app-back]')) return;
+      if (!container.current?.contains(event.target as Node)) setExpanded(false);
+    };
+    document.addEventListener('pointerdown', outside);
+    return () => document.removeEventListener('pointerdown', outside);
+  }, [expanded]);
   const [loaded, setLoaded] = useState(false);
   const [mediaDuration, setMediaDuration] = useState(duration);
   const [position, setPosition] = useState(start);
@@ -99,15 +120,17 @@ export function AudioPlayer({ src, title = 'Прослушать аудио', su
     seek(window.start + seconds); setJump('');
   }
 
-  return <section className="preview-player" aria-label="Плеер проверки аудио" tabIndex={0} onKeyDown={hotkey} aria-describedby={`${id}-keys`}>
+  return <section ref={container} className="dock-player" aria-label="Плеер проверки аудио" tabIndex={0} onKeyDown={event => { if (event.key === 'Escape') setExpanded(false); else hotkey(event); }}>
     <audio ref={audio} src={src} preload="metadata"
       onLoadedMetadata={event => {
         const player = event.currentTarget;
         const limits = playbackWindow(player.duration, start, end);
         setMediaDuration(player.duration); setError(''); setLoaded(true); setWaiting(false); setPosition(limits.start);
-        player.currentTime = limits.start; onPosition?.(limits.start); onReady?.(limits.duration > 0);
+        const initial = clampPosition(initialPosition ?? limits.start, limits.start, limits.end);
+        player.currentTime = initial; setPosition(initial); onPosition?.(initial); onReady?.(limits.duration > 0);
         if (!limits.duration) setError('Не удалось определить длительность аудио. Попробуйте загрузить его снова.');
-        else if (autoPlay) void player.play().catch(() => setMessage('Нажмите воспроизведение, чтобы прослушать композицию.'));
+        else if (autoplayPending.current) void player.play().catch(() => setMessage('Нажмите воспроизведение, чтобы прослушать композицию.'));
+        autoplayPending.current = false;
       }}
       onDurationChange={event => { if (Number.isFinite(event.currentTarget.duration)) setMediaDuration(event.currentTarget.duration); }}
       onTimeUpdate={syncPosition} onProgress={updateBuffer}
@@ -121,16 +144,26 @@ export function AudioPlayer({ src, title = 'Прослушать аудио', su
         setError(code === 2 ? 'Не удалось загрузить аудио. Проверьте соединение и повторите.' : code === 3 || code === 4 ? 'Браузер не поддерживает формат или не смог декодировать аудио. Откройте файл в обычном плеере или создайте редактируемую копию.' : 'Аудио недоступно. Обновите карточку и повторите загрузку.');
         setPlaying(false); setWaiting(false); setLoaded(false); onReady?.(false);
       }} />
-    <div className="preview-heading"><span className="preview-icon"><AudioLines size={22} /></span><div><strong>{title}</strong><p>{subtitle}</p></div><span className={`preview-status ${playing ? 'is-playing' : ''}`} role="status">{error ? 'Недоступно' : !loaded ? 'Загрузка аудио' : waiting ? 'Буферизация' : playing ? 'Воспроизведение' : 'Пауза'}</span></div>
-    <div className="preview-timeline"><div className="preview-range" style={{ '--played': `${percent}%`, '--buffered': `${buffered}%` } as CSSProperties}><input type="range" aria-label="Позиция воспроизведения" aria-valuetext={`${playerTime(elapsed, true)} из ${playerTime(window.duration, true)}`} min={0} max={window.duration || 1} step={0.1} value={elapsed} disabled={!ready} onChange={event => seek(window.start + Number(event.target.value))} /></div><div className="preview-times"><output className="mono" aria-label="Текущее время">{playerTime(elapsed, true)}</output><span className="mono" aria-label="Длительность">{playerTime(window.duration, true)}</span></div></div>
-    <div className="preview-controls"><div className="preview-transport">
-      <button type="button" className="icon-button" aria-label="Назад на 10 секунд" title="Назад на 10 секунд" disabled={!ready} onClick={() => seek(position - 10)}><RotateCcw size={21} /><span className="preview-skip">10</span></button>
-      <button type="button" className="preview-play" aria-label={playing ? 'Приостановить' : 'Воспроизвести'} title={playing ? 'Приостановить' : 'Воспроизвести'} disabled={!ready} onClick={() => playing ? audio.current?.pause() : void play()}>{waiting || (!loaded && !error) ? <LoaderCircle size={24} className="spin" /> : playing ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" />}</button>
-      <button type="button" className="icon-button" aria-label="Вперед на 10 секунд" title="Вперед на 10 секунд" disabled={!ready} onClick={() => seek(position + 10)}><RotateCw size={21} /><span className="preview-skip">10</span></button>
-      <button type="button" className="icon-button" aria-label="Остановить и вернуться к началу" title="Остановить и вернуться к началу" disabled={!ready} onClick={() => { audio.current?.pause(); seek(window.start); }}><Square size={17} /></button>
-      <button type="button" className={`icon-button ${repeat ? 'is-selected' : ''}`} aria-label="Повтор композиции" title="Повтор композиции" aria-pressed={repeat} disabled={!ready} onClick={() => setRepeat(!repeat)}><Repeat1 size={20} /></button>
-    </div><div className="preview-options"><div className="preview-volume"><button type="button" className="icon-button" aria-label={settings.muted ? 'Включить звук' : 'Выключить звук'} title={settings.muted ? 'Включить звук' : 'Выключить звук'} onClick={() => setSettings({ ...settings, muted: !settings.muted })}>{settings.muted || !settings.volume ? <VolumeX size={20} /> : <Volume2 size={20} />}</button><input type="range" aria-label="Громкость" min={0} max={1} step={0.05} value={settings.muted ? 0 : settings.volume} onChange={event => setSettings({ ...settings, volume: Number(event.target.value), muted: false })} /><span>{Math.round((settings.muted ? 0 : settings.volume) * 100)}%</span></div><label className="preview-speed"><span>Скорость</span><select aria-label="Скорость воспроизведения" value={settings.rate} onChange={event => setSettings({ ...settings, rate: Number(event.target.value) })}>{playbackRates.map(rate => <option key={rate} value={rate}>{rate}x</option>)}</select></label></div></div>
-    <div className="preview-footer"><form className="preview-jump" onSubmit={event => { event.preventDefault(); jumpTo(); }}><label htmlFor={`${id}-jump`}>Перейти к</label><input id={`${id}-jump`} aria-label="Время перехода" placeholder="мм:сс.000" value={jump} disabled={!ready} onChange={event => setJump(event.target.value)} /><button type="submit" className="icon-button" aria-label="Перейти к указанному времени" title="Перейти к указанному времени" disabled={!ready || !jump.trim()}><CornerDownLeft size={17} /></button></form><details className="preview-help"><summary>Клавиши</summary><p id={`${id}-keys`}>В фокусе плеера: пробел - пауза; ← / → - 10 с; Shift + ← / → - 1 с; Home - начало; End - конец; M - звук. В полях ввода действуют обычные клавиши.</p></details></div>
-    {(error || message) && <div className={`preview-message ${error ? 'has-error' : ''}`} role={error ? 'alert' : 'status'}><p>{error || message}</p><button type="button" className="button secondary" onClick={() => { setError(''); setMessage(''); setLoaded(false); setPlaying(false); setPosition(start); setBuffered(0); onReady?.(false); audio.current?.load(); }}><RefreshCw size={15} />Загрузить снова</button></div>}
+    <div className="dock-progress" style={{ '--played': `${percent}%`, '--buffered': `${buffered}%` } as CSSProperties}><input type="range" aria-label="Позиция воспроизведения" aria-valuetext={`${playerTime(elapsed, true)} из ${playerTime(window.duration, true)}`} min={0} max={window.duration || 1} step={0.1} value={elapsed} disabled={!ready} onChange={event => seek(window.start + Number(event.target.value))}/></div>
+    <div className="dock-row">
+      <button type="button" className="dock-identity" onClick={onOpen} disabled={!onOpen || navigationBusy} aria-label="Открыть карточку текущего трека" title={`${title} · ${subtitle}`}><span className="dock-art"><Music2 size={22}/>{cover && !coverFailed && <img src={cover} alt="" onError={() => setCoverFailed(true)}/>}</span><span className="dock-track"><strong>{title}</strong><small>{subtitle}</small><span className="dock-context">{navigationLabel}</span></span></button>
+      <div className="dock-transport">
+        <button type="button" className="icon-button" aria-label="Предыдущий трек" title="Предыдущий трек" disabled={!onPrevious || navigationBusy} onClick={() => onPrevious?.(!!audio.current && !audio.current.paused)}><SkipBack size={22} fill="currentColor"/></button>
+        <button type="button" className="dock-play" aria-label={playing ? 'Приостановить' : 'Воспроизвести'} title={playing ? 'Приостановить' : 'Воспроизвести'} disabled={!ready || navigationBusy} onClick={() => playing ? audio.current?.pause() : void play()}>{navigationBusy || waiting || (!loaded && !error) ? <LoaderCircle size={25} className="spin"/> : playing ? <Pause size={25} fill="currentColor"/> : <Play size={25} fill="currentColor"/>}</button>
+        <button type="button" className="icon-button" aria-label="Следующий трек" title="Следующий трек" disabled={!onNext || navigationBusy} onClick={() => onNext?.(!!audio.current && !audio.current.paused)}><SkipForward size={22} fill="currentColor"/></button>
+      </div>
+      <div className="dock-actions"><span className="dock-time mono" aria-label="Время воспроизведения">{playerTime(elapsed)} / {playerTime(window.duration)}</span><span className="dock-volume"><button type="button" className="icon-button" aria-label={settings.muted ? 'Включить звук' : 'Выключить звук'} title={settings.muted ? 'Включить звук' : 'Выключить звук'} onClick={() => setSettings({ ...settings, muted: !settings.muted })}>{settings.muted || !settings.volume ? <VolumeX size={20}/> : <Volume2 size={20}/>}</button><input type="range" aria-label="Громкость" aria-valuetext={`${Math.round((settings.muted ? 0 : settings.volume) * 100)}%`} min={0} max={1} step={0.05} value={settings.muted ? 0 : settings.volume} onChange={event => setSettings({ ...settings, volume: Number(event.target.value), muted: false })}/></span><button type="button" className="icon-button" aria-label="Настройки плеера" aria-expanded={expanded} aria-controls={`${id}-tools`} title="Настройки плеера" onClick={() => setExpanded(!expanded)}><MoreHorizontal size={23}/></button></div>
+    </div>
+    <div className="dock-status" role="status">{error ? 'Аудио недоступно' : !loaded ? 'Загрузка аудио' : waiting ? 'Буферизация' : playing ? 'Воспроизведение' : 'Пауза'}<span> · {playerTime(elapsed, true)} / {playerTime(window.duration, true)}</span></div>
+    {expanded && <div id={`${id}-tools`} className="dock-tools" aria-label="Настройки воспроизведения">
+      <div className="dock-tools-heading"><strong>Проверка аудио</strong><button type="button" className="icon-button" aria-label="Закрыть настройки плеера" onClick={() => setExpanded(false)}><X size={18}/></button></div>
+      <div className="dock-tools-row"><button type="button" className="button secondary" aria-label="Назад на 10 секунд" disabled={!ready} onClick={() => seek(position - 10)}><RotateCcw size={18}/>10 с</button><button type="button" className="button secondary" aria-label="Вперед на 10 секунд" disabled={!ready} onClick={() => seek(position + 10)}>10 с<RotateCw size={18}/></button><button type="button" className="icon-button" aria-label="Остановить и вернуться к началу" title="Остановить и вернуться к началу" disabled={!ready} onClick={() => { audio.current?.pause(); seek(window.start); }}><Square size={18}/></button><button type="button" className={`icon-button ${repeat ? 'is-selected' : ''}`} aria-label="Повтор композиции" title="Повтор композиции" aria-pressed={repeat} disabled={!ready} onClick={() => setRepeat(!repeat)}><Repeat1 size={20}/></button></div>
+      <div className="dock-tools-row"><label className="dock-speed">Скорость<select aria-label="Скорость воспроизведения" value={settings.rate} onChange={event => setSettings({ ...settings, rate: Number(event.target.value) })}>{playbackRates.map(rate => <option key={rate} value={rate}>{rate}x</option>)}</select></label><span className="mono">{playerTime(elapsed, true)} / {playerTime(window.duration, true)}</span></div>
+      <div className="dock-tools-volume"><button type="button" className="icon-button" aria-label={settings.muted ? 'Включить звук в настройках' : 'Выключить звук в настройках'} onClick={() => setSettings({ ...settings, muted: !settings.muted })}>{settings.muted ? <VolumeX size={20}/> : <Volume2 size={20}/>}</button><input type="range" aria-label="Громкость в настройках" min={0} max={1} step={0.05} value={settings.muted ? 0 : settings.volume} onChange={event => setSettings({ ...settings, volume: Number(event.target.value), muted: false })}/><span>{Math.round((settings.muted ? 0 : settings.volume) * 100)}%</span></div>
+      <form className="dock-jump" onSubmit={event => { event.preventDefault(); jumpTo(); }}><label htmlFor={`${id}-jump`}>Перейти к</label><input id={`${id}-jump`} aria-label="Время перехода" placeholder="мм:сс.000" value={jump} disabled={!ready} onChange={event => setJump(event.target.value)}/><button type="submit" className="icon-button" aria-label="Перейти к указанному времени" disabled={!ready || !jump.trim()}><CornerDownLeft size={17}/></button></form>
+      <p className="dock-help">В фокусе плеера: пробел - пауза; ← / → - 10 с; Shift + ← / → - 1 с; Home / End - границы; M - звук.</p>
+      {onClose && <button type="button" className="button subtle" onClick={onClose}>Закрыть плеер</button>}
+    </div>}
+    {(error || message) && <div className={`dock-message ${error ? 'has-error' : ''}`} role={error ? 'alert' : 'status'}><p>{error || message}</p><button type="button" className="button secondary" onClick={() => { setError(''); setMessage(''); setLoaded(false); setPlaying(false); setPosition(start); setBuffered(0); onReady?.(false); audio.current?.load(); }}><RefreshCw size={15}/>Загрузить снова</button></div>}
   </section>;
 }

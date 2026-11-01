@@ -3,18 +3,21 @@ import io
 import json
 import subprocess
 import wave
+from mutagen.wave import WAVE
+from mutagen.id3 import TIT2
 from dataclasses import replace
 
 import httpx
 import pytest
 
-from phonoteka import db, media, recognition
+from phonoteka import db, media, recognition,provider_attempts
 from phonoteka.providers import Providers, ProviderError
 from test_providers import settings
 
 
 def test_real_fingerprint_contains_no_audio_or_private_metadata(tmp_path):
     cfg=settings(tmp_path)
+    db.set_setting(cfg.db_path,'provider_usage:shazam:metadata',db.encode({'allow_cache':True,'cache_ttl':3600,'basis':'Explicit cache permission for fingerprint transport fixture'}))
     for root in cfg.roots.values():root.mkdir()
     path=cfg.work_root/'private name.wav'
     subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=440:duration=15',str(path)],check=True)
@@ -33,14 +36,27 @@ def test_real_fingerprint_contains_no_audio_or_private_metadata(tmp_path):
         return httpx.Response(200,json={'track':{'key':'1','title':'Known','subtitle':'Artist','url':'https://evil.example/x','sections':[]}})
     async def run():
         p=Providers(cfg,httpx.MockTransport(response))
-        first=await recognition.recognize(p,audio,offset)
-        second=await recognition.recognize(p,audio,offset)
+        identity=media.audio_identity(path)
+        with provider_attempts.recognition_scope(identity,'fixture'):
+            first=await recognition.recognize(p,audio,offset)
+            # The two additional spent reservations exhaust the quota, but a
+            # tag-only revision still reuses the permitted cached match.
+            for _ in range(2):provider_attempts.reserve(cfg,'shazam','fingerprint',before,'file_sha256')
+            native=WAVE(path)
+            if native.tags is None:native.add_tags()
+            native.tags.add(TIT2(encoding=3,text=['Changed owner tag']));native.save()
+            assert media.sha256_file(path)!=before
+            assert media.audio_identity(path)==identity
+            cached_audio,cached_offset=recognition.sample(path,cfg.roots,15)
+            assert cached_audio==audio and cached_offset==offset
+            second=await recognition.recognize(p,cached_audio,cached_offset)
+            assert provider_attempts.report(cfg)['recognition_budget']['spent_calls']==3
         assert first==second and len(calls)==1 and first['source_url']==''
         assert first['identification']=='audio_fingerprint'
         assert first['recording_version_verified'] is False
         await p.close()
     asyncio.run(run())
-    assert media.sha256_file(path)==before
+    assert media.sha256_file(path)!=before
 
 
 def test_transport_rejects_extra_payload_hosts_and_redirect(tmp_path):
@@ -51,7 +67,8 @@ def test_transport_rejects_extra_payload_hosts_and_redirect(tmp_path):
         for url,payload in [('https://evil.example/discovery/v5/',data),('https://amp.shazam.com/discovery/v5/',{**data,'filename':'private'})]:
             with pytest.raises(ProviderError,match='Недопустимый'):
                 await transport.request('POST',url,json=payload)
-        with pytest.raises(ProviderError) as exc: await transport.request('POST','https://amp.shazam.com/discovery/v5/',json=data)
+        with provider_attempts.recognition_scope('a'*64,'transport-fixture'):
+            with pytest.raises(ProviderError) as exc: await transport.request('POST','https://amp.shazam.com/discovery/v5/',json=data)
         assert exc.value.code=='provider_unavailable'
         await p.close()
     asyncio.run(run())
@@ -62,7 +79,8 @@ def test_rate_limit_one_request_and_cancel_before_send(tmp_path):
     async def run():
         p=Providers(settings(tmp_path),httpx.MockTransport(lambda r:(calls.append(r) or httpx.Response(429,headers={'Retry-After':'600'}))))
         data={'timezone':'Europe/London','signature':{'uri':'data:audio/vnd.shazam.sig;base64,AAAA','samplems':12000},'timestamp':1,'context':{},'geolocation':{}}
-        with pytest.raises(ProviderError) as exc: await recognition.SignatureTransport(p).request('POST','https://amp.shazam.com/discovery/v5/',json=data)
+        with provider_attempts.recognition_scope('a'*64,'rate-fixture'):
+            with pytest.raises(ProviderError) as exc: await recognition.SignatureTransport(p).request('POST','https://amp.shazam.com/discovery/v5/',json=data)
         assert exc.value.code=='rate_limited' and len(calls)==1
         assert json.loads(db.setting(p.settings.db_path,'provider_breaker:shazam'))['reason']=='rate_limited'
         def cancelled(): raise media.MediaError('authorization_revoked','cancelled')
@@ -96,3 +114,25 @@ def test_bad_duration_and_undecodable_tail_use_real_start(tmp_path):
     wrong,offset=recognition.sample(path,cfg.roots,124)
     assert offset==0
     with wave.open(io.BytesIO(wrong)) as wav:assert wav.getnframes()==192000
+
+
+def test_real_shazamio_unknown_send_does_not_restore_library_hidden_retries(tmp_path):
+    import array,math
+    cfg=settings(tmp_path);calls=[]
+    pcm=array.array('h',(int(10000*math.sin(2*math.pi*440*index/16000)) for index in range(192000)))
+    output=io.BytesIO()
+    with wave.open(output,'wb') as wav:
+        wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(16000);wav.writeframes(pcm.tobytes())
+    def timeout(request):calls.append(request);raise httpx.ReadTimeout('synthetic unknown response')
+    async def run():
+        p=Providers(cfg,httpx.MockTransport(timeout))
+        try:
+            with provider_attempts.recognition_scope('b'*64,'unknown-fixture'):
+                with pytest.raises(ProviderError) as exc:await recognition.recognize(p,output.getvalue(),0,input_revision='a'*64)
+            assert exc.value.code=='unknown_outcome'
+        finally:await p.close()
+    asyncio.run(run())
+    assert len(calls)==1
+    report=provider_attempts.report(cfg)
+    assert report['total']==1 and report['items'][0]['state']=='unknown_outcome'
+    assert report['items'][0]['input_sha256']=='a'*64 and report['items'][0]['input_kind']=='file_sha256'

@@ -1,5 +1,5 @@
-export type LyricLine = { id: string; time: number | null; text: string };
-export type ParsedLyrics = { lines: LyricLine[]; offset: number; warnings: string[] };
+export type LyricLine = { id: string; time: number | null; text: string; wordsLocked?: boolean; timingLocked?: boolean };
+export type ParsedLyrics = { lines: LyricLine[]; offset: number; warnings: string[]; metadata: Record<string, string[]> };
 export function formatTime(ms: number | null): string {
   if (ms === null || !Number.isFinite(ms)) return '';
   const rounded = Math.round(ms);
@@ -20,8 +20,10 @@ export function parseLyrics(raw: string): ParsedLyrics {
   const offset = offsets[0] || 0;
   const warnings: string[] = [];
   const lines: LyricLine[] = [];
+  const metadata: Record<string, string[]> = {};
   rows.forEach((row, rowIndex) => {
-    if (/^\s*\[(?:ar|al|ti|au|by|re|ve|length|offset):.*\]\s*$/i.test(row)) return;
+    const meta = /^\s*\[([a-z][\w-]*):(.*)\]\s*$/i.exec(row);
+    if (meta) { const key = meta[1].toLowerCase(); (metadata[key] ||= []).push(meta[2]); return; }
     if (/<\d+:\d{2}(?:\.\d+)?>/.test(row)) throw new Error('Enhanced LRC с таймкодами слов пока не поддерживается. Импортируйте построчный LRC.');
     const matches = [...row.matchAll(/\[(\d+:[0-5]\d(?:[.:]\d{1,3})?)\]/g)];
     if (matches.length) {
@@ -39,7 +41,7 @@ export function parseLyrics(raw: string): ParsedLyrics {
   if (lines.every(line => line.time !== null)) lines.sort((a, b) => a.time! - b.time!);
   else if (lines.some(line => line.time !== null)) warnings.push('Есть строки без времени. Их порядок сохранен; расставьте таймкоды вручную.');
   if (offset) warnings.push(`LRC offset ${offset > 0 ? '+' : ''}${offset} мс применен: время строки минус offset. Повторно он не записывается.`);
-  return { lines, offset, warnings };
+  return { lines, offset, warnings, metadata };
 }
 export function serializeLyrics(lines: LyricLine[]): string {
   return lines.map(line => `${line.time === null ? '' : `[${formatTime(line.time)}]`}${line.text}`).join('\n');

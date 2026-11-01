@@ -12,20 +12,41 @@ from pathlib import Path
 import sys
 import time
 import traceback
+import threading
 import uuid
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, GCCollector, PlatformCollector, ProcessCollector, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client.core import CounterMetricFamily
 from . import __version__
 
 CONTEXT = ContextVar('telemetry_context', default={})
-FIELDS = {'request_id','job_id','track_id','kind','state','code','provider','operation','status','method','route','duration_seconds','count','completed','failed','total','retry_at','error_type','attempt','port'}
-KINDS = ('scan','audit','apply','rollback','publish','analyze','recognize','transcribe','align','extract_cue','replaygain','replaygain_album','export_ready','normalize_audio','youtube')
-STATES = ('queued','running','paused','succeeded','failed','completed_with_errors','interrupted','cancelled','cancelled_partial')
+FIELDS = {'request_id','job_id','track_id','event_id','kind','state','code','action','provider','operation','status','method','route','duration_seconds','count','completed','failed','total','retry_at','error_type','attempt','port'}
+ITEM_ACTIONS = {'preflight','fingerprint_sample','fingerprint_lookup','metadata_lookup','decode','write_tags','commit','rollback','publication','cue_extract','asr','align','normalize','sidecars'}
+KINDS = ('scan','audit','apply','rollback','publish','rollback_ready','analyze','recognize','transcribe','align','extract_cue','replaygain','replaygain_album','export_ready','normalize_audio','youtube','release_audit','publish_sidecars')
+STATES = ('queued','running','paused','waiting_authorization','succeeded','failed','completed_with_errors','interrupted','cancelled','cancelled_partial','conflict','needs_review')
 PROVIDERS = ('musicbrainz','lrclib','coverartarchive','shazam','youtube','acoustid','theaudiodb','discogs')
+POLICY_OPERATIONS = ('fetch','cache','embed','export','derived_analysis')
+_POLICY_DENIALS = {}
+_POLICY_LOCK = threading.Lock()
 
 
 def bounded(value, allowed):
     return value if value in allowed else 'other'
+
+
+def policy_denied(provider,operation):
+    provider=bounded(provider,PROVIDERS);operation=bounded(operation,POLICY_OPERATIONS)
+    with _POLICY_LOCK:_POLICY_DENIALS[provider,operation]=_POLICY_DENIALS.get((provider,operation),0)+1
+    log('provider_policy_denied',logging.WARNING,provider=provider,operation=operation,code='provider_policy_denied')
+
+
+class PolicyDenialsCollector:
+    def collect(self):
+        result=CounterMetricFamily('phonoteka_provider_policy_denials_total','Rejected provider usage operations since this process started',labels=['provider','operation'])
+        with _POLICY_LOCK:counts=dict(_POLICY_DENIALS)
+        for provider in (*PROVIDERS,'other'):
+            for operation in (*POLICY_OPERATIONS,'other'):result.add_metric([provider,operation],counts.get((provider,operation),0))
+        yield result
 
 
 def opaque_id(value):
@@ -43,8 +64,12 @@ class JsonFormatter(logging.Formatter):
         data = {'timestamp':datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec='milliseconds'),
                 'level':record.levelname.lower(),'service':self.service,'version':__version__,
                 'logger':record.name,'event':event or 'library_log'}
+        from .tracing import correlation
+        data.update(correlation())
         for key, value in {**CONTEXT.get(), **getattr(record, 'fields', {})}.items():
             if key in FIELDS and isinstance(value, (str,int,float,bool,type(None))):
+                if key == 'action':
+                    value = value if value in ITEM_ACTIONS else 'other'
                 data[key] = value[:200] if isinstance(value,str) else value
         if record.exc_info and record.exc_info[0]:
             data['error_type'] = record.exc_info[0].__name__
@@ -88,6 +113,19 @@ class Metrics:
     def __init__(self, service):
         self.registry = CollectorRegistry()
         ProcessCollector(registry=self.registry); PlatformCollector(registry=self.registry); GCCollector(registry=self.registry)
+        self.registry.register(PolicyDenialsCollector())
+        from .tracing import diagnostics
+        class TraceCollector:
+            def collect(self):
+                state = diagnostics()
+                for name in ('accepted','exported','dropped','failed','partial'):
+                    metric = CounterMetricFamily('phonoteka_tracing_'+name+'_spans_total', 'OTLP span delivery count')
+                    metric.add_metric([], state.get(name, 0)); yield metric
+                for name in ('queued','queued_bytes'):
+                    from prometheus_client.core import GaugeMetricFamily
+                    metric = GaugeMetricFamily('phonoteka_tracing_'+name, 'Bounded OTLP queue')
+                    metric.add_metric([], state.get(name, 0)); yield metric
+        self.registry.register(TraceCollector())
         Gauge('phonoteka_build_info','Running component and version',['component','version'],registry=self.registry).labels(service,__version__).set(1)
         self.http = Counter('phonoteka_http_requests_total','HTTP requests',['method','route','status'],registry=self.registry)
         self.http_duration = Histogram('phonoteka_http_request_duration_seconds','Full HTTP response duration',['method','route'],buckets=(.005,.02,.1,.5,1,3,10,30,120),registry=self.registry)
@@ -101,6 +139,9 @@ class Metrics:
         self.inference_jobs = Counter('phonoteka_inference_attempts_total','Inference executions',['state'],registry=self.registry)
         self.inference_duration = Histogram('phonoteka_inference_duration_seconds','ASR execution duration',buckets=(1,5,15,30,60,120,300,900,1800,3600),registry=self.registry)
         self.model_loaded = Gauge('phonoteka_inference_model_loaded','ASR model loaded in memory',registry=self.registry)
+        self.model_rss = Gauge('phonoteka_inference_model_process_resident_bytes','Model process and decoder resident bytes',registry=self.registry)
+        self.model_peak = Gauge('phonoteka_inference_model_process_peak_bytes','Peak sampled resident model and decoder bytes',registry=self.registry)
+        self.model_starts = Counter('phonoteka_inference_model_process_starts_total','Supervised model process starts',registry=self.registry)
         for kind in KINDS:
             for state in ('succeeded','failed','needs_review','conflict','interrupted','deferred'): self.items.labels(kind,state)
         for state in ('succeeded','failed'): self.inference_jobs.labels(state)
@@ -112,7 +153,7 @@ class Metrics:
         provider = bounded(provider, PROVIDERS); started = time.perf_counter(); outcome = 'success'
         try: yield
         except BaseException as exc:
-            outcome = bounded(getattr(exc,'code','error'), {'rate_limited','provider_unavailable','provider_cooldown','provider_unauthorized','budget_exhausted','provider_disabled'})
+            outcome = bounded(getattr(exc,'code','error'), {'rate_limited','provider_unavailable','provider_cooldown','provider_unauthorized','budget_exhausted','provider_disabled','recognition_attempt_budget_exhausted','recognition_identity_required','unknown_outcome'})
             if outcome == 'other': outcome = 'error'
             log('provider_operation_failed', logging.WARNING, provider=provider, operation=operation, code=outcome, error_type=type(exc).__name__)
             raise
@@ -138,7 +179,12 @@ class ObserveHTTP:
                 status = message['status']; message = {**message,'headers':list(message.get('headers',[]))+[(b'x-request-id',request_id.encode())]}
             await send(message)
         self.metrics.http_active.inc()
-        with context(request_id=request_id):
+        from . import tracing
+        method = bounded(scope['method'], {'GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'})
+        measured = scope['method'] != 'GET' or not scope['path'].startswith(('/api/jobs','/api/summary','/api/events'))
+        from contextlib import nullcontext
+        with context(request_id=request_id), (tracing.span('http.server', {'http.request.method': method},
+                parent=tracing.otcontext.Context(), kind=tracing.SpanKind.SERVER) if measured else nullcontext()) as server_span:
             try: await self.app(scope,receive,observed_send)
             except BaseException as exc:
                 log('http_exception', logging.ERROR, error_type=type(exc).__name__)
@@ -146,6 +192,11 @@ class ObserveHTTP:
             finally:
                 method = bounded(scope['method'], {'GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'})
                 route = getattr(scope.get('route'),'path','unmatched')
+                if server_span:
+                    server_span.update_name(method+' '+route)
+                    server_span.set_attribute('http.route',route)
+                    server_span.set_attribute('http.response.status_code',status)
+                    if status >= 500: server_span.set_status(tracing.Status(tracing.StatusCode.ERROR))
                 duration = time.perf_counter()-started
                 self.metrics.http.labels(method,route,str(status)).inc(); self.metrics.http_duration.labels(method,route).observe(duration); self.metrics.http_active.dec()
                 log('http_request', logging.ERROR if status>=500 else logging.WARNING if status>=400 else logging.INFO,

@@ -65,6 +65,11 @@ services:
         read_only: true
         bind: {create_host_path: false}
       - type: bind
+        source: ${PUBLICATION_PATH:?}
+        target: /publication
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
         source: ${PASSWORD_FILE:?}
         target: /run/secrets/owner_password
         read_only: true

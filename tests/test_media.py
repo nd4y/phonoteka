@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import contextlib
 import json
 import os
 import shutil
@@ -64,6 +65,81 @@ def cover_bytes(color="red"):
     buffer = io.BytesIO()
     Image.new("RGB", (30, 30), color).save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+@TOOLS
+@pytest.mark.parametrize(("expression", "duration", "expected_warnings"), [
+    ("0.25*sin(2*PI*440*t)", 1, set()),
+    ("if(lt(t\\,6)\\,0\\,0.25*sin(2*PI*440*t))", 7, {"long_silence"}),
+    ("if(lt(mod(t\\,0.01)\\,0.005)\\,1\\,-1)", 1, {"high_sample_peak", "possible_clipping"}),
+    ("0", 6, {"long_silence"}),
+])
+def test_audit_signal_warns_without_rejecting_valid_audio(roots, expression, duration, expected_warnings):
+    path = roots["work"] / "signal.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i",
+                    f"aevalsrc={expression}:s=8000:d={duration}", "-c:a", "pcm_s16le", str(path)], check=True)
+    before = media.sha256_file(path)
+    result = media.audit_audio(path, roots)
+    assert result["state"] == "passed" and result["sha256"] == before
+    assert media.sha256_file(path) == before
+    assert {item["code"] for item in result["warnings"]} == expected_warnings
+    signal = result["signal"]
+    assert signal["state"] == "measured" and signal["samples_per_channel"] == duration * 8000
+    assert signal["quality_verdict"] == "not_determined" and signal["lossless_origin"] == "unknown"
+    if "long_silence" in expected_warnings:
+        assert signal["silence_intervals"][0]["start_seconds"] == 0
+        assert signal["silence_intervals"][0]["duration_seconds"] == pytest.approx(6, abs=.01)
+    if expression == "0":
+        assert signal["digital_silence"] and signal["sample_peak_dbfs"] is None
+    else:
+        assert not signal["digital_silence"]
+
+
+@TOOLS
+def test_unavailable_signal_measurement_keeps_decode_verdict(make_audio, roots, monkeypatch):
+    path = make_audio("flac")
+    original = media._process
+    def process(target, executable, arguments, **kwargs):
+        if "-af" in arguments:
+            return subprocess.CompletedProcess([], 0, b"", b"[astats] Overall\n[astats] Peak level dB: nan\n")
+        return original(target, executable, arguments, **kwargs)
+    monkeypatch.setattr(media, "_process", process)
+    result = media.audit_audio(path, roots)
+    assert result["state"] == "passed" and result["error"] is None
+    assert result["signal"]["state"] == "unavailable"
+    assert result["warnings"][0]["code"] == "signal_measurements_unavailable"
+
+
+@TOOLS
+def test_changed_audio_during_signal_measurement_still_fails_audit(make_audio, roots, monkeypatch):
+    path = make_audio("flac")
+    def measure(target):
+        with target.open("ab") as stream:
+            stream.write(b"changed externally")
+        return {"state": "measured"}, []
+    monkeypatch.setattr(media, "_audit_signal", measure)
+    result = media.audit_audio(path, roots)
+    assert result["state"] == "failed" and result["error"] == "conflict"
+
+
+@pytest.mark.parametrize('benign',[
+    b'Guessed Channel Layout for Input Stream #0.0 : mono\n',
+    b'Guessed Channel Layout for Input Stream #0.0 : stereo\n',
+    b'[aist#0:0/pcm_s16le @ 0x563503dcd200] Guessed Channel Layout: mono\n',
+    b'[aist#0:0/pcm_s16le @ 0x55a34d00a880] Guessed Channel Layout: stereo\n',
+])
+def test_decoder_layout_note_does_not_hide_additional_decode_warning(benign):
+    # Mono forms were captured from FFmpeg 5 (Debian) and 6.1.1 (Ubuntu) on
+    # the exact generated WAV fixtures; stereo is the same unambiguous note.
+    notes,warnings=media._decoder_diagnostics(benign)
+    assert notes[0]['code']=='decoder_channel_layout_inferred' and not warnings
+    for genuine in (b'[flac @ 0x123] invalid sync code\n',b'Unexpected end of input\n',
+                    b'Guessed Channel Layout for Input Stream #0.0 : 5.1\n',
+                    b'[aist#0:0/pcm_s16le @ 0x123] Guessed Channel Layout: 5.1\n',
+                    b'[aist#0:0/pcm_s16le @ 0x123] Guessed Channel Layout: mono; invalid sync code\n'):
+        notes,warnings=media._decoder_diagnostics(benign+genuine)
+        assert notes and warnings[0]['code']=='decoder_diagnostics'
+        assert '0x123' not in json.dumps((notes,warnings))
 
 
 def test_lrc_occurrences_offset_and_normalized_serialization():
@@ -372,16 +448,19 @@ def test_untouched_metadata_corruption_blocks_replace(make_audio, roots, backup_
 @TOOLS
 def test_packet_side_data_is_part_of_audio_identity(make_audio, monkeypatch):
     path = make_audio()
-    original_process = media._process
+    original_process = media.packetstream.process_chunks
     original = media.audio_identity(path)
-    def change_gapless(filename, executable, arguments, **kwargs):
-        result = original_process(filename, executable, arguments, **kwargs)
-        payload = json.loads(result.stdout)
-        assert payload["packets"][0].get("side_data_list"), "Generated MP3 must have gapless packet side data"
-        payload["packets"][0]["side_data_list"][0]["skip_samples"] += 10
-        result.stdout = json.dumps(payload).encode()
-        return result
-    monkeypatch.setattr(media, "_process", change_gapless)
+    @contextlib.contextmanager
+    def change_gapless(command, **kwargs):
+        with original_process(command, **kwargs) as chunks:
+            raw = b''.join(chunks)
+            assert len(raw) < 1024**2, 'Only the tiny generated MP3 is materialized by this regression'
+            payload = json.loads(raw)
+            assert payload["packets"][0].get("side_data_list"), "Generated MP3 must have gapless packet side data"
+            payload["packets"][0]["side_data_list"][0]["skip_samples"] += 10
+            raw = json.dumps(payload).encode()
+            yield (raw[index:index+65536] for index in range(0, len(raw), 65536))
+    monkeypatch.setattr(media.packetstream, "process_chunks", change_gapless)
     assert media.audio_identity(path) != original
 
 
@@ -389,14 +468,17 @@ def test_packet_side_data_is_part_of_audio_identity(make_audio, monkeypatch):
 @TOOLS
 def test_audio_packet_without_hash_is_rejected(make_audio, monkeypatch):
     path = make_audio()
-    original_process = media._process
-    def drop_packet_hash(filename, executable, arguments, **kwargs):
-        result = original_process(filename, executable, arguments, **kwargs)
-        payload = json.loads(result.stdout)
-        del payload["packets"][0]["data_hash"]
-        result.stdout = json.dumps(payload).encode()
-        return result
-    monkeypatch.setattr(media, "_process", drop_packet_hash)
+    original_process = media.packetstream.process_chunks
+    @contextlib.contextmanager
+    def drop_packet_hash(command, **kwargs):
+        with original_process(command, **kwargs) as chunks:
+            raw = b''.join(chunks)
+            assert len(raw) < 1024**2, 'Only the tiny generated MP3 is materialized by this regression'
+            payload = json.loads(raw)
+            del payload["packets"][0]["data_hash"]
+            raw = json.dumps(payload).encode()
+            yield (raw[index:index+65536] for index in range(0, len(raw), 65536))
+    monkeypatch.setattr(media.packetstream, "process_chunks", drop_packet_hash)
     with pytest.raises(media.MediaError, match="packets"):
         media.audio_identity(path)
 

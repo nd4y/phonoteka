@@ -1,0 +1,12 @@
+.album-batch-panel{border-top:1px solid var(--line);padding-top:16px;margin-top:16px;display:grid;gap:12px}
+.album-shared-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:12px}
+.album-shared-field{display:grid;gap:6px;border:1px solid var(--line);border-radius:14px;padding:12px}
+.album-field-toggle{display:flex!important;align-items:center;gap:8px}
+.album-field-toggle input{height:18px;width:18px;flex:0 0 18px;margin:0}
+.album-cover-choice{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.album-cover-choice>label{flex:1;min-width:200px}
+.album-cover-choice img{width:96px;height:96px;object-fit:contain;border-radius:12px}
+.album-batch-members,.album-batch-preview{display:grid;gap:12px;margin-top:12px}
+.album-batch-members{max-height:500px;overflow:auto}
+.album-batch-members article,.album-batch-preview article{padding:12px;border:1px solid var(--line);border-radius:14px;display:grid;gap:8px}
+.album-file-exception{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:8px;align-items:center}

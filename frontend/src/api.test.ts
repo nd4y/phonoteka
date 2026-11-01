@@ -18,6 +18,8 @@ describe('authenticated API client', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ code: 'invalid_lrc', message: 'Строка без времени', retryable: false }), { status: 422 })));
     await expect(api('/jobs', { method: 'POST' })).rejects.toThrow('Строка без времени');
     expect(messageFor(new ApiError('old', 412))).toContain('черновик');
+    expect(messageFor(new ApiError('Источник не разрешает экспорт', 409, 'source_policy_denied'))).toBe('Источник не разрешает экспорт');
+    expect(messageFor(new ApiError('Поле закреплено владельцем', 409, 'field_locked'))).toBe('Поле закреплено владельцем');
   });
   it('notifies the shell when an authenticated request expires', async () => {
     const target = new EventTarget(); const listener = vi.fn(); target.addEventListener('session-expired', listener);

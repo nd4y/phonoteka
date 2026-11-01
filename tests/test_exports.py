@@ -22,7 +22,7 @@ def test_verified_export_portable_playlist_and_receipts(settings):
         assert client.get('/api/jobs/'+queued['id']).json()['state']=='succeeded'
         doc=client.get('/api/exports/latest').json()['export'];identity=doc['id']
         playlist=client.get(f'/api/exports/{identity}/playlist.m3u8')
-        assert playlist.status_code==200 and './Артист/#песня.mp3' in playlist.text
+        assert playlist.status_code==200 and './files/Артист/#песня.mp3' in playlist.text
         assert doc['verified_on']=='server_ready' and not doc['delivery_verified']
         data={'export_id':identity,'device':'test-phone','checksums':{'Артист/#песня.mp3':'0'*64}}
         assert client.post('/api/deliveries',json=data,headers=headers).status_code==409
@@ -33,6 +33,25 @@ def test_verified_export_portable_playlist_and_receipts(settings):
         assert not saved.json()['poweramp_checked']
         with db.transaction(settings.db_path) as conn:conn.execute('UPDATE tracks SET sha256=? WHERE id=?',('f'*64,tid))
         assert client.get('/api/exports/latest').json()['stale_files']==1
+
+
+def test_export_audio_remains_immutable_after_ready_changes(settings):
+    from urllib.parse import quote
+    with TestClient(create_app(settings),base_url=settings.app_url) as client:
+        headers=authenticated(client,settings)
+        tid,sha,target=published(settings)
+        original=target.read_bytes()
+        identity=exports.generate(settings)['export_id']
+        snapshot=settings.state_dir/'exports'/identity/'files'/'Артист/#песня.mp3'
+        assert snapshot.read_bytes()==original and snapshot.stat().st_ino!=target.stat().st_ino
+        target.write_bytes(b'externally changed Ready after snapshot')
+        route=f'/api/exports/{identity}/files/'+quote('Артист/#песня.mp3',safe='/')
+        response=client.get(route)
+        assert response.status_code==200 and response.content==original
+        assert 'no-store' in response.headers['cache-control'] and 'private' in response.headers['cache-control']
+        assert client.get(f'/api/exports/{identity}/files/unknown.mp3').status_code==404
+        client.post('/api/auth/logout',headers=headers)
+        assert client.get(route).status_code==401
 
 
 def test_changed_ready_and_unsafe_playlist_path_refuse_snapshot(settings):

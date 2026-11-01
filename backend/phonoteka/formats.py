@@ -80,13 +80,13 @@ def edit(audio, tags, lyrics, cover, cover_info, values):
     audio.save()
 
 
-def untouched(audio, tags, lyrics, cover):
+def untouched(audio, tags, lyrics, cover, cover_index=0):
     excluded = {key(audio, f) for f in tags}
     if lyrics is not None: excluded.add('©lyr' if isinstance(audio, MP4) else 'lyrics')
     if cover is not None: excluded.add('covr' if isinstance(audio, MP4) else 'metadata_block_picture')
     result = {'fields': {k:repr(v) for k,v in (audio.tags or {}).items() if k.casefold() not in {x.casefold() for x in excluded}}}
     if cover is not None:
-        if isinstance(audio, MP4): other=[bytes(x) for x in audio.get('covr', [])[1:]]
+        if isinstance(audio, MP4): other=[bytes(x) for index,x in enumerate(audio.get('covr', [])) if index != cover_index]
         else: other=[p.write() for p in [Picture(base64.b64decode(v,validate=True)) for v in audio.get('metadata_block_picture', [])] if p.type!=3]
         result['other_art']=[hashlib.sha256(x).hexdigest() for x in other]
     return result

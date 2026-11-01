@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/build-pwa.mjs",
     "test": "vitest run",
     "preview": "vite preview --host 0.0.0.0"
   },
@@ -20,6 +20,6 @@
     "@vitejs/plugin-react": "5.0.4",
     "typescript": "5.9.3",
     "vite": "7.3.7",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }

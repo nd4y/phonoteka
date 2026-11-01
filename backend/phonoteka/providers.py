@@ -1,6 +1,8 @@
 """Bounded asynchronous public metadata providers. Results are proposals, not truth."""
 import asyncio
 import base64
+from contextlib import asynccontextmanager, contextmanager, ExitStack
+from contextvars import ContextVar
 from difflib import SequenceMatcher
 import hashlib
 import json
@@ -11,13 +13,23 @@ import unicodedata
 from urllib.parse import urlsplit
 
 import httpx
-from . import db, media
+from . import db, media, provider_policy,provider_attempts, processing_activity
 from .telemetry import Metrics, provider_operation
 
 POLICY_VERSION = 'public-v1'
 USER_AGENT = 'Phonoteka/0.2 (https://github.com/nd4y/phonoteka; personal music catalog)'
 HOSTS = {'www.youtube.com','beta.musicbrainz.org','musicbrainz.org','lrclib.net','coverartarchive.org','archive.org','api.acoustid.org','www.theaudiodb.com','r2.theaudiodb.com','api.discogs.com'}
 INTERVAL = {'youtube':3.0,'musicbrainz':1.1,'lrclib':.5,'coverartarchive':1.1,'acoustid':.4,'shazam':10.0,'theaudiodb':2.1,'discogs':1.1}
+GET_DEADLINE_SECONDS = 90
+REQUEST_AUTHORIZATION=ContextVar('provider_request_authorization',default=None)
+
+
+@contextmanager
+def authorization(authorize):
+    """Keep a job's grant attached to nested adapters and async retries."""
+    token=REQUEST_AUTHORIZATION.set(authorize)
+    try:yield
+    finally:REQUEST_AUTHORIZATION.reset(token)
 
 
 def normalized(value):
@@ -64,7 +76,8 @@ class Providers:
         self.settings=settings
         self.metrics=metrics or Metrics('worker')
         self.client=httpx.AsyncClient(timeout=httpx.Timeout(20,connect=8),limits=httpx.Limits(max_connections=4,max_keepalive_connections=4),headers={'User-Agent':USER_AGENT},transport=transport,follow_redirects=False)
-        self.locks={};self.next={};self.semaphore=asyncio.Semaphore(4)
+        self.locks={};self.next={};self.intervals={};self.request_locks={};self.semaphore=asyncio.Semaphore(4)
+        self.transient=False
 
     async def close(self): await self.client.aclose()
 
@@ -73,29 +86,93 @@ class Providers:
         failures=min(6,previous.get('failures',0)+1)
         db.set_setting(self.settings.db_path,'provider_breaker:'+provider,db.encode({'until':time.time()+min(1200,60*2**(failures-1)),'reason':'provider_unavailable','failures':failures}))
 
-    def reserve(self, provider):
-        now=time.time()
-        with db.transaction(self.settings.db_path) as conn:
-            conn.execute('DELETE FROM provider_calls WHERE at<?',(now-86400,))
-            used=conn.execute('SELECT COUNT(*) FROM provider_calls WHERE provider=?',(provider,)).fetchone()[0]
-            if used>=self.settings.provider_daily_limit:
-                raise ProviderError('budget_exhausted',provider,'Достигнут суточный лимит запросов')
-            conn.execute('INSERT INTO provider_calls(provider,at) VALUES(?,?)',(provider,now))
+    def reserve(self, provider, operation='metadata',revision=None,kind=None):
+        try:return provider_attempts.reserve(self.settings,provider,operation,revision,kind)
+        except provider_attempts.UsageError as exc:
+            raise ProviderError(exc.code,provider,'Лимит запросов или журнала попыток исчерпан') from exc
 
-    async def throttle(self, provider):
+    async def throttle(self, provider,operation='metadata',revision=None,kind=None):
         lock=self.locks.setdefault(provider,asyncio.Lock())
         async with lock:
             delay=self.next.get(provider,0)-time.monotonic()
             if delay>0: await asyncio.sleep(delay)
+            authorize=REQUEST_AUTHORIZATION.get()
+            if authorize:await asyncio.to_thread(authorize)
             interval=INTERVAL.get(provider,1)
             if provider=='shazam':interval=max(interval,float(await asyncio.to_thread(db.setting,self.settings.db_path,'provider_interval:shazam','10')))
+            self.intervals[provider]=interval
             self.next[provider]=time.monotonic()+interval
-        await asyncio.to_thread(self.reserve,provider)
+        return await asyncio.to_thread(self.reserve,provider,operation,revision,kind)
+
+    @asynccontextmanager
+    async def request_slot(self,provider,operation='metadata',revision=None,kind=None):
+        # Rate admission must be adjacent to the real request. Throttling before
+        # waiting for a connection lets a backlog burst when slow slots clear.
+        # Waiters for one slow provider must not occupy every global HTTP slot.
+        # Keep its lock through the whole response and durable outcome. Starting
+        # the next gap at completion also prevents a late DB stall from allowing
+        # several pre-admitted requests onto the wire together.
+        with ExitStack() as waiting:
+            waiting.enter_context(processing_activity.stage('provider_admission', provider))
+            async with self.request_locks.setdefault(provider,asyncio.Lock()):
+                async with self.semaphore:
+                    attempt=await self.throttle(provider,operation,revision,kind)
+                    waiting.close()
+                    try:yield attempt
+                    finally:
+                        self.next[provider]=max(self.next.get(provider,0),time.monotonic()+self.intervals.get(provider,INTERVAL.get(provider,1)))
+
+    @asynccontextmanager
+    async def request(self,provider,operation,method,url,*,revision=None,input_kind=None,authorize=None,**kwargs):
+        async with self.request_slot(provider,operation,revision,input_kind) as attempt:
+            sent=False;response=None
+            try:
+                data_type='metadata' if operation=='fingerprint' else operation
+                await asyncio.to_thread(provider_policy.check,self.settings,provider,data_type,'fetch')
+                authorize=authorize or REQUEST_AUTHORIZATION.get()
+                if authorize:await asyncio.to_thread(authorize)
+                await asyncio.to_thread(provider_attempts.mark_sent,self.settings,attempt['id']);sent=True
+                with processing_activity.stage('provider_http', provider) as measured:
+                    async with self.client.stream(method,url,**kwargs) as response:
+                        measured['http_status'] = response.status_code
+                        processing_activity.checkpoint(1, 'responses')
+                        yield response
+            except (ProviderError,ValueError,media.MediaError) as exc:
+                code='invalid_response' if isinstance(exc,ValueError) else 'response_too_large' if getattr(exc,'code',None)=='response_too_large' else 'rate_limited' if getattr(exc,'code',None)=='rate_limited' else 'provider_rejected' if getattr(exc,'code',None)=='provider_unauthorized' else 'provider_error'
+                if not sent and isinstance(exc,media.MediaError) and (exc.code.startswith('authorization_') or exc.code=='cancelled'):
+                    code='not_sent'
+                await asyncio.shield(asyncio.to_thread(provider_attempts.finish,self.settings,attempt['id'],'failed',code,response.status_code if response else None))
+                raise
+            except BaseException as exc:
+                if sent:provider_attempts.unknown_in_request()
+                await asyncio.shield(asyncio.to_thread(provider_attempts.finish,self.settings,attempt['id'],'unknown_outcome' if sent else 'failed','cancelled_outcome_unknown' if sent and isinstance(exc,asyncio.CancelledError) else 'network_outcome_unknown' if sent else 'not_sent',response.status_code if response else None))
+                if sent and isinstance(exc,httpx.HTTPError):
+                    raise ProviderError('unknown_outcome',provider,'Исход отправленного запроса неизвестен; автоматический повтор отключен') from exc
+                raise
+            else:
+                status=response.status_code
+                outcome='no_match' if status==404 or response.extensions.get('phonoteka_no_match') or provider=='youtube' and status in {400,401,403,410} else 'succeeded'
+                await asyncio.to_thread(provider_attempts.finish,self.settings,attempt['id'],outcome,'not_found' if outcome=='no_match' else 'response_received',status)
 
     @provider_operation('metadata')
+    @processing_activity.provider_lookup
     async def get(self, provider, url, params=None, *, binary=False, headers=None):
-        key=hashlib.sha256(db.encode([POLICY_VERSION,url,params,binary]).encode()).hexdigest()
-        cached=await asyncio.to_thread(db.fetchone,self.settings.db_path,'SELECT payload FROM provider_cache WHERE key=? AND expires>?',(key,time.time()))
+        with provider_attempts.request_scope() as attempt_state:
+            try:
+                # HTTPX timeouts cover individual network phases. A slow but
+                # continuously streaming response also has a finite lifetime.
+                async with asyncio.timeout(GET_DEADLINE_SECONDS):
+                    return await self._get(provider,url,params,binary=binary,headers=headers)
+            except TimeoutError as exc:
+                code='unknown_outcome' if attempt_state['unknown'] else 'provider_unavailable'
+                raise ProviderError(code,provider,'Истек общий срок запроса; отправленная попытка не повторяется автоматически') from exc
+
+    async def _get(self, provider, url, params=None, *, binary=False, headers=None):
+        kind='cover' if binary else 'lyrics' if provider=='lrclib' else 'provenance' if provider=='youtube' else 'metadata'
+        try: usage=await asyncio.to_thread(provider_policy.check,self.settings,provider,kind,'fetch')
+        except media.MediaError as exc:raise ProviderError(exc.code,provider,exc.message) from exc
+        key=hashlib.sha256(db.encode([POLICY_VERSION,usage['policy_version'],url,params,binary]).encode()).hexdigest()
+        cached=await asyncio.to_thread(db.fetchone,self.settings.db_path,'SELECT payload FROM provider_cache WHERE key=? AND expires>?',(key,time.time())) if usage['allow_cache'] and not self.transient else None
         if cached:
             self.metrics.cache_hits.labels(provider).inc()
             return json.loads(cached['payload'])
@@ -110,8 +187,7 @@ class Providers:
                         raise ProviderError('unsafe_provider_url',provider,'Переадресация авторизованного запроса запрещена')
                     if urlsplit(target).scheme!='https' or (host not in HOSTS and not host.endswith('.archive.org')):
                         raise ProviderError('unsafe_provider_url',provider,'Источник вернул запрещенный адрес')
-                    await self.throttle(provider)
-                    async with self.semaphore, self.client.stream('GET',target,params=params if target==url else None,headers=headers) as response:
+                    async with self.request(provider,kind,'GET',target,params=params if target==url else None,headers=headers) as response:
                         if response.status_code in (301,302,303,307,308):
                             target=str(response.url.join(response.headers.get('location','')))
                             continue
@@ -127,12 +203,15 @@ class Providers:
                         content=bytearray();limit=5*1024**2 if binary else 2*1024**2
                         async for chunk in response.aiter_bytes():
                             content.extend(chunk)
+                            processing_activity.checkpoint(len(content), 'bytes')
                             if len(content)>limit: raise ProviderError('response_too_large',provider,'Ответ источника превышает лимит')
                         data=base64.b64encode(content).decode() if binary else json.loads(content)
+                        if data==[] or isinstance(data,dict) and (data.get('recordings')==[] or data.get('images')==[]):
+                            response.extensions['phonoteka_no_match']=True
                         break
                 else: raise ProviderError('redirect_limit',provider,'Слишком много перенаправлений')
                 await asyncio.to_thread(db.set_setting,self.settings.db_path,'provider_breaker:'+provider,'{}')
-                await asyncio.to_thread(self.cache,key,provider,data)
+                await asyncio.to_thread(self.cache,key,provider,data,kind)
                 return data
             except (httpx.HTTPError,ValueError) as exc:
                 if attempt==2: raise ProviderError('provider_unavailable',provider,'Ошибка сети или формата ответа: '+type(exc).__name__) from exc
@@ -141,7 +220,10 @@ class Providers:
             await asyncio.sleep(2**(attempt+1))
         raise ProviderError('provider_unavailable',provider,'Источник недоступен')
 
-    def cache(self,key,provider,data):
+    def cache(self,key,provider,data,kind=None):
+        kind=kind or ('lyrics' if provider=='lrclib' else 'provenance' if provider=='youtube' else 'metadata')
+        usage=provider_policy.get_rule(self.settings,provider,kind)
+        if self.transient or not usage['allow_cache'] or usage['cache_ttl']<=0:return
         with db.transaction(self.settings.db_path) as conn:
             conn.execute('DELETE FROM provider_cache WHERE expires<?',(time.time(),))
             # Cap total entries, including large artwork, without unbounded growth.
@@ -151,7 +233,7 @@ class Providers:
             # A byte budget also bounds artwork; SQLite pages are reused after eviction.
             while (conn.execute('SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) FROM provider_cache').fetchone()[0]+len(payload.encode()))>256*1024**2:
                 conn.execute('DELETE FROM provider_cache WHERE key IN (SELECT key FROM provider_cache ORDER BY expires LIMIT 100)')
-            conn.execute('INSERT OR REPLACE INTO provider_cache VALUES(?,?,?,?)',(key,provider,payload,time.time()+(86400 if data is None else 7*86400)))
+            conn.execute('INSERT OR REPLACE INTO provider_cache VALUES(?,?,?,?)',(key,provider,payload,time.time()+min(usage['cache_ttl'],86400 if data is None else 7*86400)))
 
     async def musicbrainz(self, query, duration):
         def escape(value): return re.sub(r'([+\-&|!(){}\[\]^"~*?:\\/])',r'\\\1',value[:180])
@@ -202,6 +284,10 @@ class Providers:
         return {'id':'caa:'+release_id,'provider':'coverartarchive','kind':'cover','cover':'data:'+mime+';base64,'+raw,'release_id':release_id,'source_url':url,'match':{'state':'needs_review','reasons':['confirm_release']}}
 
     async def analyze(self, meta, relative, identified=None, authorize=lambda:None):
+        with provider_attempts.input_revision(meta.get('sha256')):
+            return await self._analyze(meta,relative,identified,authorize)
+
+    async def _analyze(self, meta, relative, identified=None, authorize=lambda:None):
         query,provenance=query_tags(meta,relative)
         if identified:
             query={k:scalar(identified['tags'],k) for k in ('title','artist','album')}
