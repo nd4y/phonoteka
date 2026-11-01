@@ -62,12 +62,28 @@ describe("review write boundary", () => {
       expect(await awaitReviewWrite(job, vi.fn(), () => true)).toBe("failed");
     }
   });
-  it("keeps authorization and slow writes pending without resubmitting", async () => {
-    const read = vi.fn().mockResolvedValue(queued);
+  it("refreshes a retained pending job, then waits without resubmitting", async () => {
+    const paused = { ...queued, stage: "waiting_authorization" };
+    const read = vi.fn().mockResolvedValue(paused);
     expect(
-      await awaitReviewWrite({ ...queued, stage: "waiting_authorization" }, read, () => true),
+      await awaitReviewWrite(
+        paused,
+        read,
+        () => true,
+        async () => {},
+      ),
     ).toBe("pending");
-    expect(read).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(1);
+    read.mockResolvedValue(done);
+    expect(
+      await awaitReviewWrite(
+        paused,
+        read,
+        () => true,
+        async () => {},
+      ),
+    ).toBe("written");
+    read.mockClear().mockResolvedValue(queued);
     expect(
       await awaitReviewWrite(
         queued,

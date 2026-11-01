@@ -49,10 +49,11 @@ export async function awaitReviewWrite(
       return job.completed === 1 && job.failed === 0 ? "written" : "failed";
     if (!isActiveJob(job)) return "failed";
     if (
-      job.state === "paused" ||
-      job.state === "waiting_authorization" ||
-      job.stage === "waiting_storage" ||
-      job.stage === "waiting_authorization" ||
+      (index > 0 &&
+        (job.state === "paused" ||
+          job.state === "waiting_authorization" ||
+          job.stage === "waiting_storage" ||
+          job.stage === "waiting_authorization")) ||
       index === attempts
     )
       return "pending";
