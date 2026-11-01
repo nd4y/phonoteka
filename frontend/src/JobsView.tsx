@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ActivityLog } from "./ActivityLog";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
-  ArrowDown,
   CheckCheck,
   ChevronDown,
   CircleAlert,
@@ -33,7 +33,7 @@ import {
   reauthorizationMessage,
   reauthorizationRequest,
 } from "./JobAuthorization";
-import type { ActivityEvent, LiveJob } from "./jobs";
+import type { LiveJob } from "./jobs";
 import type { Job } from "./types";
 import "./JobsView.css";
 import { useBackLayer } from "./useAppHistory";
@@ -120,92 +120,6 @@ function JobResults({ job }: { job: Job }) {
         <p className="muted small">Результатов по отдельным файлам пока нет.</p>
       )}
     </details>
-  );
-}
-
-function ActivityLog({ events }: { events: ActivityEvent[] }) {
-  const ref = useRef<HTMLOListElement>(null);
-  const follows = useRef(true);
-  const seen = useRef(0);
-  const [unread, setUnread] = useState(0);
-  useLayoutEffect(() => {
-    if (follows.current && ref.current) {
-      ref.current.scrollTop = ref.current.scrollHeight;
-      seen.current = events.at(-1)?.id || 0;
-      setUnread(0);
-    } else setUnread(events.filter((event) => event.id > seen.current).length);
-  }, [events]);
-  function scroll() {
-    const node = ref.current;
-    if (!node) return;
-    follows.current = node.scrollHeight - node.scrollTop - node.clientHeight < 32;
-    if (follows.current) {
-      seen.current = events.at(-1)?.id || 0;
-      setUnread(0);
-    }
-  }
-  return (
-    <div className="job-log-wrap">
-      <ol
-        className="job-event-log"
-        role="log"
-        aria-label="События задачи"
-        aria-live="off"
-        tabIndex={0}
-        ref={ref}
-        onScroll={scroll}
-      >
-        {events.length ? (
-          events.map((event) => (
-            <li
-              key={event.id}
-              className={
-                event.state === "waiting_authorization"
-                  ? "event-authorization"
-                  : ["failed", "conflict", "needs_review", "interrupted"].includes(
-                        event.state || "",
-                      )
-                    ? "event-error"
-                    : ""
-              }
-            >
-              <time dateTime={event.created_at} title={dateOf(event.created_at)}>
-                {timeOf(event.created_at)}
-              </time>
-              <div>
-                <span>{event.message}</span>
-                {event.filename && <strong title={event.filename}>{event.filename}</strong>}
-                {event.code && <small>Код: {event.code}</small>}
-                {event.retry_at && (
-                  <small>
-                    Повтор после {dateOf(new Date(event.retry_at * 1000).toISOString())}
-                  </small>
-                )}
-              </div>
-            </li>
-          ))
-        ) : (
-          <li className="job-log-empty">Событий пока нет. Они появятся при запуске задачи.</li>
-        )}
-      </ol>
-      {!!unread && (
-        <button
-          className="button secondary job-log-latest"
-          onClick={() => {
-            follows.current = true;
-            seen.current = events.at(-1)?.id || 0;
-            setUnread(0);
-            if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-          }}
-        >
-          <ArrowDown size={15} />
-          Новые события: {unread}
-        </button>
-      )}
-      <p className="muted small job-log-note">
-        Последние 200 событий. Если прокрутить вверх, новые строки не сдвигают чтение.
-      </p>
-    </div>
   );
 }
 
@@ -551,7 +465,22 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
                 </button>
                 {expanded && (
                   <div className="job-activity" id={`job-activity-${job.id}`}>
-                    {activity?.job.id === job.id && <ProcessingStages activity={activity} />}
+                    {activity?.job.id === job.id && (
+                      <details
+                        className="workflow-job-details"
+                        open={
+                          activity.current_stages?.some((stage) => stage.no_progress_suspected) ||
+                          undefined
+                        }
+                      >
+                        <summary>
+                          {activity.current_stages?.some((stage) => stage.no_progress_suspected)
+                            ? "Возможная остановка прогресса - этапы и трассы"
+                            : "Этапы обработки и трассы"}
+                        </summary>
+                        <ProcessingStages activity={activity} />
+                      </details>
+                    )}
                     <div className="job-activity-heading">
                       <h4>Текущие действия</h4>
                       <span className={`job-connection connection-${connection}`} role="status">
@@ -599,10 +528,7 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
                     {activity?.active_items_truncated && (
                       <p className="muted small">Показаны первые 100 активных файлов.</p>
                     )}
-                    <details className="workflow-job-details">
-                      <summary>Журнал событий ({events.length})</summary>
-                      <ActivityLog key={job.id} events={events} />
-                    </details>
+                    <ActivityLog key={job.id} events={events} />
                   </div>
                 )}
                 <JobResults job={job} />

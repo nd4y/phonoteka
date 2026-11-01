@@ -59,6 +59,8 @@ export function AnalysisPanel({
     [error, setError] = useState(""),
     [saving, setSaving] = useState(false);
   const analysis = track.analysis;
+  const hasHints = !!text(track.tags?.title).trim() && !!text(track.tags?.artist).trim();
+  const SearchContainer = analysis?.candidates.length ? "details" : "section";
   const timingStatus = alignmentStatus(analysis);
   function toggle(candidate: Candidate) {
     setChosen((old) =>
@@ -107,29 +109,41 @@ export function AnalysisPanel({
           <RefreshCw size={18} />
         </button>
       </div>
-      <div className="button-row">
-        <button
-          className="button secondary"
-          disabled={!enabled || busy || !!track.input_error}
-          onClick={() => void onJob("analyze")}
-        >
-          <Search size={18} />
-          Найти теги, обложку и текст
-        </button>
-        {!enabled && <span className="muted small">Внешние источники выключены</span>}
-      </div>
-      <details className="workflow-job-details">
-        <summary>Аудиоотпечаток, ASR и громкость</summary>
+      <SearchContainer className="workflow-job-details source-search-actions">
+        {analysis?.candidates.length ? (
+          <summary>Найти другие варианты</summary>
+        ) : (
+          <h3>Найти данные</h3>
+        )}
+        <p className="muted small">
+          {hasHints
+            ? "Исполнитель и название известны: начните с поиска по каталогам."
+            : "Если песня неизвестна, начните с распознавания аудио."}{" "}
+          Поиск не изменяет файл.
+        </p>
         <div className="button-row">
           <button
-            className="button secondary"
-            disabled={!recognitionEnabled || busy || !!track.input_error || track.cue_album_image}
+            className={`button ${hasHints ? "secondary" : "primary"}`}
+            disabled={
+              !recognitionEnabled || busy || changed || !!track.input_error || track.cue_album_image
+            }
             onClick={() => void onJob("recognize")}
           >
-            Распознать по аудиоотпечатку
+            <Search size={18} />
+            Распознать песню по аудио
           </button>
-          <span className="muted small">ShazamIO · 12 секунд · передается только отпечаток</span>
+          <button
+            className={`button ${hasHints ? "primary" : "secondary"}`}
+            disabled={!enabled || busy || changed || !!track.input_error}
+            onClick={() => void onJob("analyze")}
+          >
+            Найти теги, обложку и текст
+          </button>
         </div>
+        {!enabled && <span className="muted small">Поиск по каталогам выключен</span>}
+      </SearchContainer>
+      <details className="workflow-job-details">
+        <summary>Таймкоды, содержимое аудио и громкость</summary>
         <div className="button-row">
           <button
             className="button secondary"
@@ -236,13 +250,16 @@ export function AnalysisPanel({
       )}
       {analysis && (
         <>
-          <div className="analysis-sources">
-            {analysis.sources.map((s, i) => (
-              <span className="badge" key={s.provider + i}>
-                {s.provider}: {states[s.state] || s.state}
-              </span>
-            ))}
-          </div>
+          <details className="source-status-details">
+            <summary>Состояние источников ({analysis.sources.length})</summary>
+            <div className="analysis-sources">
+              {analysis.sources.map((s, i) => (
+                <span className="badge" key={s.provider + i}>
+                  {s.provider}: {states[s.state] || s.state}
+                </span>
+              ))}
+            </div>
+          </details>
           {analysis.stale && <p className="warning-text">Файл изменился. Повторите поиск.</p>}
           {analysis.query_source === "filename_hint" && (
             <p className="muted small">Для запроса использованы подсказки из имени файла.</p>
@@ -334,7 +351,7 @@ export function AnalysisPanel({
                 onClick={() => void select()}
               >
                 <Check size={17} />
-                Сохранить выбранное как предложение
+                Проверить выбранные изменения
               </button>
               <span className="muted small">
                 Заменит прежнее предложение. Аудиофайл пока не изменяется.

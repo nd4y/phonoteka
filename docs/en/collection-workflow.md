@@ -15,3 +15,13 @@ On narrow screens, each field retains its before/after pair, and write controls 
 The guide labels its input/output path example as illustrative, not a real rename result. This UI release does not alter available sources, formats, quality profiles, provider permissions, or the tracing architecture.
 
 The **Saved proposals** counter counts current proposals only. Its shortcut opens the entire review queue, including records with errors or conflicts; the queue can therefore contain more records than the counter. In **Ready files**, an empty collection directs you to review records and publish them through the existing plan. An empty search instead suggests changing the query; neither state asks you to rescan the working collection.
+
+## Record review and activity log
+
+Settings are in the left menu above the account, or in the bottom navigation on phones. Interface labels are neutral; access control and operation restrictions are unchanged.
+
+Review shows three steps: find data, review, write. One main button offers the next action: find/select data, save an edited draft, fix lyrics, or write a saved proposal and continue. Saving a draft does not modify audio. An unconfirmed recording version, conflict or validation error can still block writing. Use audio recognition for an unknown song and catalogue search when artist and title are known. Additional operations remain available in expandable sections.
+
+An expanded job shows the latest 200 loaded events. Search matches message, filename, code and provider; the problems filter includes failures and authorization waits. Pausing scrolling freezes the visible window for reading while processing and event reception continue. Jumping to latest resumes the live display. Search and filter changes pause scrolling. These controls do not search the complete server history.
+
+The Review lyrics action focuses and reveals the line editor. Normal navigation and reload retain their existing position restoration; returning from the initial source search takes one Back action.

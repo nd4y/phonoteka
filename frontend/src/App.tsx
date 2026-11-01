@@ -1,3 +1,4 @@
+import { reviewNextAction } from "./reviewNextAction";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
@@ -288,7 +289,7 @@ function Login({ onLogin, initialError }: { onLogin: () => Promise<void>; initia
         </div>
         <span className="story-foot">
           <ShieldCheck size={16} />
-          Один владелец. Собственное хранилище.
+          Ваша музыка в порядке.
         </span>
       </div>
       <main className="login-main">
@@ -300,7 +301,7 @@ function Login({ onLogin, initialError }: { onLogin: () => Promise<void>; initia
           <p className="muted">Войдите, чтобы открыть свою фонотеку.</p>
           {error && <ErrorBox message={error} />}
           <label>
-            Имя владельца
+            Логин
             <input
               autoComplete="username"
               value={username}
@@ -334,8 +335,7 @@ function Login({ onLogin, initialError }: { onLogin: () => Promise<void>; initia
             )}
           </button>
           <p className="login-note">
-            Доступ к этому экземпляру есть только у владельца. Учетная запись настраивается при
-            установке.
+            Для работы нужен вход. Учетная запись настраивается при установке.
           </p>
         </form>
         <span className="muted small">Фонотека · первая рабочая версия</span>
@@ -834,7 +834,7 @@ export default function App() {
   const clearDirty = () =>
     !(dirty || policyDirty || reviewDirty || settingsDirty) ||
     window.confirm("Есть несохраненные изменения. Перейти и потерять этот черновик?");
-  function navigate(next: Page) {
+  function navigate(next: Page, preserveScroll = false) {
     if (
       !acceptDetailNavigation(
         detailSequence,
@@ -852,7 +852,7 @@ export default function App() {
       selectedId: editor ? selectedId : "",
       filter: next === "ready" ? "published" : page === "ready" ? "all" : filter,
       pageNumber: next === "ready" || page === "ready" ? 1 : pageNumber,
-      scroll: next === page ? window.scrollY : 0,
+      scroll: next === page || preserveScroll ? window.scrollY : 0,
       queueScroll: 0,
     };
     navigationHistory.push(target);
@@ -870,7 +870,7 @@ export default function App() {
       setSelected(null);
       setSelectedId("");
     }
-    if (next !== page) saveCurrentView.restore(target);
+    if (next !== page && !preserveScroll) saveCurrentView.restore(target);
   }
   function browseCollection(
     nextFilter: CollectionFilter | "published" | "review",
@@ -1185,7 +1185,7 @@ export default function App() {
     lyrics: ["Слова в нужный момент", "Построчная синхронизация с полным аудиофайлом."],
     jobs: ["Обработка", "Текущие действия, оставшееся время и результаты."],
     ready: ["Готовые файлы", "Сохраненные версии и перенос музыки на устройство."],
-    settings: ["Под вашим контролем", "Состояние экземпляра и возможности этой версии."],
+    settings: ["Под вашим контролем", "Подключения, обработка и параметры приложения."],
   };
   return (
     <AppBackContext.Provider value={navigationHistory.layers}>
@@ -1229,13 +1229,35 @@ export default function App() {
                 )}
               </button>
             ))}
+            <button
+              className="mobile-settings-nav"
+              aria-label="Настройки"
+              aria-current={page === "settings" ? "page" : undefined}
+              onClick={() => navigate("settings")}
+            >
+              <Settings2 size={21} />
+              <span>Настройки</span>
+            </button>
           </nav>
           <div className="sidebar-bottom">
+            <nav className="sidebar-utilities" aria-label="Дополнительная навигация">
+              <button
+                aria-label="Настройки"
+                aria-current={page === "settings" ? "page" : undefined}
+                onClick={() => navigate("settings")}
+              >
+                <Settings2 size={21} />
+                <span>Настройки</span>
+              </button>
+            </nav>
             <div className="sidebar-account">
               <div className="avatar">{(session.username || "В")[0].toUpperCase()}</div>
               <div>
-                <strong>{session.username || "Владелец"}</strong>
-                <span>Личный экземпляр</span>
+                <strong>
+                  {session.username && session.username.toLowerCase() !== "owner"
+                    ? session.username
+                    : "Аккаунт"}
+                </strong>
               </div>
               <button
                 className="icon-button"
@@ -1270,14 +1292,6 @@ export default function App() {
               </span>
             </div>
             <div className="topbar-actions">
-              <button
-                className="icon-button"
-                aria-label="Настройки"
-                title="Настройки"
-                onClick={() => navigate("settings")}
-              >
-                <Settings2 size={21} />
-              </button>
               <button
                 className="icon-button"
                 aria-label="Открыть справку"
@@ -2123,7 +2137,7 @@ type EditorProps = {
   summary: Summary | null;
   busy: boolean;
   onDirty: (value: boolean) => void;
-  onTab: (page: Page) => void;
+  onTab: (page: Page, preserveScroll?: boolean) => void;
   onBack: () => void;
   onRefresh: () => void;
   onClassified: (track: Track) => void;
@@ -2183,6 +2197,7 @@ function TrackEditor({
   const changed = editorDraftChanged(baseline, currentDraft);
   const [classificationDirty, setClassificationDirty] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const lyricsEditorContainer = useRef<HTMLDivElement>(null);
   const [showAllFields, setShowAllFields] = useState(false);
   useBackLayer(sourcesOpen, () => setSourcesOpen(false));
   useEffect(() => {
@@ -2320,6 +2335,26 @@ function TrackEditor({
     !!lyricsInvalid ||
     busy ||
     saving;
+  const nextAction = reviewNextAction({
+    changed,
+    savedProposal: !!activeProposal,
+    invalidLyrics: hasUntimed || !!lyricsInvalid,
+  });
+  const nextHint =
+    nextAction === "save"
+      ? "Сохраните черновик, затем проверьте его перед записью. Аудиофайл пока не изменится."
+      : nextAction === "lyrics"
+        ? "В тексте есть строки без таймкодов или ошибки. Исправьте их перед записью."
+        : nextAction === "write"
+          ? !writable
+            ? "Файл недоступен для записи. Причина показана ниже."
+            : !summary?.capabilities.apply
+              ? "Запись сейчас недоступна. Проверьте состояние хранилища в настройках."
+              : "Проверьте значения ниже. Запись применит сохранённое предложение и откроет следующий трек."
+          : track.analysis?.candidates?.length
+            ? "Найдены варианты. Выберите подходящие данные или заполните поля вручную."
+            : "Найдите данные по аудио или заполните поля вручную. Исходный файл пока не изменяется.";
+  const reviewStep = sourcesOpen || nextAction === "find" ? 1 : nextAction === "write" ? 3 : 2;
   return (
     <div inert={editingBlocked || moving || undefined}>
       <div inert={classificationDirty || undefined}>
@@ -2360,6 +2395,82 @@ function TrackEditor({
               <RefreshCw size={18} />
             </button>
           </div>
+          <ol className="review-steps" aria-label="Порядок проверки записи">
+            {["Найти данные", "Проверить", "Записать"].map((label, i) => (
+              <li key={label} aria-current={reviewStep === i + 1 ? "step" : undefined}>
+                <span>{i + 1}</span>
+                {label}
+              </li>
+            ))}
+          </ol>
+          <div hidden={sourcesOpen}>
+            <div className="editor-actions review-next-action">
+              <div className="action-hint">
+                <ShieldCheck size={17} />
+                <span>{nextHint}</span>
+              </div>
+              <div className="button-row">
+                <button
+                  className="button primary"
+                  disabled={
+                    saving ||
+                    busy ||
+                    moving ||
+                    (nextAction === "save" && !writable) ||
+                    (nextAction === "write" && applyBlocked)
+                  }
+                  onClick={() => {
+                    if (nextAction === "save") void save();
+                    else if (nextAction === "write") void onApplyNext();
+                    else if (nextAction === "lyrics") {
+                      onTab("lyrics", true);
+                      window.requestAnimationFrame(() => {
+                        lyricsEditorContainer.current?.focus({ preventScroll: true });
+                        lyricsEditorContainer.current?.scrollIntoView({
+                          block: "start",
+                          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+                            ? "auto"
+                            : "smooth",
+                        });
+                      });
+                    } else setSourcesOpen(true);
+                  }}
+                >
+                  {saving ? (
+                    <Spinner label="Сохраняем" />
+                  ) : (
+                    <>
+                      {nextAction === "save" ? (
+                        <Save size={18} />
+                      ) : nextAction === "write" ? (
+                        <CheckCheck size={18} />
+                      ) : nextAction === "lyrics" ? (
+                        <Clock3 size={18} />
+                      ) : (
+                        <Search size={18} />
+                      )}
+                      {nextAction === "save"
+                        ? "Сохранить черновик"
+                        : nextAction === "write"
+                          ? moving
+                            ? "Записываем..."
+                            : "Записать и дальше"
+                          : nextAction === "lyrics"
+                            ? "Проверить текст"
+                            : track.analysis?.candidates?.length
+                              ? "Выбрать данные"
+                              : "Найти данные"}
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+          {sourcesOpen && (
+            <p className="review-guidance">
+              Выберите подходящие теги, обложку и текст, затем проверьте изменения перед записью.
+            </p>
+          )}
           <div className="workflow-listen">
             <button
               className="button secondary"
@@ -2469,7 +2580,9 @@ function TrackEditor({
               <div className="metadata-content">
                 <div className="section-intro">
                   <h3>Проверьте метаданные</h3>
-                  <Badge tone="purple">Ручное предложение</Badge>
+                  <Badge tone="purple">
+                    {activeProposal ? "Изменения из предложения" : "Текущие значения"}
+                  </Badge>
                 </div>
                 <p className="muted small">
                   Исходные значения остаются видимыми. Сохранение предложения еще не изменяет
@@ -2480,7 +2593,7 @@ function TrackEditor({
                     .filter(
                       (field) =>
                         showAllFields ||
-                        !activeProposal ||
+                        (!activeProposal && ["title", "artist", "album"].includes(field.key)) ||
                         draft[field.key] !== textTag(track.tags, field.key),
                     )
                     .map((field) => (
@@ -2527,34 +2640,44 @@ function TrackEditor({
                   aria-expanded={showAllFields}
                   onClick={() => setShowAllFields((value) => !value)}
                 >
-                  {showAllFields ? "Только измененные поля" : "Показать все поля"}
+                  {showAllFields
+                    ? activeProposal
+                      ? "Только изменённые поля"
+                      : "Скрыть дополнительные поля"
+                    : "Показать все поля"}
                 </button>
-                <div className="cover-editor">
-                  <div>
-                    <h3>Обложка</h3>
-                    <p className="muted small">
-                      {cover
-                        ? "Новое изображение добавлено к черновику."
-                        : activeProposal?.cover
-                          ? "В предложении сохранена новая обложка. Ниже показана обложка текущего файла."
-                          : track.has_art
-                            ? "Изображение уже встроено в файл."
-                            : "В файле нет обложки."}{" "}
-                      Исходник JPEG или PNG до 20 МиБ и 25 мегапикселей.
-                    </p>
+                <details
+                  className="review-artwork"
+                  open={!!cover || !!activeProposal?.cover || undefined}
+                >
+                  <summary>Обложка и загрузка изображения</summary>
+                  <div className="cover-editor">
+                    <div>
+                      <h3>Обложка</h3>
+                      <p className="muted small">
+                        {cover
+                          ? "Новое изображение добавлено к черновику."
+                          : activeProposal?.cover
+                            ? "В предложении сохранена новая обложка. Ниже показана обложка текущего файла."
+                            : track.has_art
+                              ? "Изображение уже встроено в файл."
+                              : "В файле нет обложки."}{" "}
+                        Исходник JPEG или PNG до 20 МиБ и 25 мегапикселей.
+                      </p>
+                    </div>
+                    <ArtworkImport
+                      trackId={track.id}
+                      sha256={track.sha256}
+                      selection={slotSelection}
+                      current={track.artwork_transform}
+                      disabled={!writable || saving}
+                      onApply={(value, receipt) => {
+                        setCover(value);
+                        setArtworkReceipt(receipt);
+                      }}
+                    />
                   </div>
-                  <ArtworkImport
-                    trackId={track.id}
-                    sha256={track.sha256}
-                    selection={slotSelection}
-                    current={track.artwork_transform}
-                    disabled={!writable || saving}
-                    onApply={(value, receipt) => {
-                      setCover(value);
-                      setArtworkReceipt(receipt);
-                    }}
-                  />
-                </div>
+                </details>
                 <div className="notice info">
                   <ShieldCheck size={19} />
                   <span>
@@ -2587,10 +2710,6 @@ function TrackEditor({
                 }}
               />
             </details>
-            <p className="quiet-note">
-              <AudioLines size={17} />
-              Прослушивание и переключение треков доступны в нижней панели.
-            </p>
             {page === "lyrics" && (
               <TimingReview
                 alignment={track.analysis?.alignment}
@@ -2608,45 +2727,54 @@ function TrackEditor({
                 }
               />
             )}
-            {page === "lyrics" &&
-              (lyricDocument ? (
-                <LyricsDocumentEditor
-                  value={lrc}
-                  lines={lyricRows}
-                  metadata={lyricMetadata}
-                  onChange={(value, rows, metadata) => {
-                    setLrc(value);
-                    setLyricRows(rows);
-                    if (metadata) setLyricMetadata(metadata);
-                  }}
-                  disabled={!writable || saving}
-                  lockDisabled={changed || busy}
-                  onLock={(line, kind) => {
-                    void changeLyricLock(line, kind);
-                  }}
-                  duration={track.duration}
-                  currentTime={audioTime}
-                  canStamp={audioSupported}
-                  onSeek={(seconds) => {
-                    if (audioRef.current) audioRef.current.currentTime = seconds;
-                  }}
-                />
-              ) : (
-                <LyricsEditor
-                  value={lrc}
-                  onChange={(value) => {
-                    setLrc(value);
-                    setLyricRows(undefined);
-                  }}
-                  disabled={!writable || saving}
-                  duration={track.duration}
-                  currentTime={audioTime}
-                  canStamp={audioSupported}
-                  onSeek={(seconds) => {
-                    if (audioRef.current) audioRef.current.currentTime = seconds;
-                  }}
-                />
-              ))}
+            <div
+              ref={lyricsEditorContainer}
+              className="review-lyrics-region"
+              role="region"
+              aria-label="Редактор текста"
+              tabIndex={-1}
+              hidden={page !== "lyrics"}
+            >
+              {page === "lyrics" &&
+                (lyricDocument ? (
+                  <LyricsDocumentEditor
+                    value={lrc}
+                    lines={lyricRows}
+                    metadata={lyricMetadata}
+                    onChange={(value, rows, metadata) => {
+                      setLrc(value);
+                      setLyricRows(rows);
+                      if (metadata) setLyricMetadata(metadata);
+                    }}
+                    disabled={!writable || saving}
+                    lockDisabled={changed || busy}
+                    onLock={(line, kind) => {
+                      void changeLyricLock(line, kind);
+                    }}
+                    duration={track.duration}
+                    currentTime={audioTime}
+                    canStamp={audioSupported}
+                    onSeek={(seconds) => {
+                      if (audioRef.current) audioRef.current.currentTime = seconds;
+                    }}
+                  />
+                ) : (
+                  <LyricsEditor
+                    value={lrc}
+                    onChange={(value) => {
+                      setLrc(value);
+                      setLyricRows(undefined);
+                    }}
+                    disabled={!writable || saving}
+                    duration={track.duration}
+                    currentTime={audioTime}
+                    canStamp={audioSupported}
+                    onSeek={(seconds) => {
+                      if (audioRef.current) audioRef.current.currentTime = seconds;
+                    }}
+                  />
+                ))}
+            </div>
             {hasUntimed && (
               <div className="notice warning">
                 <Clock3 size={19} />
@@ -2657,42 +2785,6 @@ function TrackEditor({
               </div>
             )}
             {lyricsInvalid && <ErrorBox message={lyricsInvalid} />}
-            <div className="editor-actions">
-              <div className="action-hint">
-                <ShieldCheck size={17} />
-                <span>
-                  {changed
-                    ? "Сохраните выбранные изменения в черновик"
-                    : activeProposal
-                      ? "После успешной записи откроется следующий трек"
-                      : "Файл остается без изменений"}
-                </span>
-              </div>
-              <div className="button-row">
-                <button
-                  className="button secondary"
-                  onClick={() => void save()}
-                  disabled={!writable || !changed || saving || busy}
-                >
-                  {saving ? (
-                    <Spinner label="Сохраняем" />
-                  ) : (
-                    <>
-                      <Save size={18} />
-                      Сохранить черновик
-                    </>
-                  )}
-                </button>
-                <button
-                  className="button primary"
-                  onClick={() => void onApplyNext()}
-                  disabled={applyBlocked || moving}
-                >
-                  <CheckCheck size={18} />
-                  {moving ? "Записываем..." : "Записать и дальше"}
-                </button>
-              </div>
-            </div>
           </div>
         </div>
         <details className="panel detail-tools">
@@ -2788,7 +2880,7 @@ function TrackEditor({
           )}
         </details>
       </div>
-      <details className="panel policy-details">
+      <details className="panel policy-details" open={track.possible_mix || undefined}>
         <summary>Тип записи: песня, инструментальная музыка или сборник</summary>
         <RecordingTypePanel
           key={recordingPanelKey(track)}
@@ -3186,14 +3278,14 @@ function SettingsView({
         <div className="section-icon">
           <Settings2 size={21} />
         </div>
-        <h2>Ваш экземпляр</h2>
+        <h2>Приложение</h2>
         <button className="button secondary" onClick={onLogoutAll}>
           <LogOut size={17} />
           Выйти на всех устройствах
         </button>
         <p className="muted small">
-          Завершает все сеансы владельца. Уже одобренные задачи и отдельные API-токены сохраняются;
-          токены отзываются ниже в автоматизации.
+          Завершает все сеансы. Уже одобренные задачи и отдельные API-токены сохраняются; токены
+          отзываются ниже в автоматизации.
         </p>
         <dl className="file-facts">
           <div>
@@ -3238,7 +3330,7 @@ function SettingsView({
           </select>
         </div>
         <p className="muted small">
-          Пути, ресурсы обработчика и учетная запись владельца задаются в конфигурации Docker.
+          Пути, ресурсы обработчика и учетная запись задаются в конфигурации Docker.
         </p>
       </section>
       <section className="panel settings-panel">

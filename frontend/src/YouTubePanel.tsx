@@ -1,20 +1,220 @@
-import {useState} from 'react';
-import {api,messageFor} from './api';
-import type {Track} from './types';
+import { useState } from "react";
+import { api, messageFor } from "./api";
+import type { Track } from "./types";
 
-const states:Record<string,string>={recorded:'Ссылка сохранена в источнике',owner_confirmed:'Связь подтверждена владельцем',candidates:'Есть кандидаты',conflict:'Источники указывают разные видео',unknown:'Исходное видео пока неизвестно',unlinked:'Связь снята владельцем'};
-const evidence:Record<string,string>={embedded_url:'ссылка в тегах',sidecar_url:'ссылка в info.json',sidecar_id:'ID в info.json',filename_id:'ID в имени файла',search:'результат поиска',owner:'выбрано владельцем'};
-const availability:Record<string,string>={unchecked:'Доступность не проверена',available:'Видео доступно',unavailable:'Видео недоступно или ограничено',search_result:'Найдено в поиске'};
+const states: Record<string, string> = {
+  recorded: "Ссылка сохранена в источнике",
+  owner_confirmed: "Связь подтверждена вручную",
+  candidates: "Есть кандидаты",
+  conflict: "Источники указывают разные видео",
+  unknown: "Исходное видео пока неизвестно",
+  unlinked: "Связь снята вручную",
+};
+const evidence: Record<string, string> = {
+  embedded_url: "ссылка в тегах",
+  sidecar_url: "ссылка в info.json",
+  sidecar_id: "ID в info.json",
+  filename_id: "ID в имени файла",
+  search: "результат поиска",
+  owner: "выбрано вручную",
+};
+const availability: Record<string, string> = {
+  unchecked: "Доступность не проверена",
+  available: "Видео доступно",
+  unavailable: "Видео недоступно или ограничено",
+  search_result: "Найдено в поиске",
+};
 
-export function YouTubePanel({track,enabled,busy,changed,onJob,onRefresh}:{track:Track;enabled:boolean;busy:boolean;changed:boolean;onJob:(kind:string,params?:Record<string,unknown>)=>Promise<void>;onRefresh:()=>void}){
- const [url,setUrl]=useState(''),[error,setError]=useState(''),[saving,setSaving]=useState(false);
- const data=track.youtube;
- async function link(value:string|null){setSaving(true);setError('');try{await api(`/tracks/${track.id}/youtube`,{method:'PUT',headers:{'If-Match':`"${track.sha256}"`},body:JSON.stringify({url:value})});setUrl('');onRefresh();}catch(e){setError(messageFor(e));}finally{setSaving(false);}}
- return <section className="panel settings-panel youtube-panel"><h2>Исходное видео YouTube</h2><p>{states[data?.state||'unknown']}</p><p className="muted small">Ссылка из тегов или yt-dlp сохраняет происхождение файла. Поиск по названию и Shazam предлагает видео с этой композицией; конкретную загрузку подтверждайте отдельно. Аудио на YouTube не отправляется.</p><div className="button-row"><button className="button secondary" disabled={busy||changed||!!track.input_error} onClick={()=>void onJob('youtube')}>Прочитать сведения о загрузке</button><button className="button secondary" disabled={!enabled||busy||changed||!!track.input_error} onClick={()=>void onJob('youtube',{youtube_lookup:true,youtube_search:true})}>Найти видео и проверить ссылки</button><button className="button subtle" disabled={changed} onClick={onRefresh}>Обновить связи</button></div>{!enabled&&<p className="muted small">Сетевой поиск YouTube выключен в настройках сервера. Локальные сведения доступны.</p>}{data?.lookup_error&&<p className="warning-text">YouTube временно не ответил: {data.lookup_error}. Сохраненные ссылки остаются доступны.</p>}{error&&<p role="alert" className="warning-text">{error}</p>}{data?.candidates?.map(c=><article className="youtube-candidate" key={c.video_id}><a href={c.url} target="_blank" rel="noreferrer">{c.title||c.video_id}</a>{c.channel&&<p className="small">Канал: {c.channel}</p>}<p className="muted small">{c.evidence.map(v=>evidence[v]||v).join(' · ')}{c.inherited?' · унаследовано от исходного аудио':''}</p><p className="muted small">{availability[c.availability]||c.availability}{c.duration_delta!=null?` · разница длительности ${c.duration_delta.toFixed(1)} с`:''}</p>{data.linked_id===c.video_id?<span className="badge good">Связано с файлом</span>:<button className="button subtle" disabled={saving||changed} onClick={()=>void link(c.url)}>Подтвердить это видео</button>}</article>)}<label>Ссылка на исходное видео<input type="url" value={url} onChange={e=>setUrl(e.target.value)} maxLength={2048} placeholder="https://www.youtube.com/watch?v=..."/></label><div className="button-row"><button className="button secondary" disabled={!url.trim()||saving||changed} onClick={()=>void link(url)}>Сохранить связь</button>{data?.linked_id&&<button className="button subtle" disabled={saving||changed} onClick={()=>void link(null)}>Снять связь</button>}</div><p className="muted small">Связь сохраняется в каталоге и экспорте JSON/CSV/Ready. Музыкальные теги и текст песни этим действием не меняются.</p></section>;
+export function YouTubePanel({
+  track,
+  enabled,
+  busy,
+  changed,
+  onJob,
+  onRefresh,
+}: {
+  track: Track;
+  enabled: boolean;
+  busy: boolean;
+  changed: boolean;
+  onJob: (kind: string, params?: Record<string, unknown>) => Promise<void>;
+  onRefresh: () => void;
+}) {
+  const [url, setUrl] = useState(""),
+    [error, setError] = useState(""),
+    [saving, setSaving] = useState(false);
+  const data = track.youtube;
+  async function link(value: string | null) {
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/tracks/${track.id}/youtube`, {
+        method: "PUT",
+        headers: { "If-Match": `"${track.sha256}"` },
+        body: JSON.stringify({ url: value }),
+      });
+      setUrl("");
+      onRefresh();
+    } catch (e) {
+      setError(messageFor(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <section className="panel settings-panel youtube-panel">
+      <h2>Исходное видео YouTube</h2>
+      <p>{states[data?.state || "unknown"]}</p>
+      <p className="muted small">
+        Ссылка из тегов или yt-dlp сохраняет происхождение файла. Поиск по названию и Shazam
+        предлагает видео с этой композицией; конкретную загрузку подтверждайте отдельно. Аудио на
+        YouTube не отправляется.
+      </p>
+      <div className="button-row">
+        <button
+          className="button secondary"
+          disabled={busy || changed || !!track.input_error}
+          onClick={() => void onJob("youtube")}
+        >
+          Прочитать сведения о загрузке
+        </button>
+        <button
+          className="button secondary"
+          disabled={!enabled || busy || changed || !!track.input_error}
+          onClick={() => void onJob("youtube", { youtube_lookup: true, youtube_search: true })}
+        >
+          Найти видео и проверить ссылки
+        </button>
+        <button className="button subtle" disabled={changed} onClick={onRefresh}>
+          Обновить связи
+        </button>
+      </div>
+      {!enabled && (
+        <p className="muted small">
+          Сетевой поиск YouTube выключен в настройках сервера. Локальные сведения доступны.
+        </p>
+      )}
+      {data?.lookup_error && (
+        <p className="warning-text">
+          YouTube временно не ответил: {data.lookup_error}. Сохраненные ссылки остаются доступны.
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="warning-text">
+          {error}
+        </p>
+      )}
+      {data?.candidates?.map((c) => (
+        <article className="youtube-candidate" key={c.video_id}>
+          <a href={c.url} target="_blank" rel="noreferrer">
+            {c.title || c.video_id}
+          </a>
+          {c.channel && <p className="small">Канал: {c.channel}</p>}
+          <p className="muted small">
+            {c.evidence.map((v) => evidence[v] || v).join(" · ")}
+            {c.inherited ? " · унаследовано от исходного аудио" : ""}
+          </p>
+          <p className="muted small">
+            {availability[c.availability] || c.availability}
+            {c.duration_delta != null
+              ? ` · разница длительности ${c.duration_delta.toFixed(1)} с`
+              : ""}
+          </p>
+          {data.linked_id === c.video_id ? (
+            <span className="badge good">Связано с файлом</span>
+          ) : (
+            <button
+              className="button subtle"
+              disabled={saving || changed}
+              onClick={() => void link(c.url)}
+            >
+              Подтвердить это видео
+            </button>
+          )}
+        </article>
+      ))}
+      <label>
+        Ссылка на исходное видео
+        <input
+          type="url"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          maxLength={2048}
+          placeholder="https://www.youtube.com/watch?v=..."
+        />
+      </label>
+      <div className="button-row">
+        <button
+          className="button secondary"
+          disabled={!url.trim() || saving || changed}
+          onClick={() => void link(url)}
+        >
+          Сохранить связь
+        </button>
+        {data?.linked_id && (
+          <button
+            className="button subtle"
+            disabled={saving || changed}
+            onClick={() => void link(null)}
+          >
+            Снять связь
+          </button>
+        )}
+      </div>
+      <p className="muted small">
+        Связь сохраняется в каталоге и экспорте JSON/CSV/Ready. Музыкальные теги и текст песни этим
+        действием не меняются.
+      </p>
+    </section>
+  );
 }
 
-export function YouTubeCollectionPanel(){
- const [busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[error,setError]=useState('');
- async function run(lookup:boolean,search:boolean){setBusy(true);setError('');try{const job=await api<{total:number}>('/jobs',{method:'POST',headers:{'Idempotency-Key':crypto.randomUUID()},body:JSON.stringify({kind:'youtube',params:{scope:'all',youtube_lookup:lookup,youtube_search:search}})});setNotice(`Задание YouTube добавлено: ${job.total} файлов. Прогресс находится в разделе «Обработка».`);}catch(e){setError(messageFor(e));}finally{setBusy(false);}}
- return <section className="panel settings-panel"><h2>Связи с YouTube</h2><p className="muted small">Прочитать теги, ID в имени и соседние файлы yt-dlp. Сетевой поиск использует результат Shazam, затем название и исполнителя; найденные видео остаются кандидатами. Скачивания и передачи аудио нет.</p><div className="button-row"><button className="button secondary" disabled={busy} onClick={()=>void run(false,false)}>Прочитать источники всей коллекции</button><button className="button secondary" disabled={busy} onClick={()=>void run(true,false)}>Проверить сохраненные видео</button><button className="button secondary" disabled={busy} onClick={()=>void run(true,true)}>Найти недостающие видео</button></div>{notice&&<p role="status">{notice}</p>}{error&&<p role="alert">{error}</p>}</section>;
+export function YouTubeCollectionPanel() {
+  const [busy, setBusy] = useState(false),
+    [notice, setNotice] = useState(""),
+    [error, setError] = useState("");
+  async function run(lookup: boolean, search: boolean) {
+    setBusy(true);
+    setError("");
+    try {
+      const job = await api<{ total: number }>("/jobs", {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          kind: "youtube",
+          params: { scope: "all", youtube_lookup: lookup, youtube_search: search },
+        }),
+      });
+      setNotice(
+        `Задание YouTube добавлено: ${job.total} файлов. Прогресс находится в разделе «Обработка».`,
+      );
+    } catch (e) {
+      setError(messageFor(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="panel settings-panel">
+      <h2>Связи с YouTube</h2>
+      <p className="muted small">
+        Прочитать теги, ID в имени и соседние файлы yt-dlp. Сетевой поиск использует результат
+        Shazam, затем название и исполнителя; найденные видео остаются кандидатами. Скачивания и
+        передачи аудио нет.
+      </p>
+      <div className="button-row">
+        <button className="button secondary" disabled={busy} onClick={() => void run(false, false)}>
+          Прочитать источники всей коллекции
+        </button>
+        <button className="button secondary" disabled={busy} onClick={() => void run(true, false)}>
+          Проверить сохраненные видео
+        </button>
+        <button className="button secondary" disabled={busy} onClick={() => void run(true, true)}>
+          Найти недостающие видео
+        </button>
+      </div>
+      {notice && <p role="status">{notice}</p>}
+      {error && <p role="alert">{error}</p>}
+    </section>
+  );
 }
