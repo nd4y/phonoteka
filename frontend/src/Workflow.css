@@ -420,3 +420,10 @@
     padding-right: 8px;
   }
 }
+
+/* Keep fixed review actions above later disclosure panels' entry-animation layers. */
+.review-mode .editor-panel {
+  position: relative;
+  z-index: 2;
+  overflow: visible;
+}
