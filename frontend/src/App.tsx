@@ -1812,6 +1812,16 @@ export default function App() {
                     loading={loading}
                     selectedId=""
                     onSelect={(track) => void openTrack(track)}
+                    emptyTitle={
+                      search.trim() ? "По запросу ничего не найдено" : "Готовых файлов пока нет"
+                    }
+                    emptyDescription={
+                      tracks?.total
+                        ? "Перейдите на предыдущую страницу."
+                        : search.trim()
+                          ? "Измените или очистите поисковый запрос."
+                          : "Проверьте записи в «Коллекции», затем сохраните готовые версии через «План сохранения и история версий». После этого они появятся здесь."
+                    }
                   />
                   <Pagination
                     tracks={tracks}
@@ -1960,11 +1970,15 @@ function TrackList({
   loading,
   selectedId,
   onSelect,
+  emptyTitle = "Пока ничего не найдено",
+  emptyDescription = "Измените фильтр или запустите сканирование рабочей коллекции.",
 }: {
   tracks: TrackPage | null;
   loading: boolean;
   selectedId: string;
   onSelect: (track: Track) => void;
+  emptyTitle?: string;
+  emptyDescription?: string;
 }) {
   return (
     <div className="track-list" aria-busy={loading}>
@@ -1985,8 +1999,8 @@ function TrackList({
           <div className="icon-surface">
             <Library size={30} />
           </div>
-          <h3>{tracks.total ? "Нет треков на этой странице" : "Пока ничего не найдено"}</h3>
-          <p>Измените фильтр или запустите сканирование рабочей коллекции.</p>
+          <h3>{tracks.total ? "Нет треков на этой странице" : emptyTitle}</h3>
+          <p>{emptyDescription}</p>
         </div>
       ) : (
         tracks.items.map((track) => (

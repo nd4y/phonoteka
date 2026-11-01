@@ -27,7 +27,7 @@ const labels: Record<WorkflowAction, [string, string, string]> = {
   review: [
     "Проверьте найденные данные",
     "Сравните изменения с файлом, прослушайте запись и примените подходящие значения. Готовую коллекцию сохраним отдельно.",
-    "Проверить предложения",
+    "Открыть очередь проверки",
   ],
   errors: [
     "Несколько файлов требуют внимания",
@@ -58,7 +58,9 @@ export function WorkflowOverview({
     request.current = controller;
     setLoading(true);
     try {
-      const value = await api<Report>("/reports/collection", { signal: controller.signal });
+      const value = await api<Report>("/reports/collection", {
+        signal: controller.signal,
+      });
       if (!controller.signal.aborted) {
         setReport(value);
         setError("");
@@ -132,7 +134,10 @@ export function WorkflowOverview({
             <button onClick={() => onAction("review")}>
               <CheckCheck size={22} />
               <strong>{n(counts.current_proposals)}</strong>
-              <span>Предложения для проверки</span>
+              <span>
+                Сохраненные предложения
+                <small>Открыть всю очередь проверки, включая ошибки</small>
+              </span>
             </button>
             <button onClick={() => onAction("guide")}>
               <Search size={22} />
