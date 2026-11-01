@@ -296,7 +296,7 @@ class Providers:
         if meta.get('input_error'):
             result.update(state='invalid_audio',sources=[{'provider':'local','state':'invalid_audio'}]);return result
         if not query['title']:
-            result['sources']=[{'provider':'musicbrainz','state':'insufficient_metadata'},{'provider':'lrclib','state':'insufficient_metadata'},{'provider':'acoustid','state':'key_required'}]
+            result['sources']=[{'provider':'musicbrainz','state':'insufficient_metadata'},{'provider':'lrclib','state':'insufficient_metadata'}]
             return result
         for provider,call in [('musicbrainz',self.musicbrainz),('lrclib',self.lyrics)]:
             authorize()
@@ -318,7 +318,6 @@ class Providers:
                 result['sources'].append({'provider':'coverartarchive','state':'candidate' if art else 'no_match'})
             except (ProviderError, media.MediaError) as exc: result['sources'].append({'provider':'coverartarchive','state':exc.code})
         result['state']='candidates' if result['candidates'] else 'no_match' if all(x['state']=='no_match' for x in result['sources']) else 'incomplete' 
-        result['sources'].append({'provider':'acoustid','state':'key_required'})
         from . import catalogs
         await catalogs.enrich(self,result,query,meta,authorize)
         if result['candidates']:result['state']='candidates'

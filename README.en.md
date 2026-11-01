@@ -1,5 +1,7 @@
 # phonoteka
 
+Owners can configure AcoustID in the UI: save, replace or remove an Application API key, enable recognition and test the connection. Chromaprint lookup supplements inconclusive Shazam results and produces review candidates. See [setup, transmitted data and limits](docs/en/acoustid.md).
+
 Development and contribution entry point. Product capabilities, installation and current limitations are described in the [existing product README](README.md). Full translation is tracked as unverified; this page does not claim translation parity yet.
 
 ## Development standard

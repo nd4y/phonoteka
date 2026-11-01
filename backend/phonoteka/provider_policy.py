@@ -21,6 +21,7 @@ LOCAL = {"local", "local_cover", "local_replaygain", "independent_asr", "owner",
 DATA_TYPES = {"metadata", "lyrics", "cover", "provenance"}
 CHECKED_AT = "2026-10-18"
 TERMS = {
+    "acoustid": ("https://acoustid.org/database", "AcoustID to MusicBrainz mapping is CC0; core recording metadata comes from MusicBrainz; non-commercial API use"),
     "musicbrainz": ("https://musicbrainz.org/doc/About/Data_License", "CC0 core metadata; supplementary data is a separate license"),
     "lrclib": ("https://lrclib.net/docs", "API access documented; a license for individual lyrics is not established"),
     "coverartarchive": ("https://coverartarchive.org/", "Images remain copyrighted by their respective owners"),
@@ -29,7 +30,7 @@ TERMS = {
     "discogs": ("https://support.discogs.com/hc/en-us/articles/360009334593-API-Terms-of-Use", "CC0 catalogue data differs from restricted images/user/marketplace data; cache freshness applies"),
     "youtube": ("https://www.youtube.com/static?template=terms", "Store factual video provenance only; no audio/video downloading"),
 }
-SUPPORTED = {'musicbrainz':{'metadata'},'lrclib':{'lyrics'},'coverartarchive':{'metadata','cover'},'shazam':{'metadata'},
+SUPPORTED = {'acoustid':{'metadata'},'musicbrainz':{'metadata'},'lrclib':{'lyrics'},'coverartarchive':{'metadata','cover'},'shazam':{'metadata'},
              'theaudiodb':{'metadata','cover'},'discogs':{'metadata'},'youtube':{'provenance'}}
 
 
@@ -51,7 +52,7 @@ def data_type(candidate):
 
 def defaults(provider, kind):
     local = provider in LOCAL
-    core = provider == "musicbrainz" and kind == "metadata"
+    core = provider in {"musicbrainz", "acoustid"} and kind == "metadata"
     discogs = provider == "discogs" and kind == "metadata"
     provenance = provider == "youtube" and kind == "provenance"
     granted = local or core or discogs or provenance
