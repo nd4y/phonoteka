@@ -22,6 +22,7 @@ x-env: &env
   PUBLICATION_ROOT: /publication
   STORAGE_GUARD_DIR: /storage-guard
   OWNER_USERNAME: ${OWNER_USERNAME:-owner}
+  AUTH_ENABLED: ${AUTH_ENABLED:-true}
   OWNER_PASSWORD_FILE: /run/secrets/owner_password
   READ_ONLY: ${READ_ONLY:-true}
   STORAGE_VERIFIED: ${STORAGE_VERIFIED:-false}
@@ -49,31 +50,31 @@ services:
         source: ${METRICS_TOKEN_FILE:?Set a dedicated scrape token file}
         target: /run/secrets/metrics_token
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${STATE_PATH:?}
         target: /state
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${WORK_PATH:?}
         target: /work
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${ORIGINAL_PATH:?}
         target: /original
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${PUBLICATION_PATH:?}
         target: /publication
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${PASSWORD_FILE:?}
         target: /run/secrets/owner_password
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
   worker:
     <<: *common
     command: [python, -m, phonoteka.worker]
@@ -91,38 +92,38 @@ services:
         source: ${METRICS_TOKEN_FILE:?}
         target: /run/secrets/metrics_token
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${STATE_PATH:?}
         target: /state
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${WORK_PATH:?}
         target: /work
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${ORIGINAL_PATH:?}
         target: /original
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${PUBLICATION_PATH:?}
         target: /publication
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${GUARD_PATH:?}
         target: /storage-guard
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${PASSWORD_FILE:?}
         target: /run/secrets/owner_password
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${INFERENCE_KEY_FILE:?}
         target: /run/secrets/inference_key
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
   inference:
     <<: *common
     image: ${PHONOTEKA_INFERENCE_IMAGE:?Set a tested immutable inference digest}
@@ -141,18 +142,18 @@ services:
         source: ${METRICS_TOKEN_FILE:?}
         target: /run/secrets/metrics_token
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${WORK_PATH:?}
         target: /work
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${INFERENCE_STATE_PATH:?}
         target: /inference
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }
       - type: bind
         source: ${INFERENCE_KEY_FILE:?}
         target: /run/secrets/inference_key
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }

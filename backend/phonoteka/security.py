@@ -25,6 +25,8 @@ def error(status: int, code: str, message: str, **extra):
 
 
 def bootstrap(settings: Settings) -> None:
+    if not settings.auth_enabled:
+        return
     # Persist policy reductions before serving requests. A later configuration
     # increase must not bring an already expired cookie back to life.
     with db.transaction(settings.db_path) as conn:
@@ -170,14 +172,21 @@ def session_by_hash(settings: Settings, digest: str):
 
 
 def public_session(settings: Settings, active):
-    return {'authenticated': bool(active), 'csrf_token': active['csrf'] if active else None,
-            'username': settings.owner_username if active else None,
+    return {'authenticated': bool(active), 'auth_enabled': settings.auth_enabled,
+            'csrf_token': active['csrf'] if active else None,
+            'username': settings.owner_username if active and settings.auth_enabled else None,
             'idle_expires_at': active['idle_expires_at'] if active else None,
             'absolute_expires_at': active['absolute_expires_at'] if active else None,
             'activity_interval_seconds': SESSION_ACTIVITY_INTERVAL}
 
 
 def session(request: Request, settings: Settings):
+    if not settings.auth_enabled:
+        # No persistent login cookie/session is issued in this explicitly open mode.
+        # Re-enabling authentication immediately restores the normal cookie gate.
+        return {'token_hash': None, 'csrf': settings.open_access_csrf,
+                'auth_epoch': int(db.setting(settings.db_path, 'auth_epoch', '0')),
+                'idle_expires_at': None, 'absolute_expires_at': None}
     token = request.cookies.get(cookie_name(settings), "")
     if not token or len(token) > 256:
         return None
@@ -188,6 +197,8 @@ def record_activity(request: Request, settings: Settings):
     active = require_session(request, settings, True, owner_only=True)
     if request.headers.get('origin') != settings.app_url:
         raise error(403, 'origin_denied', 'User activity requires the application origin')
+    if not settings.auth_enabled:
+        return active
     with db.transaction(settings.db_path) as conn:
         row = _session_row(conn, active['token_hash'])
         now = time.time()
@@ -213,6 +224,8 @@ def require_session(request: Request, settings: Settings, mutation=False, *, own
         raise error(401, "authentication_required", "Войдите в приложение")
     if mutation:
         origin = request.headers.get("origin")
+        if not settings.auth_enabled and origin != settings.app_url:
+            raise error(403, "origin_denied", "Источник запроса не разрешен")
         if origin and origin != settings.app_url:
             raise error(403, "origin_denied", "Источник запроса не разрешен")
         if request.headers.get("sec-fetch-site") == "cross-site":
@@ -224,6 +237,7 @@ def require_session(request: Request, settings: Settings, mutation=False, *, own
 
 
 def login(request: Request, settings: Settings, username: str, password: str):
+    require_auth_enabled(settings)
     if request.headers.get("origin") != settings.app_url or request.headers.get("sec-fetch-site") == "cross-site":
         raise error(403, "origin_denied", "Источник запроса не разрешен")
     # Forwarded headers are deliberately not trusted. At an internal proxy this is
@@ -269,3 +283,8 @@ def login(request: Request, settings: Settings, username: str, password: str):
             (SELECT token_hash FROM sessions WHERE token_hash<>? ORDER BY created DESC,rowid DESC LIMIT 19)""", (digest, digest))
         _cleanup_activity(conn)
     return token, csrf
+
+
+def require_auth_enabled(settings: Settings):
+    if not settings.auth_enabled:
+        raise error(409, "authentication_disabled", "Вход отключен в конфигурации приложения")

@@ -295,6 +295,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/auth/logout")
     def auth_logout(request: Request, response: Response):
+        security.require_auth_enabled(settings)
         active = security.require_session(request, settings, True)
         with db.transaction(settings.db_path) as conn:
             security.revoke_sessions(conn, active['token_hash'])
@@ -303,6 +304,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/auth/logout-all")
     def auth_logout_all(request: Request, response: Response):
+        security.require_auth_enabled(settings)
         security.require_session(request, settings, True)
         with db.transaction(settings.db_path) as conn:
             count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
