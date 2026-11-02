@@ -1250,24 +1250,28 @@ export default function App() {
                 <span>Настройки</span>
               </button>
             </nav>
-            <div className="sidebar-account">
-              <div className="avatar">{(session.username || "В")[0].toUpperCase()}</div>
-              <div>
-                <strong>
-                  {session.username && session.username.toLowerCase() !== "owner"
-                    ? session.username
-                    : "Аккаунт"}
-                </strong>
+            {session.auth_enabled !== false ? (
+              <div className="sidebar-account">
+                <div className="avatar">{(session.username || "В")[0].toUpperCase()}</div>
+                <div>
+                  <strong>
+                    {session.username && session.username.toLowerCase() !== "owner"
+                      ? session.username
+                      : "Аккаунт"}
+                  </strong>
+                </div>
+                <button
+                  className="icon-button"
+                  aria-label="Выйти"
+                  title="Выйти"
+                  onClick={() => void logout()}
+                >
+                  <LogOut size={18} />
+                </button>
               </div>
-              <button
-                className="icon-button"
-                aria-label="Выйти"
-                title="Выйти"
-                onClick={() => void logout()}
-              >
-                <LogOut size={18} />
-              </button>
-            </div>
+            ) : (
+              <p className="muted small">Вход отключен</p>
+            )}
           </div>
         </aside>
         <div className="main-shell">
@@ -1908,7 +1912,7 @@ export default function App() {
                 theme={theme}
                 setTheme={setTheme}
                 onDirtyChange={setSettingsDirty}
-                onLogoutAll={() => void logout(true)}
+                onLogoutAll={session.auth_enabled === false ? undefined : () => void logout(true)}
               />
             )}
             <footer className="app-footer">
@@ -3255,7 +3259,7 @@ function SettingsView({
   theme: string;
   setTheme: (value: string) => void;
   onDirtyChange: (dirty: boolean) => void;
-  onLogoutAll: () => void;
+  onLogoutAll?: () => void;
 }) {
   const [acoustidDirty, setAcoustidDirty] = useState(false);
   const [retentionDirty, setRetentionDirty] = useState(false);
@@ -3279,14 +3283,23 @@ function SettingsView({
           <Settings2 size={21} />
         </div>
         <h2>Приложение</h2>
-        <button className="button secondary" onClick={onLogoutAll}>
-          <LogOut size={17} />
-          Выйти на всех устройствах
-        </button>
-        <p className="muted small">
-          Завершает все сеансы. Уже одобренные задачи и отдельные API-токены сохраняются; токены
-          отзываются ниже в автоматизации.
-        </p>
+        {onLogoutAll ? (
+          <>
+            <button className="button secondary" onClick={onLogoutAll}>
+              <LogOut size={17} />
+              Выйти на всех устройствах
+            </button>
+            <p className="muted small">
+              Завершает все сеансы. Уже одобренные задачи и отдельные API-токены сохраняются; токены
+              отзываются ниже в автоматизации.
+            </p>
+          </>
+        ) : (
+          <p className="muted small">
+            Вход отключен в конфигурации Docker. Приложением может пользоваться каждый, у кого есть
+            доступ к его адресу.
+          </p>
+        )}
         <dl className="file-facts">
           <div>
             <dt>Версия</dt>

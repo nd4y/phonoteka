@@ -1,13 +1,21 @@
 """Explicit deployment configuration. Music writes are disabled by default."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
+import secrets
 from pathlib import Path
 from urllib.parse import urlsplit
 
 
 def boolean(name: str, default: bool = False) -> bool:
     return os.environ.get(name, str(default)).lower() in {"1", "true", "yes"}
+
+
+def authentication_enabled() -> bool:
+    value = os.environ.get("AUTH_ENABLED", "true").strip().lower()
+    if value not in {"true", "false", "1", "0"}:
+        raise ValueError("AUTH_ENABLED must be true, false, 1 or 0")
+    return value in {"true", "1"}
 
 
 @dataclass(frozen=True)
@@ -19,6 +27,8 @@ class Settings:
     storage_guard_dir: Path
     app_url: str = "https://localhost"
     owner_username: str = "owner"
+    auth_enabled: bool = True
+    open_access_csrf: str = field(default_factory=lambda: secrets.token_urlsafe(32), init=False, repr=False, compare=False)
     owner_password_file: Path | None = None
     static_dir: Path | None = None
     read_only: bool = True
@@ -51,6 +61,8 @@ class Settings:
     webhook_max_pending: int = 10000
 
     def __post_init__(self):
+        if type(self.auth_enabled) is not bool:
+            raise ValueError("auth_enabled must be a boolean")
         if type(self.input_grace_seconds) is not int or not 0 <= self.input_grace_seconds <= 86400:
             raise ValueError("INPUT_GRACE_SECONDS must be an integer in 0..86400")
         if type(self.session_hours) is not int or not 1 <= self.session_hours <= 720:
@@ -74,6 +86,7 @@ class Settings:
             storage_guard_dir=path("STORAGE_GUARD_DIR", "/storage-guard"),
             app_url=os.environ.get("APP_URL", "https://localhost").rstrip("/"),
             owner_username=os.environ.get("OWNER_USERNAME", "owner"),
+            auth_enabled=authentication_enabled(),
             owner_password_file=path("OWNER_PASSWORD_FILE", "/run/secrets/owner_password"),
             static_dir=path("STATIC_DIR", "/app/frontend/dist"),
             read_only=boolean("READ_ONLY", True),
