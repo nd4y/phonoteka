@@ -171,6 +171,20 @@ export function DeliveryPanel({
     poweramp_owner_verified: "Poweramp проверен вручную",
   };
   const snapshot = status?.export;
+  const exportButton = (
+    <button
+      className={snapshot?.snapshot_available ? "button secondary" : "button primary"}
+      disabled={busy || starting || (!!job && isActiveJob(job))}
+      onClick={() => void startExport()}
+    >
+      <FolderCheck size={18} />
+      {starting || (job && isActiveJob(job))
+        ? "Готовим файлы…"
+        : snapshot
+          ? "Подготовить новый снимок"
+          : "Подготовить файлы для переноса"}
+    </button>
+  );
   return (
     <section className="panel settings-panel delivery-panel">
       <div className="panel-heading">
@@ -197,20 +211,7 @@ export function DeliveryPanel({
           </button>
         </div>
       )}
-      {status && status.ready_count > 0 && (
-        <button
-          className="button primary"
-          disabled={busy || starting || (!!job && isActiveJob(job))}
-          onClick={() => void startExport()}
-        >
-          <FolderCheck size={18} />
-          {starting || (job && isActiveJob(job))
-            ? "Готовим файлы…"
-            : snapshot
-              ? "Подготовить новый снимок"
-              : "Подготовить файлы для переноса"}
-        </button>
-      )}
+      {status && status.ready_count > 0 && !snapshot?.snapshot_available && exportButton}
       {job && (
         <div role="status">
           <strong>Подготовка снимка · {jobStates[job.state] || job.state}</strong>
@@ -243,10 +244,9 @@ export function DeliveryPanel({
           {error}
         </p>
       )}
-      {status && !snapshot && (
+      {status && status.ready_count > 0 && !snapshot && (
         <p className="muted small">
-          Снимка пока нет. Сначала сохраните проверенные треки в готовую коллекцию, затем
-          подготовьте файлы для переноса.
+          Нажмите «Подготовить файлы для переноса». Здесь появится ссылка для скачивания.
         </p>
       )}
       {snapshot && (
@@ -278,6 +278,7 @@ export function DeliveryPanel({
                   откроется вместе с аудиофайлами.
                 </li>
               </ol>
+              {status && status.ready_count > 0 && exportButton}
             </>
           )}
           <details>

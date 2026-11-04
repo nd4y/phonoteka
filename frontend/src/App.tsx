@@ -412,6 +412,7 @@ export default function App() {
   }
   async function fixTrack(id: string, reason = "accepted_file_revision_required") {
     if (await openTrack({ id }, "review", { context: { search: "", filter: "all" } })) {
+      setWrittenTrack((current) => (current?.id === id ? null : current));
       if (
         ![
           "missing_title",
@@ -1151,7 +1152,9 @@ export default function App() {
         headers: { "Idempotency-Key": requestId() },
         body: JSON.stringify({ kind, track_ids: ids, params }),
       });
-      setNotice(`${jobNames[kind] || kind}: задача добавлена в очередь.`);
+      setNotice(
+        kind === "export_ready" ? "" : `${jobNames[kind] || kind}: задача добавлена в очередь.`,
+      );
       await loadStatus();
       return job;
     } catch (err) {
