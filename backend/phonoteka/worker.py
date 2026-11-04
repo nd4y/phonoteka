@@ -21,14 +21,14 @@ import time
 import uuid
 from contextvars import copy_context
 
-from . import db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy, provider_attempts, input_readiness, automation, recording_review, processing_activity
+from . import work_folders, db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy, provider_attempts, input_readiness, automation, recording_review, processing_activity
 from .providers import Providers, ProviderError
 from .config import Settings
 from .telemetry import Metrics, configure_logging, context, log, opaque_id, bounded, KINDS, worker_server
 
 LOG = logging.getLogger("phonoteka.worker")
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".aiff", ".ape", ".wv", ".wma", ".webm", ".cue", ".m4b", ".oga", ".aif", ".mp4", ".mka", ".mkv", ".dsf", ".dff", ".ac3", ".wave", ".bin"}
-EXCLUDED_DIRS = {"@eadir", "#recycle", ".trash", ".snapshot", ".phonoteka-staging", "@recycle"}
+EXCLUDED_DIRS = work_folders.EXCLUDED
 DB_BUSY_RETRY_SECONDS = .5
 
 
@@ -376,7 +376,7 @@ class Worker:
                     conn.execute("INSERT INTO tracks(id,relative_path,sha256,metadata,status,scan_id,created_at,updated_at) VALUES(?,?,?,?,'needs_review',?,?,?)", (identity,relative,meta["sha256"],db.encode(meta),scan_id,now,now))
                     db.event(conn, "file_replaced", {"previous_track_id": previous_id, "track_id": identity})
                     if meta.get('input_error'): conn.execute("UPDATE tracks SET status='error' WHERE id=?",(identity,))
-                    return {"track_id": identity, "relative_path": relative, "identity_changed": True, **({'input_error':meta['input_error']} if meta.get('input_error') else {})}
+                    return {"track_id": identity, "sha256": meta["sha256"], "relative_path": relative, "identity_changed": True, **({'input_error':meta['input_error']} if meta.get('input_error') else {})}
                 if meta.get('format') == 'cue':
                     status = 'needs_review' if meta.get('cue', {}).get('errors') else 'indexed'
                 conn.execute("UPDATE tracks SET sha256=?,metadata=?,status=?,scan_id=?,updated_at=? WHERE id=?", (meta["sha256"],db.encode(meta),status,scan_id,now,identity))
@@ -388,16 +388,16 @@ class Worker:
                     conn.execute("UPDATE tracks SET status='needs_review' WHERE id=?", (identity,))
             if meta.get('input_error'):
                 conn.execute("UPDATE tracks SET status='error' WHERE id=?", (identity,))
-        return {"track_id": identity, "relative_path": relative, **({'input_error':meta['input_error']} if meta.get('input_error') else {})}
+        return {"track_id": identity, "sha256": meta["sha256"], "relative_path": relative, **({'input_error':meta['input_error']} if meta.get('input_error') else {})}
 
-    def confirm_scan_inputs(self, scan_id, coverage_complete):
+    def confirm_scan_inputs(self, scan_id, coverage_complete, prefix=""):
         """Unrelated invalid audio does not invalidate a fully observed good file.
 
         Root/enumeration/cancellation failures never establish a second pass.
         Unseen and changed entries lose readiness, including after partial scans.
         """
         with db.transaction(self.settings.db_path) as conn:
-            for row in conn.execute('SELECT id,scan_id,metadata FROM tracks WHERE is_current=1').fetchall():
+            for row in conn.execute('SELECT id,scan_id,metadata FROM tracks WHERE is_current=1 AND instr(relative_path,?)=1',(prefix,)).fetchall():
                 meta=json.loads(row['metadata'])
                 if row['scan_id'] == scan_id:
                     value=input_readiness.confirm(meta,scan_id,complete=coverage_complete,
@@ -408,7 +408,7 @@ class Worker:
                     meta['input_readiness']=value
                     conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),row['id']))
 
-    def link_cue_sheets(self):
+    def link_cue_sheets(self, prefix=""):
         """Mark album images explicitly; individual CUE songs never write their tags."""
         with db.transaction(self.settings.db_path) as conn:
             rows = conn.execute("SELECT id,relative_path,sha256,metadata FROM tracks WHERE is_current=1 AND status<>'missing'").fetchall()
@@ -427,7 +427,7 @@ class Worker:
                     links.setdefault(path, []).append({'id': row['id'], 'title': document.get('title') or Path(row['relative_path']).stem, 'track_count': count})
             for row in rows:
                 meta = json.loads(row['metadata'])
-                if meta.get('format') == 'cue':
+                if meta.get('format') == 'cue' or not row['relative_path'].startswith(prefix):
                     continue
                 # A damaged sheet must not silently unlock a known album image.
                 if uncertain and meta.get('cue_album_image') and row['relative_path'] not in links:
@@ -444,7 +444,12 @@ class Worker:
             raise media.MediaError("root_identity_changed", "Work mount changed; administrator reconciliation is required")
         if not previous:
             db.set_setting(self.settings.db_path, "work_root_identity", db.encode(identity))
-        paths, errors = await self.io(enumerate_audio, self.settings.work_root)
+        folder = json.loads(job.get("payload") or "{}").get("params", {}).get("folder", "")
+        source = work_folders.directory(self.settings.work_root, folder)
+        scope_identity = await self.io(root_identity, source) if folder else identity
+        prefix = folder + "/" if folder else ""
+        paths, errors = await self.io(enumerate_audio, source)
+        paths = [prefix + path for path in paths] if folder else paths
         done={r['item_key'] for r in db.fetchall(self.settings.db_path,"SELECT item_key FROM job_items WHERE job_id=? AND state IN ('succeeded','failed','conflict','needs_review')",(job['id'],))}
         with db.transaction(self.settings.db_path) as conn:
             conn.execute("UPDATE jobs SET total=? WHERE id=?", (len(paths),job["id"]))
@@ -465,13 +470,15 @@ class Worker:
         await self.bounded_items((path for path in paths if path not in done), one, should_stop=stop_admission)
         stats = db.fetchone(self.settings.db_path, "SELECT * FROM jobs WHERE id=?", (job["id"],))
         final_identity = await self.io(root_identity, self.settings.work_root)
-        await self.io(self.confirm_scan_inputs,job['id'],not errors and not self.cancelled(job['id']) and final_identity == identity)
+        if folder and root_identity(work_folders.directory(self.settings.work_root, folder)) != scope_identity:
+            raise media.MediaError("root_identity_changed", "Выбранная папка изменилась при сканировании")
+        await self.io(self.confirm_scan_inputs,job['id'],not errors and not self.cancelled(job['id']) and final_identity == identity, prefix)
         complete = not errors and not stats["failed"] and not self.cancelled(job["id"]) and final_identity == identity
         if complete:
             with db.transaction(self.settings.db_path) as conn:
-                conn.execute("UPDATE tracks SET status='missing',updated_at=? WHERE is_current=1 AND (scan_id IS NULL OR scan_id<>?)", (db.utcnow(),job["id"]))
-        await self.io(self.link_cue_sheets)
-        db.set_setting(self.settings.db_path, "last_scan", db.encode({"id": job["id"], "state": "complete" if complete else "partial", "errors": errors[:50], "at": db.utcnow()}))
+                conn.execute("UPDATE tracks SET status='missing',updated_at=? WHERE is_current=1 AND instr(relative_path,?)=1 AND (scan_id IS NULL OR scan_id<>?)", (db.utcnow(),prefix,job["id"]))
+        await self.io(self.link_cue_sheets, prefix)
+        db.set_setting(self.settings.db_path, "last_folder_scan" if folder else "last_scan", db.encode({"id": job["id"], "state": "complete" if complete else "partial", "errors": errors[:50], "coverage_complete": not errors and not self.cancelled(job["id"]) and final_identity == identity, "at": db.utcnow()}))
         state = "cancelled_partial" if self.cancelled(job["id"]) and stats["completed"] else "cancelled" if self.cancelled(job["id"]) else "succeeded" if complete else "completed_with_errors"
         self.finish(job["id"], state, "partial_scan" if not complete else None)
 
@@ -986,7 +993,19 @@ class Worker:
                     raise media.MediaError('authorization_revoked','Export authorization revoked')
             with db.transaction(self.settings.db_path) as conn:conn.execute('UPDATE jobs SET total=1 WHERE id=?',(job['id'],))
             try:
-                result=await self.io(exports.generate,self.settings,authorized)
+                last_update = 0.0
+                started = time.monotonic()
+                def progress(copied,total):
+                    nonlocal last_update
+                    now = time.monotonic()
+                    if copied not in (0,total) and now - last_update < 1:
+                        return
+                    last_update = now
+                    update = {'copied':copied, 'total':total, 'eta_seconds':round((now-started)*(total-copied)/copied) if copied else None}
+                    with db.transaction(self.settings.db_path) as conn:
+                        conn.execute("UPDATE jobs SET payload=json_set(payload,'$.export_progress',json(?)),updated_at=? WHERE id=?",
+                                     (db.encode(update),db.utcnow(),job['id']))
+                result=await self.io(exports.generate,self.settings,authorized,progress)
                 self.item_result(job['id'],'export','succeeded',result);self.finish(job['id'],'cancelled_partial' if self.cancelled(job['id']) else 'succeeded')
             except Exception as exc:
                 failure=self.failure(exc)

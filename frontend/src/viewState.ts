@@ -29,6 +29,8 @@ const filters = [
   "review",
   "missing_lyrics",
   "missing_art",
+  "no_match",
+  "preparation",
   "published",
   "audit_errors",
   "audit_warnings",

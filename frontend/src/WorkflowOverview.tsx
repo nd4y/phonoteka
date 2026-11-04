@@ -34,6 +34,21 @@ const labels: Record<WorkflowAction, [string, string, string]> = {
     "Посмотрите причины ошибок чтения или проверки. Повторный поиск тегов не исправляет недоступное аудио.",
     "Разобрать ошибки",
   ],
+  no_match: [
+    "Совпадений пока нет",
+    "Откройте запись и проверьте название или данные вручную.",
+    "Посмотреть записи",
+  ],
+  prepare: [
+    "Остались необработанные записи",
+    "Выберите папку и запустите поиск недостающих данных.",
+    "Открыть подготовку",
+  ],
+  plan: [
+    "Остались неопубликованные записи",
+    "В плане видны готовые к сохранению файлы и причины, по которым другие ещё требуют проверки.",
+    "Открыть план сохранения",
+  ],
   ready: [
     "Готовые файлы доступны",
     "Откройте результат или подготовьте снимок с аудио и плейлистом для переноса на телефон.",
@@ -44,7 +59,11 @@ const labels: Record<WorkflowAction, [string, string, string]> = {
 export function WorkflowOverview({
   jobs,
   onAction,
+  canRecognize = true,
+  canAnalyze = true,
 }: {
+  canRecognize?: boolean;
+  canAnalyze?: boolean;
   jobs: Job[];
   onAction: (action: WorkflowAction) => void;
 }) {
@@ -78,7 +97,14 @@ export function WorkflowOverview({
   }, [load, jobStates]);
   const counts = report?.counts || {};
   const { ready, total, percent } = publicationProgress(counts);
-  const next = nextCollectionAction(counts, jobs);
+  const next = nextCollectionAction(
+    {
+      ...counts,
+      recognition_pending: canRecognize ? counts.recognition_pending : 0,
+      metadata_pending: canAnalyze ? counts.metadata_pending : 0,
+    },
+    jobs,
+  );
   const [title, detail, action] = labels[next];
   const n = (value: number | null | undefined) =>
     value == null ? "-" : value.toLocaleString("ru-RU");
@@ -139,7 +165,7 @@ export function WorkflowOverview({
                 <small>Открыть всю очередь проверки, включая ошибки</small>
               </span>
             </button>
-            <button onClick={() => onAction("guide")}>
+            <button onClick={() => onAction("no_match")}>
               <Search size={22} />
               <strong>{n(counts.no_match)}</strong>
               <span>Поиск без совпадений</span>

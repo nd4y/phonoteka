@@ -168,6 +168,14 @@ def plan_item(settings, row, *, verify=False):
     pub = meta.get('publication')
     relative = pub['relative_path'] if pub else intake.publication_relative(row['relative_path'], meta)
     gate = lyrics_review.publication_gate(settings, row) if row['is_current'] else {'state': 'blocked', 'reasons': ['track_no_longer_current']}
+    from . import comparison
+    reasons = list(gate['reasons'])
+    if meta.get('format') == 'cue' or meta.get('cue_album_image'):
+        reasons.append('cue_read_only')
+    if row['is_current'] and comparison.publication_choice(settings,row['id']) != row['id']:
+        reasons.append('preferred_copy_selected')
+    if reasons != gate['reasons']:
+        gate = {**gate,'state':'blocked','reasons':reasons}
     target = settings.publication_root / 'Ready' / relative
     actual = None
     integrity = 'not_checked'
@@ -184,7 +192,7 @@ def plan_item(settings, row, *, verify=False):
         integrity = 'unsafe_or_unavailable'
     stale = bool(pub) and (pub['sha256'] != row['sha256'] or not row['is_current'])
     action = 'add' if not pub else 'stale_ready' if stale else 'unchanged'
-    if pub and pub['sha256'] != row['sha256'] and row['is_current']:
+    if pub and row['is_current'] and (pub['sha256'] != row['sha256'] or (gate.get('state') == 'passed' and (pub.get('profile'),pub.get('review_version')) != (gate.get('profile'),gate.get('review_version')))):
         action = 'replace'
     if integrity in {'conflict', 'missing', 'unsafe_or_unavailable', 'untracked_destination'} or (exists and not pub):
         action = 'conflict'
@@ -210,9 +218,14 @@ def plan_item(settings, row, *, verify=False):
 def install(app, settings):
     @app.get('/api/publication/plan')
     def plan(request: Request, page: int = Query(default=1, ge=1), page_size: int = Query(default=30, ge=1, le=100),
-             stale_only: bool = False):
+             stale_only: bool = False, accepted_only: bool = False):
         security.require_session(request, settings, owner_only=True)
         where = "json_extract(metadata,'$.publication.sha256') IS NOT NULL AND (is_current=0 OR json_extract(metadata,'$.publication.sha256')<>sha256)" if stale_only else "(is_current=1 OR json_extract(metadata,'$.publication.sha256') IS NOT NULL)"
+        if accepted_only:
+            where += """ AND is_current=1 AND EXISTS(SELECT 1 FROM settings s WHERE s.key='lyrics_review:'||tracks.id
+                AND json_extract(s.value,'$.accepted_revision')=tracks.sha256
+                AND (json_extract(metadata,'$.publication.sha256') IS NOT tracks.sha256 OR
+                     json_extract(metadata,'$.publication.review_version') IS NOT json_extract(s.value,'$.version')))"""
         total = db.fetchone(settings.db_path, 'SELECT COUNT(*) AS count FROM tracks WHERE ' + where)['count']
         rows = db.fetchall(settings.db_path, 'SELECT * FROM tracks WHERE ' + where + ' ORDER BY relative_path,id LIMIT ? OFFSET ?', (page_size, (page - 1) * page_size))
         return {'items': [plan_item(settings, row) for row in rows], 'page': page, 'page_size': page_size, 'total': total,

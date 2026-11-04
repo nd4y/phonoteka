@@ -1,5 +1,8 @@
 """Verified Ready snapshots, portable playlists and revision-specific delivery receipts."""
+import hashlib
+import io
 import json
+import zipfile
 import os
 from pathlib import Path
 import tempfile
@@ -18,10 +21,13 @@ def manifest(settings,identity):
     try:media._no_links(path)
     except media.MediaError:raise security.error(404,'export_missing','Экспорт не найден')
     if not path.is_file() or path.stat().st_size>10*1024**2:raise security.error(404,'export_missing','Экспорт не найден')
-    return json.loads(path.read_text(encoding='utf-8'))
+    document = json.loads(path.read_text(encoding='utf-8'))
+    if document.get('id') != identity:
+        raise security.error(409, 'export_conflict', 'Идентификатор снимка изменился')
+    return document
 
 
-def generate(settings,authorize=lambda:None):
+def generate(settings,authorize=lambda:None,progress=None):
     from . import comparison
     entries=[];seen=publication_paths.Index();aliases={}
     for row in db.fetchall(settings.db_path,"SELECT id,relative_path,sha256,metadata FROM tracks WHERE is_current=1 AND json_extract(metadata,'$.publication.sha256') IS NOT NULL ORDER BY relative_path"):
@@ -59,7 +65,8 @@ def generate(settings,authorize=lambda:None):
         stage=Path(tmp)/'snapshot';media._make_directory(stage)
         # Copies belong to this export generation. Never use hard links: later
         # external edits of Ready must not change a delivery already in progress.
-        for entry in entries:
+        if progress:progress(0,len(entries))
+        for copied, entry in enumerate(entries,1):
             authorize()
             source=media._validate(settings.publication_root/'Ready'/entry['path'],settings.roots)
             media._expect(source,entry['sha256'])
@@ -68,6 +75,7 @@ def generate(settings,authorize=lambda:None):
             media._copy(source,target)
             media._expect(target,entry['sha256'])
             media._expect(source,entry['sha256'])
+            if progress:progress(copied,len(entries))
         for directory in sorted((p for p in stage.rglob('*') if p.is_dir()),key=lambda p:len(p.parts),reverse=True):
             media._sync_directory(directory)
         media._journal(stage/'manifest.json',document)
@@ -96,6 +104,45 @@ def generate(settings,authorize=lambda:None):
     return {'export_id':identity,'files':len(entries),'bytes':document['total_bytes']}
 
 
+class ZipSink(io.RawIOBase):
+    """Non-seekable ZIP destination drained after each input chunk."""
+    def __init__(self):
+        self.buffer = bytearray()
+
+    def write(self, data):
+        self.buffer.extend(data)
+        return len(data)
+
+    def drain(self):
+        data = bytes(self.buffer)
+        self.buffer.clear()
+        return data
+
+
+def archive(settings, doc):
+    root = settings.state_dir / 'exports' / doc['id']
+    sink = ZipSink()
+    with zipfile.ZipFile(sink, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as output:
+        for name, entry in [('manifest.json', None), ('playlist.m3u8', None)] + [
+                ('files/' + item['path'], item) for item in doc['files']]:
+            if entry:
+                provider_policy.require_export_entry(settings, entry)
+            path = root / name
+            media._no_links(path)
+            digest, size = hashlib.sha256(), 0
+            with media._file(path) as source, output.open(name, 'w', force_zip64=True) as target:
+                while chunk := source.read(1024 * 1024):
+                    size += len(chunk)
+                    if entry:
+                        digest.update(chunk)
+                    target.write(chunk)
+                    yield sink.drain()
+            if entry and (size != entry['size'] or digest.hexdigest() != entry['sha256']):
+                raise media.MediaError('export_conflict', 'Содержимое файла снимка изменилось')
+            yield sink.drain()
+    yield sink.drain()
+
+
 class ReceiptInput(BaseModel):
     model_config=ConfigDict(extra='forbid')
     export_id:str=Field(max_length=36)
@@ -110,21 +157,35 @@ def install(app,settings):
     def latest(request:Request):
         security.require_session(request,settings)
         identity=db.setting(settings.db_path,'latest_export')
-        if not identity:return {'export':None,'receipts':[]}
+        count = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM tracks WHERE is_current=1 AND json_extract(metadata,'$.publication.sha256')=sha256")["n"]
+        if not identity:return {'export':None,'receipts':[], 'ready_count':count}
         doc=manifest(settings,identity)
         receipts=db.fetchall(settings.db_path,'SELECT id,payload,created_at FROM delivery_receipts WHERE export_id=? ORDER BY created_at DESC',(identity,))
         current={r['id']:r['sha256'] for r in db.fetchall(settings.db_path,'SELECT id,sha256 FROM tracks WHERE is_current=1')}
         stale=sum(current.get(x['track_id'])!=x['sha256'] for x in doc['files'] if x.get('kind','audio')=='audio')
-        return {'export':doc,'stale_files':stale,'receipts':[{'id':r['id'],'created_at':r['created_at'],**json.loads(r['payload'])} for r in receipts]}
+        return {'export':doc,'ready_count':count,'stale_files':stale,'receipts':[{'id':r['id'],'created_at':r['created_at'],**json.loads(r['payload'])} for r in receipts]}
 
     @app.get('/api/exports/{identity}/{kind}')
     def download(request:Request,identity:str,kind:str):
         active=security.require_session(request,settings)
-        if kind not in {'manifest.json','playlist.m3u8'}:raise security.error(404,'export_missing','Файл экспорта не найден')
-        doc=manifest(settings,identity);path=settings.state_dir/'exports'/doc['id']/kind;media._no_links(path)
+        if kind not in {'manifest.json','playlist.m3u8','collection.zip'}:raise security.error(404,'export_missing','Файл экспорта не найден')
+        doc=manifest(settings,identity);path=settings.state_dir/'exports'/doc['id']/kind
         try:
             for entry in doc['files']:provider_policy.require_export_entry(settings,entry)
         except media.MediaError as exc:raise security.error(409,exc.code,exc.message) from exc
+        if kind == 'collection.zip':
+            if not doc.get('snapshot_available'):
+                raise security.error(409, 'export_missing', 'Создайте снимок с аудиофайлами')
+            index = publication_paths.Index()
+            try:
+                for entry in doc['files']:
+                    publication_paths.add(index, entry['path'])
+            except media.MediaError as exc:
+                raise security.error(409, exc.code, exc.message) from exc
+            return export_leases.LeasedStreamingResponse(archive(settings, doc), media_type='application/zip',
+                headers={'Content-Disposition': f'attachment; filename="Phonoteka-{identity}.zip"', 'Cache-Control':'no-store'},
+                settings=settings, export_id=doc['id'], lease_actor=export_leases.actor(active))
+        media._no_links(path)
         return export_leases.LeasedFileResponse(path,filename=kind,media_type='application/json' if kind.endswith('json') else 'audio/x-mpegurl',
             settings=settings,export_id=doc['id'],lease_actor=export_leases.actor(active))
 

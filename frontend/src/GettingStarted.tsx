@@ -1,13 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  ArrowLeft,
-  ArrowRight,
-  BookOpen,
-  CircleHelp,
-  FolderSearch,
-  RefreshCw,
-  Sparkles,
-} from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, CircleHelp, RefreshCw, Sparkles } from "lucide-react";
 import { api, messageFor } from "./api";
 import type { Job, Summary } from "./types";
 import type { Page } from "./viewState";
@@ -15,6 +7,7 @@ import { activeGuideJob, guideJobKind, guideSteps, recommendedGuideStep } from "
 import type { GuideStep } from "./guideState";
 import { countValue } from "./CollectionOverview";
 import "./GettingStarted.css";
+import { FolderPreparation, rememberedFolder } from "./FolderPreparation";
 
 const labels: Record<GuideStep, string> = {
   folder: "Папка",
@@ -61,6 +54,7 @@ type Props = {
   step: GuideStep;
   onStep: (step: GuideStep) => void;
   onBack: () => void;
+  onReviewPreparation: () => void;
   canBack: boolean;
   onStart: (kind: string, ids?: string[], params?: Record<string, unknown>) => Promise<Job | null>;
 };
@@ -75,7 +69,17 @@ export function GettingStarted({
   onStep,
   onBack,
   canBack,
+  onReviewPreparation,
 }: Props) {
+  const [folder, setFolder] = useState(rememberedFolder);
+  function chooseFolder(value: string) {
+    setFolder(value);
+    try {
+      sessionStorage.setItem("phonoteka-source-folder", value);
+    } catch {
+      /* Optional navigation preference. */
+    }
+  }
   const [counts, setCounts] = useState<Record<string, number> | null>(null);
   const [loading, setLoading] = useState(false),
     [error, setError] = useState(""),
@@ -147,7 +151,11 @@ export function GettingStarted({
         onNavigate("jobs");
         return;
       }
-      const job = await onStart(kind, [], kind === "scan" ? {} : { scope: "pending" });
+      const job = await onStart(
+        kind,
+        [],
+        kind === "scan" ? { folder } : { scope: "pending", folder },
+      );
       if (job && mounted.current) {
         setNotice("Задача добавлена. Можно открыть ее ход или перейти к другим разделам.");
         await load();
@@ -249,22 +257,13 @@ export function GettingStarted({
         )}
         {step === "folder" && (
           <>
-            <p className="guide-lead">
-              Проверьте, что нужные файлы находятся в подключенной музыкальной папке.
-            </p>
-            <div className="guide-folder">
-              <FolderSearch size={25} />
-              <div>
-                <strong>Папка, которую видит Фонотека</strong>
-                <code>{summary?.roots?.work || "Путь пока недоступен"}</code>
-              </div>
-            </div>
-            <p className="muted">
-              Это папка на сервере, а не на телефоне. Она подключается при установке. Выбор нового
-              источника из браузера пока недоступен. Файлы для телефона скачиваются или копируются
-              отдельно - облачной загрузки нет.
-            </p>
-            <FilePathPreview root={summary?.roots?.work} />
+            <FolderPreparation
+              summary={summary}
+              folder={folder}
+              choose={chooseFolder}
+              onJobs={() => onNavigate("jobs")}
+              onReview={onReviewPreparation}
+            />
             <details>
               <summary>Как подключить или изменить папку</summary>
               <p>
@@ -328,9 +327,9 @@ export function GettingStarted({
               </div>
             </div>
             <p className="muted">
-              Используется настроенный ShazamIO. Передается аудиоотпечаток; запросы подчиняются
-              существующим согласиям и лимитам. Совпадение еще не подтверждает релиз или версию
-              записи. Повторяем только незавершенный этап.
+              Используется настроенный ShazamIO и, при включённом подключении, AcoustID. Передается
+              аудиоотпечаток; запросы подчиняются существующим согласиям и лимитам. Совпадение еще
+              не подтверждает релиз или версию записи. Повторяем только незавершенный этап.
             </p>
           </>
         )}
@@ -424,6 +423,11 @@ export function GettingStarted({
               </button>
             </div>
           </>
+        )}
+        {guideJobKind(step) && (
+          <p className="muted small">
+            Выбранная папка: {folder || "вся музыкальная папка"}. Изменить её можно на первом шаге.
+          </p>
         )}
         {guideJobKind(step) && (
           <div className="guide-operation">

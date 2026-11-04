@@ -1,7 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FolderCheck, RefreshCw } from "lucide-react";
 import { api, messageFor } from "./api";
 
+import type { Job } from "./types";
+import { isActiveJob, jobStates } from "./jobs";
+type ExportJob = Job & {
+  export_progress?: { copied: number; total: number; eta_seconds: number | null };
+};
 type Snapshot = {
   snapshot_available?: boolean;
   id: string;
@@ -11,11 +16,90 @@ type Snapshot = {
 };
 type Status = {
   export: Snapshot | null;
+  ready_count: number;
   stale_files?: number;
   receipts: Array<{ id: string; device: string; state: string; created_at: string }>;
 };
 
-export function DeliveryPanel({ onExport, busy }: { onExport: () => void; busy: boolean }) {
+export function DeliveryPanel({
+  onExport,
+  busy,
+  onPlan,
+  revision,
+}: {
+  onExport: () => Promise<Job | null>;
+  busy: boolean;
+  onPlan: () => void;
+  revision: string;
+}) {
+  const [job, setJob] = useState<ExportJob | null>(null),
+    [starting, setStarting] = useState(false),
+    [watch, setWatch] = useState(0);
+  const [finished, setFinished] = useState("");
+  const admission = useRef(false);
+  const fetchSeq = useRef(0),
+    snapshotKey = useRef("");
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    async function follow() {
+      try {
+        let identity = sessionStorage.getItem("phonoteka-export-job");
+        if (!identity) {
+          const list = await api<{ items: Job[] }>(
+            "/jobs?active_only=true&kind=export_ready&page_size=1",
+            { signal: controller.signal },
+          );
+          identity = list.items[0]?.id || null;
+        }
+        if (!identity || controller.signal.aborted) return;
+        const latest = await api<ExportJob>("/jobs/" + encodeURIComponent(identity), {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setJob(latest);
+        sessionStorage.setItem("phonoteka-export-job", latest.id);
+        if (isActiveJob(latest)) {
+          timer = setTimeout(follow, 1600);
+          return;
+        }
+        if (latest.state === "succeeded") {
+          const id = latest.results?.find((r) => typeof r.export_id === "string")?.export_id;
+          setFinished(typeof id === "string" ? id : "");
+          await load();
+        }
+      } catch (e) {
+        if (!controller.signal.aborted) {
+          setError(messageFor(e));
+          timer = setTimeout(follow, 4500);
+        }
+      }
+    }
+    void follow();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [watch]);
+  async function startExport() {
+    if (admission.current || (job && isActiveJob(job))) return;
+    admission.current = true;
+    setStarting(true);
+    try {
+      const admitted = await onExport();
+      if (admitted) {
+        sessionStorage.setItem("phonoteka-export-job", admitted.id);
+        setJob(admitted);
+        setFinished("");
+        setWatch((n) => n + 1);
+      }
+    } catch (e) {
+      setError(messageFor(e));
+    } finally {
+      admission.current = false;
+      setStarting(false);
+    }
+  }
   const [status, setStatus] = useState<Status | null>(null),
     [error, setError] = useState("");
   const [device, setDevice] = useState("Poweramp"),
@@ -24,7 +108,16 @@ export function DeliveryPanel({ onExport, busy }: { onExport: () => void; busy: 
     [saving, setSaving] = useState(false);
   async function load() {
     try {
-      setStatus(await api<Status>("/exports/latest"));
+      const seq = ++fetchSeq.current;
+      const data = await api<Status>("/exports/latest");
+      if (seq !== fetchSeq.current) return;
+      const id = data.export?.id || "";
+      if (snapshotKey.current !== id) {
+        snapshotKey.current = id;
+        setChecksums({});
+        setChecked(false);
+      }
+      setStatus(data);
       setError("");
     } catch (problem) {
       setError(messageFor(problem));
@@ -32,9 +125,10 @@ export function DeliveryPanel({ onExport, busy }: { onExport: () => void; busy: 
   }
   useEffect(() => {
     void load();
-  }, []);
+  }, [revision]);
   async function importFile(file?: File) {
     if (!file) return;
+    const captured = snapshotKey.current;
     try {
       if (file.size > 2 * 1024 * 1024) throw Error("Отчет превышает 2 МиБ");
       const doc = JSON.parse(await file.text());
@@ -43,6 +137,7 @@ export function DeliveryPanel({ onExport, busy }: { onExport: () => void; busy: 
             doc.files.map((item: { path: string; sha256: string }) => [item.path, item.sha256]),
           )
         : doc;
+      if (captured !== snapshotKey.current) return;
       setChecksums(hashes);
       setChecked(false);
       setError("");
@@ -76,6 +171,20 @@ export function DeliveryPanel({ onExport, busy }: { onExport: () => void; busy: 
     poweramp_owner_verified: "Poweramp проверен вручную",
   };
   const snapshot = status?.export;
+  const exportButton = (
+    <button
+      className={snapshot?.snapshot_available ? "button secondary" : "button primary"}
+      disabled={busy || starting || (!!job && isActiveJob(job))}
+      onClick={() => void startExport()}
+    >
+      <FolderCheck size={18} />
+      {starting || (job && isActiveJob(job))
+        ? "Готовим файлы…"
+        : snapshot
+          ? "Подготовить новый снимок"
+          : "Подготовить файлы для переноса"}
+    </button>
+  );
   return (
     <section className="panel settings-panel delivery-panel">
       <div className="panel-heading">
@@ -91,58 +200,98 @@ export function DeliveryPanel({ onExport, busy }: { onExport: () => void; busy: 
           <RefreshCw size={18} />
         </button>
       </div>
-      <p>
-        Подготовьте отдельный снимок готовой коллекции. Проверка сохраненных версий выполняется
-        перед экспортом; последующие изменения не затронут этот снимок.
-      </p>
-      <button className="button primary" disabled={busy} onClick={onExport}>
-        <FolderCheck size={18} />
-        Подготовить файлы для переноса
-      </button>
+      {status && status.ready_count === 0 && (
+        <div>
+          <p>
+            Пока нет опубликованных файлов. В плане можно принять версии для сохранения и увидеть,
+            что ещё нужно проверить.
+          </p>
+          <button className="button primary" onClick={onPlan}>
+            Открыть план сохранения
+          </button>
+        </div>
+      )}
+      {status && status.ready_count > 0 && !snapshot?.snapshot_available && exportButton}
+      {job && (
+        <div role="status">
+          <strong>Подготовка снимка · {jobStates[job.state] || job.state}</strong>
+          {isActiveJob(job) && job.export_progress ? (
+            <p>
+              Скопировано {job.export_progress.copied} из {job.export_progress.total} ·{" "}
+              {Math.floor((100 * job.export_progress.copied) / (job.export_progress.total || 1))}%
+              {job.export_progress.eta_seconds != null
+                ? " · осталось около " + job.export_progress.eta_seconds + " с"
+                : ""}
+            </p>
+          ) : isActiveJob(job) ? (
+            <p>Проверяем состав и размер файлов.</p>
+          ) : job.error ? (
+            <p>{job.error}</p>
+          ) : null}
+          {finished && finished !== snapshot?.id && (
+            <a
+              className="button secondary"
+              href={"/api/exports/" + finished + "/collection.zip"}
+              download
+            >
+              Скачать результат этой задачи
+            </a>
+          )}
+        </div>
+      )}
       {error && (
         <p role="alert" className="warning-text">
           {error}
         </p>
       )}
-      {status && !snapshot && (
+      {status && status.ready_count > 0 && !snapshot && (
         <p className="muted small">
-          Снимка пока нет. Сначала сохраните проверенные треки в готовую коллекцию, затем
-          подготовьте файлы для переноса.
+          Нажмите «Подготовить файлы для переноса». Здесь появится ссылка для скачивания.
         </p>
       )}
       {snapshot && (
         <>
           <div className="delivery-path">
             <strong>
-              {snapshot.files.length} файлов · {(snapshot.total_bytes / 1024 ** 2).toFixed(1)} МиБ
+              Файлов: {snapshot.files.length} ·{" "}
+              {snapshot.total_bytes < 1024 ** 2
+                ? Math.ceil(snapshot.total_bytes / 1024) + " КиБ"
+                : (snapshot.total_bytes / 1024 ** 2).toFixed(1) + " МиБ"}
             </strong>
             <p className="muted small">
               Снимок от {new Date(snapshot.created_at).toLocaleString("ru-RU")}
             </p>
-            <p>Каталог внутри хранилища приложения:</p>
-            <code>state/exports/{snapshot.id}/</code>
           </div>
-          <p>
-            Скопируйте весь каталог снимка с сервера или скачайте файлы ниже. На телефоне сохраните{" "}
-            <code>playlist.m3u8</code> рядом с папкой <code>files</code>, сохранив вложенные пути.
-            Один плейлист не содержит музыку.
-          </p>
-          <div className="button-row">
-            <a
-              className="button secondary"
-              href={`/api/exports/${snapshot.id}/playlist.m3u8`}
-              download
-            >
-              Скачать плейлист
-            </a>
-            <a
-              className="button subtle"
-              href={`/api/exports/${snapshot.id}/manifest.json`}
-              download
-            >
-              Контрольные суммы
-            </a>
-          </div>
+          {snapshot.snapshot_available && (
+            <>
+              <a
+                className="button primary"
+                href={"/api/exports/" + snapshot.id + "/collection.zip"}
+                download
+              >
+                Скачать коллекцию ZIP
+              </a>
+              <ol>
+                <li>Скопируйте ZIP на телефон и распакуйте целиком.</li>
+                <li>
+                  В Poweramp добавьте распакованную папку в музыкальную библиотеку. Плейлист
+                  откроется вместе с аудиофайлами.
+                </li>
+              </ol>
+              {status && status.ready_count > 0 && exportButton}
+            </>
+          )}
+          <details>
+            <summary>Плейлист и контрольные суммы</summary>
+            <div className="button-row">
+              <a href={"/api/exports/" + snapshot.id + "/playlist.m3u8"} download>
+                Скачать плейлист
+              </a>
+              <a href={"/api/exports/" + snapshot.id + "/manifest.json"} download>
+                Скачать манифест SHA-256
+              </a>
+            </div>
+          </details>
           {!!status?.stale_files && (
             <p className="warning-text">
               После создания снимка изменились версии {status.stale_files} файлов. Для переноса
@@ -184,33 +333,38 @@ export function DeliveryPanel({ onExport, busy }: { onExport: () => void; busy: 
                 onChange={(event) => setDevice(event.target.value)}
               />
             </label>
-            <label>
-              Отчет SHA256, рассчитанный на устройстве
-              <input
-                type="file"
-                accept="application/json,.json"
-                onChange={(event) => void importFile(event.target.files?.[0])}
-              />
-            </label>
-            <p className="muted small">
-              Загружено контрольных сумм: {Object.keys(checksums).length}. Без отчета можно отметить
-              только факт копирования.
-            </p>
-            <label>
-              <input
-                type="checkbox"
-                disabled={!Object.keys(checksums).length}
-                checked={checked}
-                onChange={(event) => setChecked(event.target.checked)}
-              />{" "}
-              Проверил теги, обложку, строки, перемотку и громкость в Poweramp офлайн
-            </label>
+            <details>
+              <summary>Сверить файлы устройства по SHA-256</summary>
+              <label>
+                Отчет SHA256, рассчитанный на устройстве
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={(event) => void importFile(event.target.files?.[0])}
+                />
+              </label>
+              <p className="muted small">
+                Загружено контрольных сумм: {Object.keys(checksums).length}. Без отчета можно
+                отметить только факт копирования.
+              </p>
+              <label>
+                <input
+                  type="checkbox"
+                  disabled={!Object.keys(checksums).length}
+                  checked={checked}
+                  onChange={(event) => setChecked(event.target.checked)}
+                />{" "}
+                Проверил теги, обложку, строки, перемотку и громкость в Poweramp офлайн
+              </label>
+            </details>
             <button
               className="button secondary"
               disabled={saving || !device.trim()}
               onClick={() => void save()}
             >
-              Сохранить результат проверки
+              {Object.keys(checksums).length
+                ? "Сохранить результат проверки"
+                : "Отметить копирование"}
             </button>
             {status?.receipts.map((receipt) => (
               <p key={receipt.id} className="small">

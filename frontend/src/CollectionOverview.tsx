@@ -10,7 +10,8 @@ import {
 } from "lucide-react";
 import "./CollectionOverview.css";
 
-export type CollectionFilter = "all" | "missing_art" | "missing_lyrics" | "audit_errors";
+export type CollectionFilter =
+  "all" | "missing_art" | "missing_lyrics" | "audit_errors" | "no_match" | "preparation";
 type Props = {
   counts: Readonly<Record<string, number>>;
   onBrowse?: (filter: CollectionFilter) => void;

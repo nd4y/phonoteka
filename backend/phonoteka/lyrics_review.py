@@ -63,7 +63,10 @@ def document(row):
 
 def load(conn, track_id):
     row = conn.execute('SELECT value FROM settings WHERE key=?', ('lyrics_review:' + track_id,)).fetchone()
-    return json.loads(row['value']) if row else {'version': 0, 'profile': 'lyrics_required', 'reason': '',
+    if row:
+        return json.loads(row['value'])
+    preference = conn.execute("SELECT value FROM settings WHERE key=?", ('preparation_profile:' + track_id,)).fetchone()
+    return {'version': 0, 'profile': preference['value'] if preference else 'lyrics_required', 'reason': '',
                                                'instrumental_confirmed': False, 'decisions': {},
                                                'listened_sections': [], 'accepted_revision': None}
 
