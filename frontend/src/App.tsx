@@ -1,3 +1,4 @@
+import { requestId } from "./api";
 import { reviewNextAction } from "./reviewNextAction";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
@@ -371,6 +372,60 @@ export default function App() {
   const [dirty, setDirty] = useState(false);
   const [policyDirty, setPolicyDirty] = useState(false);
   const [showReports, setShowReports] = useState(false);
+  const [writtenTrack, setWrittenTrack] = useState<{ id: string; name: string } | null>(null);
+  const [focusSection, setFocusSection] = useState<{ id: string; kind: "quality" | "plan" } | null>(
+    null,
+  );
+  const [reviewVersion, setReviewVersion] = useState(0);
+  const qualityElement = useRef<HTMLDetailsElement>(null),
+    planElement = useRef<HTMLDetailsElement>(null);
+  const publicationRevision =
+    jobs
+      .filter(
+        (job) =>
+          job.kind === "publish" ||
+          job.kind === "audit" ||
+          job.kind === "apply" ||
+          job.kind === "rollback_ready",
+      )
+      .slice(0, 4)
+      .map((job) => job.id + job.state)
+      .join("|") + reviewVersion;
+  useEffect(() => {
+    if (!focusSection) return;
+    const node =
+      focusSection.kind === "plan" && page === "ready"
+        ? planElement.current
+        : focusSection.kind === "quality" && page === "review" && selected?.id === focusSection.id
+          ? qualityElement.current
+          : null;
+    if (node) {
+      node.open = true;
+      node.querySelector("summary")?.focus({ preventScroll: true });
+      node.scrollIntoView?.({ block: "start" });
+      setFocusSection(null);
+    }
+  }, [page, selected?.id, focusSection]);
+  function showPlan() {
+    navigate("ready");
+    setFocusSection({ kind: "plan", id: "" });
+  }
+  async function fixTrack(id: string, reason = "accepted_file_revision_required") {
+    if (await openTrack({ id }, "review", { context: { search: "", filter: "all" } })) {
+      if (
+        ![
+          "missing_title",
+          "missing_artist",
+          "missing_album",
+          "missing_cover",
+          "critical_file_conflict",
+          "cue_read_only",
+          "possible_mix_requires_manual_review",
+        ].includes(reason)
+      )
+        setFocusSection({ kind: "quality", id });
+    }
+  }
   const pendingReviewWrites = useRef(
     new Map<string, { job: Job; nextId: string | null; nextPage: number }>(),
   );
@@ -1050,6 +1105,7 @@ export default function App() {
           return;
         }
         appliedKey = key;
+        setWrittenTrack({ id: track.id, name: track.relative_path });
         if (nextId && nextPage !== pageNumber) {
           // Applying the last item of a filtered page can move the next item
           // onto that page. Keep the editor and the visible queue together.
@@ -1092,7 +1148,7 @@ export default function App() {
     try {
       const job = await api<Job>("/jobs", {
         method: "POST",
-        headers: { "Idempotency-Key": crypto.randomUUID() },
+        headers: { "Idempotency-Key": requestId() },
         body: JSON.stringify({ kind, track_ids: ids, params }),
       });
       setNotice(`${jobNames[kind] || kind}: задача добавлена в очередь.`);
@@ -1388,6 +1444,27 @@ export default function App() {
                 </button>
               </div>
             )}
+            {writtenTrack && (
+              <div className="notice info">
+                <div>
+                  <strong>Рабочий файл записан</strong>
+                  <p>{writtenTrack.name}</p>
+                  <button
+                    className="button secondary"
+                    onClick={() => void fixTrack(writtenTrack.id)}
+                  >
+                    Проверить и добавить в готовую коллекцию
+                  </button>
+                </div>
+                <button
+                  className="icon-button"
+                  aria-label="Скрыть переход к записанному файлу"
+                  onClick={() => setWrittenTrack(null)}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            )}
             {summary?.read_only && (
               <div className="notice warning">
                 <LockKeyhole size={20} />
@@ -1420,6 +1497,7 @@ export default function App() {
                       ? browseCollection("published", "ready")
                       : navigate(next)
                 }
+                onReviewPreparation={() => browseCollection("preparation", "review")}
                 onStart={submitJob}
               />
             )}
@@ -1492,6 +1570,8 @@ export default function App() {
                     ["all", "Все записи"],
                     ["review", "Нужно проверить"],
                     ["missing_art", "Без обложки"],
+                    ["no_match", "Поиск без совпадений"],
+                    ["preparation", "Последняя подготовленная папка"],
                     ["missing_lyrics", "Без текста"],
                     ["audit_errors", "Ошибки"],
                   ].map(([key, label]) => (
@@ -1714,8 +1794,15 @@ export default function App() {
                             }}
                           />
                         </details>
-                        <details className="panel policy-details">
-                          <summary>Приемка текста и профиль публикации</summary>
+                        <details className="panel policy-details" ref={qualityElement}>
+                          <summary>Проверить профиль и добавить в готовую коллекцию</summary>
+                          <button
+                            className="button secondary"
+                            disabled={busy || dirty || reviewDirty || !summary?.capabilities.audit}
+                            onClick={() => void submitJob("audit", [selected.id])}
+                          >
+                            Проверить декодирование аудио
+                          </button>
                           <LyricsReviewPanel
                             key={selected.id + selected.sha256}
                             track={selected}
@@ -1729,15 +1816,22 @@ export default function App() {
                                 : undefined
                             }
                             onChanged={() => {
+                              setReviewVersion((n) => n + 1);
                               void loadTracks();
                             }}
                           />
-                        </details>
-                        <details className="panel policy-details">
-                          <summary>Готовая версия и восстановление</summary>
                           <PublicationPanel
                             trackId={selected.id}
-                            disabled={busy || dirty || policyDirty || reviewDirty || settingsDirty}
+                            revision={publicationRevision}
+                            onFix={(id, reason) => void fixTrack(id, reason)}
+                            disabled={
+                              busy ||
+                              dirty ||
+                              policyDirty ||
+                              reviewDirty ||
+                              settingsDirty ||
+                              !summary?.capabilities.publish
+                            }
                             onJobQueued={() => {
                               void loadStatus();
                             }}
@@ -1776,6 +1870,9 @@ export default function App() {
             )}
             {page === "jobs" && (
               <JobsView
+                onOpenTrack={(id) =>
+                  void openTrack({ id }, "review", { context: { search: "", filter: "all" } })
+                }
                 jobs={jobs}
                 refresh={loadStatus}
                 onCancel={async (id) => {
@@ -1788,7 +1885,12 @@ export default function App() {
             )}
             {page === "ready" && (
               <>
-                <DeliveryPanel busy={busy} onExport={() => void submitJob("export_ready")} />
+                <DeliveryPanel
+                  busy={busy}
+                  revision={publicationRevision}
+                  onPlan={showPlan}
+                  onExport={() => submitJob("export_ready")}
+                />
                 <details className="panel policy-details">
                   <summary>Обложки и тексты рядом с аудио текущей страницы</summary>
                   <SidecarPublicationPanel
@@ -1799,10 +1901,12 @@ export default function App() {
                     }}
                   />
                 </details>
-                <details className="panel policy-details">
+                <details ref={planElement} className="panel policy-details">
                   <summary>План сохранения и история версий</summary>
                   <PublicationPanel
-                    disabled={busy}
+                    revision={publicationRevision}
+                    onFix={(id, reason) => void fixTrack(id, reason)}
+                    disabled={busy || !summary?.capabilities.publish}
                     onJobQueued={() => {
                       void loadStatus();
                     }}
@@ -1838,7 +1942,7 @@ export default function App() {
                         ? "Перейдите на предыдущую страницу."
                         : search.trim()
                           ? "Измените или очистите поисковый запрос."
-                          : "Проверьте записи в «Коллекции», затем сохраните готовые версии через «План сохранения и история версий». После этого они появятся здесь."
+                          : "Откройте план сохранения выше. Выберите принятые записи или перейдите к исправлению причин блокировки."
                     }
                   />
                   <Pagination
@@ -1853,11 +1957,18 @@ export default function App() {
             {page === "reports" && (
               <>
                 <WorkflowOverview
+                  canRecognize={summary?.capabilities.recognition}
+                  canAnalyze={summary?.capabilities.metadata_search}
                   jobs={jobs}
                   onAction={(action) => {
                     if (action === "review") browseCollection("review", "review");
                     else if (action === "errors") browseCollection("audit_errors");
-                    else
+                    else if (action === "no_match") browseCollection("no_match");
+                    else if (action === "plan") showPlan();
+                    else if (action === "prepare") {
+                      navigate("guide");
+                      setGuideStep("folder");
+                    } else
                       navigate(action === "jobs" ? "jobs" : action === "ready" ? "ready" : "guide");
                   }}
                 />
@@ -2828,14 +2939,6 @@ function TrackEditor({
               Проверить аудио
             </button>
             <button
-              className="button secondary"
-              onClick={() => void onJob("publish")}
-              disabled={busy || changed || !writable || !summary?.capabilities.publish}
-            >
-              <FolderCheck size={17} />
-              Сохранить в готовую коллекцию
-            </button>
-            <button
               className="button subtle"
               onClick={() => {
                 if (
@@ -3195,7 +3298,7 @@ function LyricsEditor({
           <button
             className="button subtle"
             disabled={disabled}
-            onClick={() => update([...lines, { id: crypto.randomUUID(), time: null, text: "" }])}
+            onClick={() => update([...lines, { id: requestId(), time: null, text: "" }])}
           >
             <Plus size={17} />
             Добавить строку

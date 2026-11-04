@@ -150,11 +150,16 @@ def public_job(settings: Settings, row: dict, detail=False, activity=None):
     payload=json.loads(row['payload'])
     result['retry_at']=payload.get('retry_at') if row['stage'] in {'waiting_provider','waiting_storage'} else None
     result['pause_requested']=bool(payload.get('pause_requested'))
+    if row['kind']=='export_ready': result['export_progress']=payload.get('export_progress')
     result['authorization']=automation.public_authorization(row,payload)
     result.update(activity if activity is not None else job_activity.summaries(settings, [row])[row['id']])
     if detail:
-        items = db.fetchall(settings.db_path, "SELECT item_key,state,result FROM job_items WHERE job_id=? ORDER BY item_key LIMIT 10000", (row["id"],))
-        result["results"] = [{"track_id": item["item_key"], "state": item["state"], **json.loads(item["result"])} for item in items]
+        items = db.fetchall(settings.db_path, """SELECT j.item_key,j.state,j.result,t.id AS track_id,t.relative_path
+            FROM job_items j LEFT JOIN tracks t ON t.id=COALESCE(json_extract(j.result,'$.track_id'),j.item_key)
+            WHERE j.job_id=? ORDER BY j.item_key LIMIT 10000""", (row["id"],))
+        result["results"] = [{"track_id": item["item_key"], "state": item["state"], **json.loads(item["result"]),
+                              "catalog_id": item["track_id"], "item_state": item["state"],
+                              "relative_path": item["relative_path"] or (item["item_key"] if row["kind"] == "scan" else None)} for item in items]
     return result
 
 
@@ -196,12 +201,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Фонотека API", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
-    from . import automation,scheduling,exports,operations,observability
+    from . import automation,scheduling,exports,operations,observability,preparation,work_folders
     observability.install(app,settings)
     webhooks.install(app,settings)
     provider_attempts.install(app,settings)
     automation.install(app,settings)
     scheduling.install(app,settings)
+    preparation.install(app,settings)
     exports.install(app,settings)
     comparison.install(app,settings)
     provider_policy.install(app,settings)
@@ -352,6 +358,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "review": "(t.status IN ('needs_review','conflict','error','missing') OR EXISTS (SELECT 1 FROM proposals p WHERE p.track_id=t.id AND p.input_sha256=t.sha256))",
             "missing_lyrics": "json_extract(t.metadata,'$.format')<>'cue' AND COALESCE(json_extract(t.metadata,'$.lrc'),'')=''",
             "missing_art": "json_extract(t.metadata,'$.format')<>'cue' AND COALESCE(json_extract(t.metadata,'$.has_art'),0)=0",
+            "preparation": """EXISTS (SELECT 1 FROM job_items i WHERE i.job_id=(SELECT json_extract(value,'$.scan_id')
+                FROM settings WHERE key='folder_preparation') AND json_extract(i.result,'$.track_id')=t.id)""",
+            "no_match": "EXISTS (SELECT 1 FROM analyses a WHERE a.track_id=t.id AND a.input_sha256=t.sha256 AND json_extract(a.payload,'$.state')='no_match')",
             "published": "json_extract(t.metadata,'$.publication.sha256')=t.sha256",
         }
         filters.update({name: f"phonoteka_audit_filter(t.metadata,t.sha256,t.status,'{name}')=1"
@@ -597,8 +606,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return public_job(settings, existing)
         if body.kind in {"apply", "rollback", "publish", "rollback_ready", "publish_sidecars", "extract_cue", "normalize_audio"} and not settings.writable:
             raise security.error(409, "read_only", "Запись отключена до проверки конфигурации хранилища")
-        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id"}:
+        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
+        folder = body.params.get("folder", "")
+        if "folder" in body.params:
+            if body.kind not in {"scan", "recognize", "analyze"} or (body.kind != "scan" and body.params.get("scope") != "pending"):
+                raise security.error(422, "invalid_scope", "Папка доступна для этапов подготовки")
+            try:
+                work_folders.directory(settings.work_root, folder)
+            except media.MediaError as exc:
+                raise security.error(409, exc.code, exc.message) from exc
         if 'publication_plan_id' in body.params and (body.kind != 'publish' or not re.fullmatch('[a-f0-9-]{36}', str(body.params['publication_plan_id']))):
             raise security.error(422, 'invalid_params', 'План публикации относится только к publish')
         if {'release_review_id','release_review_version'} & body.params.keys():
@@ -654,7 +671,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     LEFT JOIN analyses a ON a.track_id=t.id AND a.input_sha256=t.sha256
                     WHERE t.is_current=1 AND t.status NOT IN ('error','missing')
                     AND json_extract(t.metadata,'$.format')<>'cue'
-                    AND COALESCE(json_extract(t.metadata,'$.cue_album_image'),0)=0 ORDER BY t.id"""):
+                    AND COALESCE(json_extract(t.metadata,'$.cue_album_image'),0)=0 AND instr(t.relative_path,?)=1 ORDER BY t.id""", (folder + '/' if folder else '',)):
                     if body.params['scope']=='pending':
                         if body.kind=='youtube':
                             m=json.loads(row['metadata']).get('youtube',{})
@@ -664,7 +681,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         else:
                             sources={s.get('provider'):s.get('state') for s in json.loads(row['payload'] or '{}').get('sources',[])}
                             wanted=['shazam'] if body.kind=='recognize' else ['local_replaygain'] if body.kind=='replaygain' else ['musicbrainz','lrclib']
-                            if all(sources.get(p) in {'candidates','candidate','no_match','fingerprint_match'} for p in wanted):continue
+                            done={'candidates','candidate','no_match','fingerprint_match'}
+                            if body.kind=='recognize' and sources.get('acoustid') in done:continue
+                            if all(sources.get(p) in done for p in wanted):continue
                     ids.append(row['id'])
                     if len(ids)==10000:break
             if body.params['scope']=='pending' and not ids:
@@ -685,6 +704,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     raise security.error(409, "idempotency_conflict", "Этот ключ уже использован для другого запроса")
                 existing = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (previous["job_id"],)).fetchone())
                 return public_job(settings, existing)
+            if body.kind == "export_ready":
+                existing = conn.execute("""SELECT * FROM jobs WHERE kind='export_ready'
+                    AND state IN ('queued','running','paused','waiting_authorization') AND auth_epoch=?
+                    AND json_extract(payload,'$.auth_token_id') IS ? ORDER BY created_at DESC LIMIT 1""",
+                    (active["auth_epoch"], active.get("api_token_id"))).fetchone()
+                if existing:
+                    conn.execute("INSERT INTO idempotency VALUES(?,?,?,?,?)", (scope,key,request_hash,existing["id"],now))
+                    return public_job(settings, dict(existing))
             items = []
             for track_id in ids:
                 track = conn.execute("SELECT * FROM tracks WHERE id=? AND is_current=1", (track_id,)).fetchone()

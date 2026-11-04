@@ -2,12 +2,17 @@ import type { Job } from "./types";
 import { isActiveJob } from "./jobs";
 import { countValue } from "./CollectionOverview";
 
-export type WorkflowAction = "guide" | "jobs" | "review" | "ready" | "errors";
+export type WorkflowAction =
+  "guide" | "jobs" | "review" | "ready" | "errors" | "plan" | "no_match" | "prepare";
 export function nextCollectionAction(counts: Record<string, number>, jobs: Job[]): WorkflowAction {
-  if (!counts.files) return "guide";
   if (jobs.some(isActiveJob)) return "jobs";
+  if (!counts.files) return "guide";
   if (counts.current_proposals > 0) return "review";
   if (counts.audit_errors > 0) return "errors";
+  if (counts.audio_files > counts.published_current) {
+    if (counts.recognition_pending > 0 || counts.metadata_pending > 0) return "prepare";
+    return "plan";
+  }
   if (counts.published_current > 0) return "ready";
   return "guide";
 }

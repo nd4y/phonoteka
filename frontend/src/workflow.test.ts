@@ -27,6 +27,12 @@ describe("collection workflow", () => {
     expect(nextCollectionAction(counts, [{ state: "waiting_provider" } as Job])).toBe("jobs");
     expect(nextCollectionAction({ files: 0 }, [])).toBe("guide");
   });
+  it("keeps partially published libraries on their remaining work", () => {
+    const counts = { files: 6, audio_files: 6, current_proposals: 0, published_current: 1 };
+    expect(nextCollectionAction(counts, [])).toBe("plan");
+    expect(nextCollectionAction({ ...counts, metadata_pending: 2 }, [])).toBe("prepare");
+    expect(nextCollectionAction({ ...counts, published_current: 6 }, [])).toBe("ready");
+  });
   it("does not loop or leave the captured review queue", () => {
     expect(nextReviewId(["a", "b", "c"], "b")).toBe("c");
     expect(nextReviewId(["a", "b"], "b")).toBeNull();

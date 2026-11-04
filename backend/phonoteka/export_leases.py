@@ -7,7 +7,7 @@ import time
 import uuid
 
 from fastapi import HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import db, media, retention, security
@@ -66,7 +66,7 @@ def safe_view(value):
     return {key: value[key] for key in ('id', 'export_id', 'purpose', 'created_at', 'expires_at')}
 
 
-class LeasedFileResponse(FileResponse):
+class _LeasedResponse:
     def __init__(self, *args, settings, export_id, lease_actor, **kwargs):
         super().__init__(*args, **kwargs)
         self.settings, self.export_id, self.lease_actor = settings, export_id, lease_actor
@@ -112,6 +112,14 @@ class LeasedFileResponse(FileResponse):
                 # or delete data. The OS lock covers the complete live response.
                 with suppress(Exception):
                     await asyncio.to_thread(release, self.settings, lease['id'], self.lease_actor)
+
+
+class LeasedFileResponse(_LeasedResponse, FileResponse):
+    pass
+
+
+class LeasedStreamingResponse(_LeasedResponse, StreamingResponse):
+    pass
 
 
 class StartInput(BaseModel):

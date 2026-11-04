@@ -5,7 +5,7 @@ import uuid
 
 from fastapi import Request
 from pydantic import BaseModel,ConfigDict,Field
-from . import db,security,input_readiness
+from . import db,security,input_readiness,preparation
 
 KINDS={'scan','analyze','recognize','replaygain'}
 
@@ -46,6 +46,7 @@ def install(app,settings):
 
 def tick(settings,now=None):
     if db.setting(settings.db_path,'recovery_required','false')=='true':return
+    preparation.tick(settings)
     now=time.time() if now is None else now
     with db.transaction(settings.db_path) as conn:
         row=conn.execute("SELECT value FROM settings WHERE key='schedule'").fetchone()

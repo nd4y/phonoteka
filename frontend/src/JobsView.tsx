@@ -39,7 +39,12 @@ import "./JobsView.css";
 import { useBackLayer } from "./useAppHistory";
 import { ProcessingStages } from "./ProcessingStages";
 
-type Props = { jobs: Job[]; refresh: () => Promise<void>; onCancel: (id: string) => Promise<void> };
+type Props = {
+  onOpenTrack?: (id: string) => void;
+  jobs: Job[];
+  refresh: () => Promise<void>;
+  onCancel: (id: string) => Promise<void>;
+};
 const dateOf = (value: string) =>
   new Date(value).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
 const timeOf = (value: string) =>
@@ -66,7 +71,25 @@ function ErrorNotice({ message }: { message: string }) {
   );
 }
 
-function JobResults({ job }: { job: Job }) {
+function JobResults({ job, onOpenTrack }: { job: Job; onOpenTrack?: (id: string) => void }) {
+  const filterKey = "phonoteka-job-problems:" + job.id;
+  const [problemsOnly, setProblemsOnly] = useState(() => {
+    try {
+      return sessionStorage.getItem(filterKey) === "yes";
+    } catch {
+      return false;
+    }
+  });
+  function filterProblems(value: boolean) {
+    setProblemsOnly(value);
+    setLimit(40);
+    try {
+      sessionStorage.setItem(filterKey, value ? "yes" : "no");
+    } catch {
+      /* Optional preference. */
+    }
+  }
+  const [limit, setLimit] = useState(40);
   const [detail, setDetail] = useState<Job | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -89,6 +112,12 @@ function JobResults({ job }: { job: Job }) {
       if (mounted.current) setLoading(false);
     }
   }
+  const rows = (detail?.results || []).filter(
+    (row) =>
+      !problemsOnly ||
+      !["succeeded", "skipped"].includes(String(row.item_state ?? row.state)) ||
+      ["no_match", "needs_review"].includes(String(row.state)),
+  );
   return (
     <details
       className="job-results"
@@ -110,7 +139,61 @@ function JobResults({ job }: { job: Job }) {
             Результаты отдельных попыток. Наличие результата не означает, что все теги найдены и
             подтверждены.
           </p>
-          <pre className="diagnostic">{JSON.stringify(detail.results, null, 2)}</pre>
+          <label>
+            <input
+              type="checkbox"
+              checked={problemsOnly}
+              onChange={(event) => filterProblems(event.target.checked)}
+            />{" "}
+            Только требующие внимания
+          </label>
+          {rows.length === 0 && <p>Для этого фильтра результатов нет.</p>}
+          <ul className="job-active-files">
+            {rows.slice(0, limit).map((row, index) => {
+              const id = typeof row.catalog_id === "string" ? row.catalog_id : "";
+              const state = String(row.state || row.item_state);
+              const reason =
+                typeof row.message === "string"
+                  ? row.message
+                  : typeof row.code === "string"
+                    ? row.code
+                    : "";
+              return (
+                <li key={id || index}>
+                  <div>
+                    <strong>
+                      {String(
+                        row.relative_path ||
+                          (job.kind === "export_ready" ? "Снимок коллекции" : "Операция задания"),
+                      )}
+                    </strong>
+                    <small>
+                      {(
+                        {
+                          no_match: "Совпадений нет",
+                          candidates: "Найдены варианты",
+                          needs_review: "Требует проверки",
+                        } as Record<string, string>
+                      )[state] ||
+                        jobStates[state] ||
+                        state}
+                      {reason ? " · " + reason : ""}
+                    </small>
+                  </div>
+                  {id && onOpenTrack && (
+                    <button className="button subtle" onClick={() => onOpenTrack(id)}>
+                      Открыть запись
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          {rows.length > limit && (
+            <button className="button subtle" onClick={() => setLimit(limit + 40)}>
+              Показать ещё
+            </button>
+          )}
           <button className="button subtle" onClick={() => void load()}>
             <RefreshCw size={15} />
             Обновить результаты
@@ -123,7 +206,7 @@ function JobResults({ job }: { job: Job }) {
   );
 }
 
-export function JobsView({ jobs, refresh, onCancel }: Props) {
+export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
   const [selectedId, setSelectedId] = useState(
     () =>
       jobs.find((job) => job.id === rememberedJob())?.id ||
@@ -510,6 +593,14 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
                             <FileAudio size={17} aria-hidden="true" />
                             <div>
                               <strong title={item.filename}>{item.filename}</strong>
+                              {item.track_id && onOpenTrack && (
+                                <button
+                                  className="button subtle"
+                                  onClick={() => onOpenTrack(item.track_id!)}
+                                >
+                                  Открыть запись
+                                </button>
+                              )}
                               <small>
                                 {item.action}
                                 {item.started_at ? ` · с ${timeOf(item.started_at)}` : ""}
@@ -531,7 +622,7 @@ export function JobsView({ jobs, refresh, onCancel }: Props) {
                     <ActivityLog key={job.id} events={events} />
                   </div>
                 )}
-                <JobResults job={job} />
+                <JobResults job={job} onOpenTrack={onOpenTrack} />
               </article>
             );
           })}

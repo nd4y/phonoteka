@@ -49,26 +49,7 @@ interface Props {
   onDirtyChange?: (dirty: boolean) => void;
   onChanged?: () => void;
 }
-const reasonNames: Record<string, string> = {
-  critical_file_conflict: "Критический конфликт или ошибка файла",
-  provider_export_denied: "Источник не разрешает экспорт данных",
-  current_decode_audit_required: "Нужен актуальный успешный аудит декодирования",
-  accepted_file_revision_required: "Ревизия файла ещё не принята вручную",
-  decode_audit_failed: "Декодирование текущего файла завершилось ошибкой или формат не поддержан",
-  missing_title: "Не указано название",
-  missing_artist: "Не указан исполнитель",
-  missing_album: "Не указан альбом",
-  missing_cover: "Нет обложки",
-  lyrics_required: "Текст не найден",
-  complete_synced_lyrics_required: "Нужны допустимые таймкоды всех строк",
-  line_listening_review_required: "Не все содержательные строки проверены по аудио",
-  start_middle_end_listening_required: "Не проверены начало, середина и конец",
-  owner_instrumental_confirmation_required: "Инструментальность требует явного подтверждения",
-  instrumental_has_lyrics_conflict: "У инструментала есть содержательный текст: устраните конфликт",
-  owner_exception_reason_required: "Укажите причину исключения",
-  invalid_lyrics: "Некорректный LRC",
-  invalid_timing: "Недопустимый порядок или диапазон времён",
-};
+import { reasonNames } from "./publicationReasons";
 const sectionNames: Record<Section, string> = { start: "Начало", middle: "Середина", end: "Конец" };
 
 export default function LyricsReviewPanel({
