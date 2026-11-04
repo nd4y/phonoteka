@@ -16,7 +16,12 @@ TTL = 1800
 
 
 def actor(active):
-    return active.get('api_token_id') or 'owner:' + hashlib.sha256(active['token_hash'].encode()).hexdigest()
+    if active.get('api_token_id'):
+        return active['api_token_id']
+    # Explicit open mode has a single principal and issues no session cookie.
+    if active['token_hash'] is None:
+        return 'open:' + str(active['auth_epoch'])
+    return 'owner:' + hashlib.sha256(active['token_hash'].encode()).hexdigest()
 
 
 def available(settings, export_id):

@@ -253,7 +253,10 @@ export function DeliveryPanel({
         <>
           <div className="delivery-path">
             <strong>
-              {snapshot.files.length} файлов · {(snapshot.total_bytes / 1024 ** 2).toFixed(1)} МиБ
+              Файлов: {snapshot.files.length} ·{" "}
+              {snapshot.total_bytes < 1024 ** 2
+                ? Math.ceil(snapshot.total_bytes / 1024) + " КиБ"
+                : (snapshot.total_bytes / 1024 ** 2).toFixed(1) + " МиБ"}
             </strong>
             <p className="muted small">
               Снимок от {new Date(snapshot.created_at).toLocaleString("ru-RU")}

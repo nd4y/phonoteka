@@ -5,6 +5,8 @@ import io
 import json
 import zipfile
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from phonoteka import db, preparation
@@ -12,13 +14,14 @@ from phonoteka.app import create_app
 from test_backend import settings, authenticated, synthetic, seed, job, drain, accept_publication_review
 
 
-def test_folder_to_portable_download(settings):
-    settings = replace(settings, read_only=False, storage_verified=True, external_metadata=False, external_fingerprints=False)
+@pytest.mark.parametrize("authenticated_mode", [True, False])
+def test_folder_to_portable_download(settings, authenticated_mode):
+    settings = replace(settings, read_only=False, storage_verified=True, external_metadata=False, external_fingerprints=False, auth_enabled=authenticated_mode)
     album=settings.work_root / "Артист_100%"
     album.mkdir()
     audio=synthetic(settings).rename(album / "Трек.flac")
     with TestClient(create_app(settings),base_url=settings.app_url) as client:
-        headers=authenticated(client,settings)
+        headers=(authenticated(client,settings) if authenticated_mode else {"Origin":settings.app_url, "X-CSRF-Token":client.get("/api/auth/session").json()["csrf_token"]})
         outside,_=seed(settings,"Соседний/не включать.mp3")
         old=db.fetchone(settings.db_path,"SELECT * FROM tracks WHERE id=?",(outside,))
         (settings.work_root / "link").symlink_to(settings.source_root,target_is_directory=True)
