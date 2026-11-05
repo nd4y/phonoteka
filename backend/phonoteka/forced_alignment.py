@@ -21,9 +21,10 @@ def align_with_provider(samples,text,words,duration,provider):
     """All client-side independent anchors and timing gates apply to every engine."""
     preliminary=align_lines(text,words,duration)
     if len(preliminary['lines'])>500:raise ValueError('Alignment supports up to 500 lines')
-    lines=[{**line,'start_ms':None,'end_ms':None,'state':'unaligned','reason':'independent_anchor_missing'} for line in preliminary['lines']]
+    lines=[{**line,'start_ms':None,'end_ms':None,'state':'unaligned','reason':'independent_anchor_missing' if line['text'].strip() else 'empty_line'} for line in preliminary['lines']]
     groups=[];group=[]
     for index,line in enumerate(preliminary['lines']):
+        if not line['text'].strip():continue
         if line['state']!='anchored':
             if group:groups.append(group);group=[]
             continue
@@ -61,5 +62,6 @@ def align_with_provider(samples,text,words,duration,provider):
             if ordered and first_time>=previous and last_time>first_time and sum(probabilities)/len(probabilities)>=.5 and abs(first_time-line['start_ms']/1000)<=1.5:
                 lines[index].update(start_ms=round(first_time*1000),end_ms=round(last_time*1000),state='aligned',reason='requires_listening',probability=round(sum(probabilities)/len(probabilities),4),minimum_token_probability=round(min(probabilities),4),low_probability_words=sum(p<.15 for p in probabilities))
                 previous=first_time
-    complete=bool(lines) and all(x['state']=='aligned' for x in lines)
-    return {**preliminary,'method':'whisper_attention_dtw_with_independent_asr_anchors_v1','lines':lines,'coverage':sum(x['state']=='aligned' for x in lines)/max(1,len(lines)),'complete':complete,'state':'needs_review' if complete else 'partially_aligned','automatic_acceptance':False,'music_quality_gate':'not_validated','lrc':serialize_lrc(lines) if complete else None}
+    content=[line for line in lines if line['text'].strip()]
+    complete=bool(content) and all(x['state']=='aligned' for x in content)
+    return {**preliminary,'method':'whisper_attention_dtw_with_independent_asr_anchors_v1','lines':lines,'coverage':sum(x['state']=='aligned' for x in content)/max(1,len(content)),'complete':complete,'state':'needs_review' if complete else 'partially_aligned','automatic_acceptance':False,'music_quality_gate':'not_validated','lrc':serialize_lrc(content) if complete else None}

@@ -8,13 +8,28 @@ import tempfile
 from . import cue,media
 
 
+def recovery_eligible(metadata):
+    audit=metadata.get('audit') or {}
+    # Legacy failed audits lack stream inventory. An MP3 elementary stream is
+    # single-audio by format; execution still probes the actual input again.
+    streams=metadata.get('audio_stream_count',audit.get('audio_stream_count',1 if metadata.get('format')=='mp3' else None))
+    return bool(metadata.get('write_supported') and not metadata.get('input_error')
+        and metadata.get('format')!='cue' and not metadata.get('cue_album_image')
+        and metadata.get('sha256') and audit.get('sha256')==metadata['sha256']
+        and audit.get('state')=='failed' and audit.get('failure_stage')=='decode' and streams==1)
+
+
 def export(source,metadata,settings,authorize=lambda:None):
     media._mutation_supported();source=media._validate(source,settings.roots)
     media._expect(source,metadata['sha256'])
     if metadata.get('input_error') or metadata.get('cue_album_image') or metadata.get('format')=='cue':
         raise media.MediaError('unsupported_input','Нужен отдельный декодируемый аудиофайл')
     relative=source.relative_to(settings.work_root).as_posix()
-    identity=hashlib.sha256(json.dumps(['writable-pcm-v1',relative,metadata['sha256']]).encode()).hexdigest()
+    recovery=recovery_eligible(metadata)
+    policy='decoded-recovery-pcm-v1' if recovery else 'writable-pcm-v1'
+    if recovery and media.probe_audio(source)['audio_stream_count']!=1:
+        raise media.MediaError('unsupported_input','Восстановление требует одного аудиопотока')
+    identity=hashlib.sha256(json.dumps([policy,relative,metadata['sha256']]).encode()).hexdigest()
     destination=settings.work_root/'.phonoteka-derived'/identity
     media._validate(destination/'manifest.json',settings.roots,write=True,missing=True)
     if destination.exists():
@@ -53,10 +68,17 @@ def export(source,metadata,settings,authorize=lambda:None):
         # Preserve only complete timed text; plain text remains in the source and catalog.
         media._edit(target,tags,metadata.get('lrc') or None,art)
         if pcm_hash(target)!=expected:raise media.MediaError('audio_changed','Запись тегов изменила PCM')
+        verified=media.audit_audio(target,settings.roots)
+        if verified.get('state')!='passed':
+            raise media.MediaError('derivative_audit_failed','Производная копия не прошла полную проверку декодирования')
         entry={'relative_path':(destination/target.name).relative_to(settings.work_root).as_posix(),'sha256':media.sha256_file(target),
                'source':relative,'source_sha256':metadata['sha256'],'pcm_sha256':expected.decode().split('=')[-1],
                'profile':{'extension':ext,'codec':codec,'pcm_codec':pcm,'rate':rate,'channels':channels},'kind':'writable_derivative'}
-        result={'identity':identity,'policy':'writable-pcm-v1','files':[entry],'state':'committed','source_metadata':{'plain_lyrics_preserved_in_source':bool(metadata.get('lyrics'))}}
+        if recovery:
+            entry['recovery']={'source_error':metadata['audit'].get('error'),'source_failure_stage':'decode',
+                'source_sha256':metadata['sha256'],'limitation':'preserves_decoded_pcm_not_missing_or_damaged_original_samples',
+                'human_acceptance':False}
+        result={'identity':identity,'policy':policy,'files':[entry],'state':'committed','source_metadata':{'plain_lyrics_preserved_in_source':bool(metadata.get('lyrics'))}}
         media._expect(source,metadata['sha256']);authorize()
         with media._file(target) as handle:os.fsync(handle.fileno())
         media._journal(stage/'manifest.json',result);media._sync_directory(stage)

@@ -94,6 +94,7 @@ def _public_proposal(row):
 
 
 def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, load_proposal=True):
+    from . import derivatives
     meta = json.loads(row["metadata"])
     if load_proposal:
         proposal = db.fetchone(settings.db_path, "SELECT * FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", (row["id"],))
@@ -102,6 +103,7 @@ def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, 
         "filename": Path(row["relative_path"]).name,
         "sha256": row["sha256"], "revision": row["sha256"], "status": row["status"],
         "hash_verified_at": meta.get('hash_verified_at'),
+        "can_recover": settings.writable and row['status'] != 'missing' and not recording_review.possible_mix(meta,row['sha256']) and derivatives.recovery_eligible(meta),
         "can_write": settings.writable and not meta.get('cue_album_image') and not recording_review.possible_mix(meta,row['sha256']) and bool(meta.get("write_supported", meta.get("format", "").lower() in {"mp3", "flac"})) and row["status"] != "missing",
         "tags": {key: (value[0] if value else "") if isinstance(value, list) else value for key, value in meta.get("tags", {}).items()},
         "tag_values": meta.get("tags", {}), "has_art": bool(meta.get("has_art", False)),
@@ -720,8 +722,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 meta = json.loads(track['metadata'])
                 if body.kind in {'apply','publish','publish_sidecars','normalize_audio'} and recording_review.possible_mix(meta,track['sha256']):
                     raise security.error(409,'possible_mix_requires_manual_review','Составная запись не получает теги отдельной песни; подтвердите тип записи вручную')
-                if body.kind=='normalize_audio' and (meta.get('write_supported') or meta.get('input_error')):
-                    raise security.error(409,'native_or_invalid','Файл уже поддерживает запись либо поврежден')
+                if body.kind=='normalize_audio':
+                    from . import derivatives
+                    if meta.get('input_error') or (meta.get('write_supported') and not derivatives.recovery_eligible(meta)):
+                        raise security.error(409,'native_or_invalid','Нужен формат без записи тегов либо файл с актуальной ошибкой декодирования одного аудиопотока')
                 if body.kind=='extract_cue':
                     if meta.get('format')!='cue' or meta.get('cue',{}).get('errors'):
                         raise security.error(409,'invalid_cue','Нужен корректный CUE с доступными аудиофайлами')
