@@ -1,6 +1,6 @@
 # phonoteka
 
-After CUE extraction or audio recovery, collection progress counts the prepared files. Retained inputs are listed separately: [prepared files and sources](docs/en/prepared-sources.md).
+After CUE extraction or audio recovery, collection progress counts the prepared files. Retained inputs are listed separately, and pending-search counts use the same expiry rules as launching a job: [prepared files and sources](docs/en/prepared-sources.md).
 
 CI checks installed media tools and uses the official Ubuntu HTTPS repositories when installation is needed. See [installation and timeout diagnosis](docs/en/ci-codecs.md); package signatures and all media tests remain required.
 

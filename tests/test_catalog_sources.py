@@ -1,11 +1,12 @@
 """Completed recovery/CUE outputs must not leave their inputs in the work queue."""
 from dataclasses import replace
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
-from phonoteka import catalog_sources, db, preparation
+from phonoteka import catalog_sources, db, preparation, provider_policy
 from phonoteka.app import create_app
 from test_backend import settings, client, authenticated, seed, job
 
@@ -118,3 +119,33 @@ def test_bulk_and_folder_preparation_use_outputs_without_requeuing_inputs(settin
             queued=job(client,headers,kind,params={'scope':'all'})
             payload=json.loads(db.fetchone(settings.db_path,'SELECT payload FROM jobs WHERE id=?',(queued['id'],))['payload'])
             assert [item['track_id'] for item in payload['items']]==children
+
+
+@pytest.mark.parametrize('provider,data_type,kind,counter,match',[
+    ('shazam','metadata','recognize','recognition_pending','fingerprint_match'),
+    ('lrclib','lyrics','analyze','metadata_pending','candidates'),
+])
+def test_pending_report_matches_launch_scope_for_expired_results(client,settings,provider,data_type,kind,counter,match):
+    headers=authenticated(client,settings)
+    tid,sha=seed(settings,'file.mp3')
+    scan=job(client,headers,'scan')['id']
+    with db.transaction(settings.db_path) as conn:
+        conn.execute('INSERT INTO job_items VALUES(?,?,?,?)',(scan,'file.mp3','succeeded',
+            db.encode({'track_id':tid,'sha256':sha})))
+        policy=provider_policy.defaults(provider,data_type)
+        policy.update(allow_cache=True,cache_ttl=60)
+        key=f'provider_usage:{provider}:{data_type}'
+        conn.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',(key,db.encode(policy)))
+    for age,cache_allowed,expected in [(0,True,0),(120,True,1),(120,False,0)]:
+        with db.transaction(settings.db_path) as conn:
+            policy['allow_cache']=cache_allowed
+            conn.execute('UPDATE settings SET value=? WHERE key=?',(db.encode(policy),key))
+            usage={**policy,'origin':'provider_acquired','acquired_at':time.time()-age}
+            sources=[{'provider':p,'state':match if p==provider else 'no_match'} for p in ('musicbrainz','lrclib','shazam')]
+            candidate={'id':'fixture:1','provider':provider,'kind':'lyrics' if data_type=='lyrics' else 'metadata','usage':usage}
+            candidate.update({'lrc':'[00:01.00]Line'} if data_type=='lyrics' else {'tags':{'title':'Song'}})
+            payload={'sources':sources,'candidates':[candidate]}
+            conn.execute('INSERT OR REPLACE INTO analyses VALUES(?,?,?,?)',(tid,sha,db.encode(payload),db.utcnow()))
+            scope=preparation.pending(conn,scan,kind,'')
+        counts=client.get('/api/reports/collection').json()['counts']
+        assert counts[counter]==len(scope)==expected

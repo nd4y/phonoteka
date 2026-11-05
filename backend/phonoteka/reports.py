@@ -54,7 +54,7 @@ def summary(settings, conn=None):
         eligible=row['status'] not in ('error','missing') and not meta.get('cue_album_image',False)
         counts['eligible_files']+=eligible
         if eligible:
-            sources={s.get('provider'):s.get('state') for s in json.loads(row['analysis_payload']).get('sources',[])} if current else {}
+            sources=provider_policy.source_states(conn,json.loads(row['analysis_payload'])) if current else {}
             done={'candidates','candidate','no_match','fingerprint_match'}
             counts['metadata_pending']+=any(sources.get(provider) not in done for provider in ('musicbrainz','lrclib'))
             counts['recognition_pending']+=not any(sources.get(provider) in done for provider in ('shazam','acoustid'))
