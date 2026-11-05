@@ -6,6 +6,8 @@ Recovery does not publish files or resume network requests by itself. Mutating o
 
 An audio audit retains the successfully probed stream inventory even when decoding fails, so a single-stream FLAC can be considered for recovery. Invalid embedded artwork does not prevent creating a verified audio derivative: the original image remains in the preserved source, and the derivative manifest records that it was omitted. No missing audio samples or artwork are fabricated.
 
+The cover indicator validates the front image selected for playback using the same bounded JPEG/PNG decoder as image import. A picture frame containing an HTML error page or an unsupported format such as GIF is reported as missing usable artwork with `artwork_warning=invalid_cover`. The bytes and other picture slots are preserved. Rescan existing records to refresh the indicator; metadata analysis can then look for a replacement. This check does not change the image format or approve a proposed cover.
+
 Alignment checks only the reference words and their inherited source restrictions. Expired tag or artwork proposals do not block unrelated lyrics. For permitted lyrics already embedded in a file, an HTTP cache TTL is not the lifetime of that file. Revoked permissions and inherited restrictions are still enforced at admission and execution. A pending lyrics proposal retains its cache TTL.
 
 Checks cover alignment admission/rejection, policy cleanup of queued references, the worker's repeated policy check, restart preservation, explicit resume without replaying a completed item, and retained cancellation and provider budgets. Synthetic checks do not establish musical timing accuracy.

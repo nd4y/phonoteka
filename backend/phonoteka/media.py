@@ -555,11 +555,19 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
         duration_source='native'
         if not 0<duration<float('inf'):
             duration=float(probe_audio(path).get('duration',0));duration_source='ffprobe_fallback'
+        artwork_warning = None
+        if has_art:
+            try:
+                _cover(_front_art(audio))
+            except MediaError as exc:
+                has_art = False
+                artwork_warning = exc.code
         return {"sha256": digest, "size": info.st_size, "mtime_ns": info.st_mtime_ns,
                 **intake.describe(path,audio), "duration": duration,'duration_source':duration_source,
                 "sample_rate": getattr(audio.info, 'sample_rate', None), "channels": getattr(audio.info, 'channels', None),
                 "bitrate": getattr(audio.info, 'bitrate', None), "bits_per_sample": getattr(audio.info, 'bits_per_sample', None),
-                "tags": tags, "has_art": has_art, "lyrics": lyrics, "lrc": lrc, "lyrics_warning": lyrics_warning,
+                "tags": tags, "has_art": has_art, "artwork_warning": artwork_warning,
+                "lyrics": lyrics, "lrc": lrc, "lyrics_warning": lyrics_warning,
                 "write_supported": write_supported, "write_block_reason": reason,
                 "audio_identity": None, "poweramp_verified": False, "slot_inventory": metadata_slots.inventory(audio)}
 
@@ -584,24 +592,24 @@ def read_art(path: str | Path, roots: Mapping[str, Any], *, slot=None) -> tuple[
             selected = metadata_slots.resolve(audio, slot, 'cover')
             data = metadata_slots.cover_data(audio, selected)
             return data, _cover(data)[0]
-        if isinstance(audio, (MP3, WAVE, AIFF)):
-            pictures = audio.tags.getall("APIC") if audio.tags else []
-        elif isinstance(audio, FLAC):
-            pictures = audio.pictures
-        elif isinstance(audio, formats.PROFILES):
-            data = formats.front(audio)
-            if data:
-                mime, _, _ = _cover(data)
-                return data, mime
+        data = _front_art(audio)
+        if data is None:
             return None
-        else:
-            return None
-        fronts = [picture for picture in pictures if picture.type == 3]
-        if not fronts:
-            return None
-        data = fronts[0].data
         mime, _, _ = _cover(data)
         return data, mime
+
+
+def _front_art(audio) -> bytes | None:
+    """Use the same front picture for inspection and playback, without rewriting it."""
+    if isinstance(audio, (MP3, WAVE, AIFF)):
+        pictures = audio.tags.getall("APIC") if audio.tags else []
+    elif isinstance(audio, FLAC):
+        pictures = audio.pictures
+    elif isinstance(audio, formats.PROFILES):
+        return formats.front(audio)
+    else:
+        return None
+    return next((picture.data for picture in pictures if picture.type == 3), None)
 
 
 def _cover(data: bytes) -> tuple[str, int, int]:
