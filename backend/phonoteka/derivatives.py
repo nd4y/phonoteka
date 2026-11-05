@@ -63,7 +63,15 @@ def export(source,metadata,settings,authorize=lambda:None):
         expected=pcm_hash(source)
         if pcm_hash(target)!=expected:raise media.MediaError('audio_changed','PCM производной копии отличается')
         tags={k:v for k,v in metadata.get('tags',{}).items() if k in media._TEXT_FRAMES or k in media._CUSTOM_FIELDS}
-        artwork=media.read_art(source,settings.roots) if metadata.get('has_art') else None
+        artwork_warning = None
+        try:
+            artwork=media.read_art(source,settings.roots) if metadata.get('has_art') else None
+        except media.MediaError as exc:
+            if exc.code != 'invalid_cover':
+                raise
+            artwork = None
+            artwork_warning = {'code':'invalid_cover_not_copied','source_preserved':True,
+                               'message':'Invalid embedded artwork remains in the preserved source'}
         art=artwork[0] if artwork else None
         # Preserve only complete timed text; plain text remains in the source and catalog.
         media._edit(target,tags,metadata.get('lrc') or None,art)
@@ -74,6 +82,8 @@ def export(source,metadata,settings,authorize=lambda:None):
         entry={'relative_path':(destination/target.name).relative_to(settings.work_root).as_posix(),'sha256':media.sha256_file(target),
                'source':relative,'source_sha256':metadata['sha256'],'pcm_sha256':expected.decode().split('=')[-1],
                'profile':{'extension':ext,'codec':codec,'pcm_codec':pcm,'rate':rate,'channels':channels},'kind':'writable_derivative'}
+        if artwork_warning:
+            entry['warnings'] = [artwork_warning]
         if recovery:
             entry['recovery']={'source_error':metadata['audit'].get('error'),'source_failure_stage':'decode',
                 'source_sha256':metadata['sha256'],'limitation':'preserves_decoded_pcm_not_missing_or_damaged_original_samples',

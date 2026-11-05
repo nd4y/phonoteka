@@ -390,6 +390,7 @@ def audit_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
     path = _validate(path, roots)
     digest = sha256_file(path)
     failure_stage = 'header'
+    info = None
     try:
         info = probe_audio(path)
         failure_stage = 'packets'
@@ -418,6 +419,7 @@ def audit_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                 "error": None, "failure_stage": None, "warnings": warnings, 'notes':notes, "signal": signal}
     except MediaError as exc:
         return {"state": "unsupported" if exc.code == "unsupported_format" else "failed", "sha256": digest,
+                **({key:info[key] for key in ('audio_stream_count','audio_streams','duration')} if info else {}),
                 "error": exc.code, "failure_stage": failure_stage, "warnings": [], "message": exc.message}
 
 
