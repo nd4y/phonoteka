@@ -14,6 +14,13 @@ if codecs_ready; then
 fi
 
 options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+if [[ -n "${CODEC_APT_SOURCES:-}" ]]; then
+  if [[ ! -r "$CODEC_APT_SOURCES" ]]; then
+    echo 'Configured CI package source list is unavailable.' >&2
+    exit 1
+  fi
+  options+=(-o "Dir::Etc::sourcelist=$CODEC_APT_SOURCES" -o Dir::Etc::sourceparts=-)
+fi
 packages=(ffmpeg libebur128-1 libchromaprint-tools)
 echo 'Installing media codecs using the runner package indexes.'
 if ! sudo timeout --kill-after=10s 180s apt-get "${options[@]}" install -y --no-install-recommends "${packages[@]}"; then
