@@ -4,6 +4,8 @@ After a worker crash, unfinished read jobs pause while retaining completed resul
 
 Recovery preserves the original audio file; invalid embedded artwork remains in that source and is explicitly recorded as omitted from the derivative.
 
+Scanning counts only validated JPEG/PNG artwork. HTML stored in an image frame and unsupported image formats produce a warning, do not increase the cover count, and do not prevent replacement lookup. Inspection preserves the original bytes.
+
 Owners can configure AcoustID in the UI: save, replace or remove an Application API key, enable recognition and test the connection. Chromaprint lookup supplements inconclusive Shazam results and produces review candidates. See [setup, transmitted data and limits](docs/en/acoustid.md).
 
 Recognition reports count each file outcome once; old AcoustID key-required markers do not become recognition errors after upgrading.

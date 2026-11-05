@@ -65,7 +65,7 @@ def export(source,metadata,settings,authorize=lambda:None):
         tags={k:v for k,v in metadata.get('tags',{}).items() if k in media._TEXT_FRAMES or k in media._CUSTOM_FIELDS}
         artwork_warning = None
         try:
-            artwork=media.read_art(source,settings.roots) if metadata.get('has_art') else None
+            artwork=media.read_art(source,settings.roots) if metadata.get('has_art') or metadata.get('artwork_warning') else None
         except media.MediaError as exc:
             if exc.code != 'invalid_cover':
                 raise

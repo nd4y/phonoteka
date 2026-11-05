@@ -392,6 +392,42 @@ def test_writer_guard_rejects_second_worker(tmp_path):
 @LINUX
 @TOOLS
 @pytest.mark.parametrize("extension", ["mp3", "flac"])
+@pytest.mark.parametrize("image_kind", ["html", "gif", "png"])
+def test_inspection_validates_front_art_without_mutating_source(make_audio, roots, extension, image_kind):
+    path = make_audio(extension)
+    raw = b"<html>upstream download failed</html>"
+    mime = "image/jpeg"
+    if image_kind in {"gif", "png"}:
+        output = io.BytesIO()
+        Image.new("RGB", (20, 20), "green").save(output, format=image_kind.upper())
+        raw = output.getvalue()
+        mime = "image/" + image_kind
+    if extension == "mp3":
+        audio = MP3(path)
+        audio.tags.add(APIC(encoding=3, mime=mime, type=3, desc="front", data=raw))
+    else:
+        audio = FLAC(path)
+        picture = Picture()
+        picture.type, picture.mime, picture.data = 3, mime, raw
+        audio.add_picture(picture)
+    audio.save()
+    before = path.read_bytes()
+    observed = media.inspect_audio(path, roots)
+    assert observed["has_art"] is (image_kind == "png")
+    assert observed["artwork_warning"] == (None if image_kind == "png" else "invalid_cover")
+    assert observed["write_supported"]
+    assert path.read_bytes() == before
+    if image_kind == "png":
+        assert media.read_art(path, roots) == (raw, mime)
+    else:
+        with pytest.raises(media.MediaError) as failure:
+            media.read_art(path, roots)
+        assert failure.value.code == "invalid_cover"
+
+
+@LINUX
+@TOOLS
+@pytest.mark.parametrize("extension", ["mp3", "flac"])
 def test_other_picture_slots_are_preserved(make_audio, roots, backup_dir, extension):
     path = make_audio(extension)
     back = cover_bytes("blue")
