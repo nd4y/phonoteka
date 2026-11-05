@@ -1,5 +1,7 @@
 # phonoteka
 
+CI checks installed media tools before contacting package repositories. See [installation and timeout diagnosis](docs/en/ci-codecs.md); all media tests remain required.
+
 ASR uses decoded sample duration for raw MP3 files with inaccurate header estimates. The result retains the reported estimate; the 30-minute limit is checked before contacting PC2. [Details and limits](docs/en/recovery-alignment.md).
 
 After a worker crash, unfinished read jobs pause while retaining completed results and provider budgets. ASR checks the actual reference words separately from tags and artwork: [recovery and alignment](docs/en/recovery-alignment.md).
