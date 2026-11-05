@@ -20,4 +20,4 @@ Record review offers one next action; the activity log provides search, a proble
 
 Sign-in is controlled by AUTH_ENABLED (enabled by default). [Configuration and restoring authentication](docs/en/authentication.md).
 
-Guided setup prepares a selected directory in the mounted music folder for review. Accepted revisions can be published through the plan and downloaded with the playlist in one ZIP. [Folder-to-collection workflow](docs/en/collection-workflow.md)
+Guided setup prepares a selected directory in the mounted music folder for review and refreshes expired search results. Accepted revisions can be published through the plan and downloaded with the playlist in one ZIP. [Folder-to-collection workflow](docs/en/collection-workflow.md)

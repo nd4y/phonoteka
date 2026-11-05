@@ -1,5 +1,7 @@
 # From a folder to organized music
 
+Preparation and the pending-files search include expired provider matches whose content is no longer available. A historical successful search does not make those files ready for review. Current usable results and completed searches without matches are reused. Provider permissions still apply to each new request.
+
 The four main sections are **Overview**, **Collection**, **Processing**, and **Ready files**. Settings are in the left menu above the account button. Help opens guided setup. Previously saved navigation, filters, and scroll positions remain available after refresh.
 
 1. **Overview** suggests the next action. Its result count refers to current audio revisions already published into the output collection. CUE documents are separate. Empty or unknown totals never imply 100% completion. Proposal, error, and missing-data counts may overlap.

@@ -878,9 +878,9 @@ class Worker:
             db.event(conn,'analysis_completed',{'track_id':item['track_id'],'state':result['state']})
         retry=[]
         for source in result['sources']:
+            if source['provider'] not in ({'shazam','acoustid'} if fingerprint else {'musicbrainz','lrclib','coverartarchive'}):continue
             if source.get('state') in {'recognition_attempt_budget_exhausted','recognition_identity_required'}:
                 raise media.MediaError(source['state'],'Бюджет распознавания этой аудиозаписи исчерпан или не подтверждена аудиоревизия; требуется ручное решение')
-            if source['provider'] not in ({'shazam','acoustid'} if fingerprint else {'musicbrainz','lrclib','coverartarchive'}):continue
             if source['state'] not in {'rate_limited','provider_cooldown','provider_unavailable','budget_exhausted'}:continue
             breaker=json.loads(db.setting(self.settings.db_path,'provider_breaker:'+source['provider'],'{}'))
             due=breaker.get('until',time.time()+60)

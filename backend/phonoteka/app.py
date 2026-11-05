@@ -679,7 +679,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             if body.params.get('youtube_search'):complete=complete and (m.get('linked_id') or m.get('search_state') in {'candidates','no_match','insufficient_query'} or m.get('candidates'))
                             if complete:continue
                         else:
-                            sources={s.get('provider'):s.get('state') for s in json.loads(row['payload'] or '{}').get('sources',[])}
+                            sources=provider_policy.source_states(conn,json.loads(row['payload'] or '{}'))
                             wanted=['shazam'] if body.kind=='recognize' else ['local_replaygain'] if body.kind=='replaygain' else ['musicbrainz','lrclib']
                             done={'candidates','candidate','no_match','fingerprint_match'}
                             if body.kind=='recognize' and sources.get('acoustid') in done:continue

@@ -308,6 +308,19 @@ def _clean_release_reviews(conn):
 CONTENT_FIELDS = {"tags", "lrc", "plain_lyrics", "cover", "title", "artist", "album", "release", "releases"}
 
 
+def source_states(conn, analysis):
+    """A previous match is complete only while its result remains usable."""
+    current = prepare_analysis(conn, analysis, register=False)
+    sources = {source.get("provider"): source.get("state") for source in current.get("sources", [])}
+    candidates = current.get("candidates", [])
+    unavailable = {candidate.get("provider") for candidate in candidates if candidate.get("transient_only")}
+    available = {candidate.get("provider") for candidate in candidates if not candidate.get("transient_only")}
+    for provider in unavailable - available:
+        if sources.get(provider) in {"candidates", "candidate", "fingerprint_match"}:
+            sources[provider] = "refresh_required"
+    return sources
+
+
 def prepare_analysis(conn, data, *, register=True, now=None):
     data = deepcopy(data)
     now = time.time() if now is None else now
