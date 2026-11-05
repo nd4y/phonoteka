@@ -1,3 +1,4 @@
+import json
 import subprocess
 from dataclasses import replace
 import pytest
@@ -38,8 +39,16 @@ def test_normalize_job_catalogs_lineage(settings):
 def test_decode_recovery_preserves_decodable_pcm_and_original_via_api(settings):
     cfg=replace(settings,read_only=False,storage_verified=True)
     path=cfg.work_root/'damaged.mp3'
-    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=2','-c:a','libmp3lame','-write_xing','0',str(path)],check=True)
-    with path.open('ab') as output:output.write(b'\xa5'*2048)
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=2','-c:a','libmp3lame','-b:a','128k','-write_xing','0',str(path)],check=True)
+    # Corrupt the side information inside a real frame. Trailing junk is
+    # ignored by newer FFmpeg demuxers and does not guarantee a decode failure.
+    packets=json.loads(subprocess.check_output(['ffprobe','-v','error','-select_streams','a:0',
+        '-show_packets','-show_entries','packet=pos','-of','json',str(path)]))['packets']
+    offset=int(packets[len(packets)//2]['pos'])
+    damaged=bytearray(path.read_bytes())
+    assert damaged[offset]==255 and damaged[offset+1]&254==250
+    damaged[offset+4:offset+21]=b'\xff'*17
+    path.write_bytes(damaged)
     original=media.sha256_file(path)
     with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
         headers=authenticated(client,cfg);job(client,headers,'scan');drain(cfg)
