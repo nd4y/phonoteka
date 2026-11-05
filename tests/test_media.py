@@ -67,6 +67,34 @@ def cover_bytes(color="red"):
     return buffer.getvalue()
 
 
+@pytest.mark.parametrize('diagnostic,rejected', [
+    (b'[mp3float @ 0x123] [error] big_values too big\n', True),
+    (b'[error] Error processing packet in decoder\n', True),
+    (b'[fatal] Decoder failed\n', True),
+    (b'[warning] Guessed Channel Layout for Input Stream #0.0 : mono\n', False),
+    (b'[mp3 @ 0x123] [warning] file name contains [error]\n', False),
+])
+def test_strict_decode_checks_error_severity_with_zero_exit(roots, monkeypatch, diagnostic, rejected):
+    path = roots['work'] / 'input.mp3'
+    path.write_bytes(b'fixture')
+    commands = []
+    def popen(command, *, stdout, stderr, **kwargs):
+        commands.append(command)
+        stderr.write(diagnostic)
+        return contextlib.nullcontext(SimpleNamespace(returncode=0, poll=lambda: 0))
+    monkeypatch.setattr(subprocess, 'Popen', popen)
+    if rejected:
+        with pytest.raises(media.MediaError, match='reported an error'):
+            media._process(path, 'ffmpeg', ['-v', 'warning', '-xerror', '-f', 'null', '-'])
+    else:
+        result = media._process(path, 'ffmpeg', ['-v', 'warning', '-xerror', '-f', 'null', '-'])
+        assert b'[warning]' not in result.stderr
+    assert commands[0][1:3] == ['-v', 'level+warning']
+    assert commands[0].count('-v') == 1
+    # Recovery deliberately decodes whatever remains and records its limitation.
+    assert media._process(path, 'ffmpeg', ['-f', 'null', '-']).stderr == diagnostic
+
+
 @TOOLS
 @pytest.mark.parametrize(("expression", "duration", "expected_warnings"), [
     ("0.25*sin(2*PI*440*t)", 1, set()),

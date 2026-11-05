@@ -32,6 +32,8 @@ The Review lyrics action focuses and reveals the line editor. Normal navigation 
 
 ## Decoder failures and alignment
 
+Strict verification checks both FFmpeg's exit code and error-level diagnostics. A decoding error cannot pass verification just because FFmpeg exits with code 0; ordinary warnings remain separate diagnostics.
+
 A current full-audit decoding failure for a single MP3 stream offers a readable copy. The conversion retains decoded audio as FLAC or PCM WAV, compares decoded PCM SHA-256 and fully audits the output. It preserves the source and records the recovery origin. Missing or damaged original samples are not restored; listening remains necessary. Unreadable headers and stale audit revisions do not qualify.
 
 ASR coverage and timing comparisons count lyric content only. Blank LRC markers retain their original times in diagnostics but receive no invented anchors. A complete candidate includes the content rows only and is offered only when every such row aligns. Partial results retain original times separately and produce no complete LRC. Human listening and Poweramp acceptance remain separate.
