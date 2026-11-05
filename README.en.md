@@ -1,5 +1,7 @@
 # phonoteka
 
+After CUE extraction or audio recovery, collection progress counts the prepared files. Retained inputs are listed separately: [prepared files and sources](docs/en/prepared-sources.md).
+
 CI checks installed media tools and uses the official Ubuntu HTTPS repositories when installation is needed. See [installation and timeout diagnosis](docs/en/ci-codecs.md); package signatures and all media tests remain required.
 
 ASR uses decoded sample duration for raw MP3 files with inaccurate header estimates. The result retains the reported estimate; the 30-minute limit is checked before contacting PC2. [Details and limits](docs/en/recovery-alignment.md).

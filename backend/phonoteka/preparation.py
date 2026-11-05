@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import db, media, provider_policy, security, webhooks, work_folders
+from . import catalog_sources, db, media, provider_policy, security, webhooks, work_folders
 
 KEY = "folder_preparation"
 STEPS = ("scan", "recognize", "analyze")
@@ -34,12 +34,14 @@ def pending(conn, scan, kind, cursor):
     # Freeze only files actually observed in this scan. Later full scans may
     # supersede observations, but can never introduce an unrelated directory.
     items = []
+    source_outputs=catalog_sources.completed_sources(conn)
     for row in conn.execute("""SELECT t.id,t.sha256,t.relative_path,a.payload FROM tracks t
         JOIN job_items j ON j.job_id=? AND j.item_key=t.relative_path AND j.state='succeeded'
         LEFT JOIN analyses a ON a.track_id=t.id AND a.input_sha256=t.sha256
         WHERE t.is_current=1 AND t.status NOT IN ('error','missing') AND t.id>?
         AND t.id=json_extract(j.result,'$.track_id') AND t.sha256=json_extract(j.result,'$.sha256') AND json_extract(t.metadata,'$.format')<>'cue'
         AND COALESCE(json_extract(t.metadata,'$.cue_album_image'),0)=0 ORDER BY t.id""", (scan, cursor)):
+        if row['id'] in source_outputs:continue
         sources = provider_policy.source_states(conn, json.loads(row["payload"] or "{}"))
         complete = (any(sources.get(p) in DONE for p in ("shazam","acoustid")) if kind == "recognize"
                     else all(sources.get(p) in DONE for p in ("musicbrainz","lrclib")))

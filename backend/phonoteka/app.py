@@ -30,7 +30,7 @@ from . import webhooks,provider_attempts
 from .config import Settings
 from . import publication
 from . import retention, export_leases
-from . import album_gain_policy, api_facades, audit_status, recording_review, input_readiness, automation
+from . import album_gain_policy, api_facades, audit_status, recording_review, input_readiness, automation, catalog_sources
 
 
 class LoginInput(BaseModel):
@@ -347,7 +347,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "capabilities": {"edit": True, "apply": writable, "publish": writable, "audit": True, "youtube": settings.youtube_enabled and not recovery, "metadata_search": settings.external_metadata and not recovery, "recognition": settings.external_fingerprints and not recovery, "cue_export": writable, "replaygain": not recovery, "asr": bool(settings.inference_url) and not recovery},
                 "roots": {"work": str(settings.work_root)}, "version": __version__}
 
-    def track_selection(search, filter):
+    def track_selection(search, filter, conn):
         clauses = ["t.is_current=1"]
         args = []
         if search:
@@ -370,15 +370,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if filter not in filters:
             raise security.error(422, "invalid_filter", "Неизвестный фильтр")
         clauses.append(filters[filter])
+        if filter not in {'all','cue'}:
+            completed=catalog_sources.completed_sources(conn)
+            if completed:
+                clauses.append('t.id NOT IN (SELECT value FROM json_each(?))')
+                args.append(json.dumps(list(completed)))
         return " AND ".join(clauses), args
 
     @app.get("/api/tracks")
     def tracks(request: Request, search: str = Query("", max_length=200), page: int = Query(1, ge=1),
                page_size: int = Query(50, ge=1, le=200), filter: str = Query("all")):
         security.require_session(request, settings)
-        where, args = track_selection(search, filter)
         with db.connect(settings.db_path) as conn:
             conn.execute('BEGIN')
+            where, args = track_selection(search, filter, conn)
             total = conn.execute(f"SELECT COUNT(*) AS n FROM tracks t WHERE {where}", args).fetchone()["n"]
             rows = conn.execute(f"SELECT t.* FROM tracks t WHERE {where} ORDER BY t.relative_path,t.id LIMIT ? OFFSET ?", (*args, page_size, (page-1)*page_size)).fetchall()
             ids=[row['id'] for row in rows]
@@ -390,10 +395,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def track_neighbors(request: Request, track_id: str, search: str = Query("", max_length=200), filter: str = Query("all")):
         security.require_session(request, settings)
         _track_row(settings, track_id)
-        where, args = track_selection(search, filter)
         # The same stable catalog ordering, across every page. Broken/missing files and
         # CUE documents are not playable neighbors; CUE children are navigated in UI.
-        row = db.fetchone(settings.db_path, f"""WITH catalog AS (
+        with db.connect(settings.db_path) as conn:
+            conn.execute('BEGIN')
+            where, args = track_selection(search, filter, conn)
+            row = conn.execute(f"""WITH catalog AS (
             SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.relative_path,t.id) AS catalog_position
             FROM tracks t WHERE {where}
         ), ordered AS (
@@ -402,7 +409,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             FROM catalog t WHERE json_extract(t.metadata,'$.format')<>'cue'
                 AND json_extract(t.metadata,'$.input_error') IS NULL AND t.status<>'missing'
             WINDOW w AS (ORDER BY t.relative_path,t.id)
-        ) SELECT * FROM ordered WHERE id=?""", (*args, track_id))
+        ) SELECT * FROM ordered WHERE id=?""", (*args, track_id)).fetchone()
         return dict(row) if row else {"id": track_id, "position": None, "catalog_position": None, "total": 0, "previous_id": None, "next_id": None}
 
     @app.get("/api/tracks/{track_id}")
@@ -669,11 +676,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Stream a single snapshot; apply the batch bound to pending files,
             # not to the first 10,000 catalog rows (which may all be complete).
             with db.connect(settings.db_path) as conn:
+                conn.execute('BEGIN')
+                completed=catalog_sources.completed_sources(conn)
                 for row in conn.execute("""SELECT t.id,t.metadata,a.payload FROM tracks t
                     LEFT JOIN analyses a ON a.track_id=t.id AND a.input_sha256=t.sha256
                     WHERE t.is_current=1 AND t.status NOT IN ('error','missing')
                     AND json_extract(t.metadata,'$.format')<>'cue'
                     AND COALESCE(json_extract(t.metadata,'$.cue_album_image'),0)=0 AND instr(t.relative_path,?)=1 ORDER BY t.id""", (folder + '/' if folder else '',)):
+                    if row['id'] in completed:continue
                     if body.params['scope']=='pending':
                         if body.kind=='youtube':
                             m=json.loads(row['metadata']).get('youtube',{})
