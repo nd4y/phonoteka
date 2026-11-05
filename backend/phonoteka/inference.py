@@ -65,16 +65,24 @@ def analysis_audio(source,body,info,load_samples=True):
     """Bounded PCM, original timebase, no remote media URL or decoder retry."""
     with tempfile.TemporaryDirectory(dir=body.get('_scratch_root',STATE)) as directory:
         pcm=Path(directory)/'analysis.wav'
-        media._process(source,'ffmpeg',['-nostdin','-map','0:a:0','-t',str(MAX_DURATION),'-ac','1','-ar','16000','-c:a','pcm_s16le','-fs',str(MAX_PCM_BYTES),str(pcm)],timeout=600)
+        # Decode one extra second so an understated header cannot silently turn
+        # an oversized input into an apparently complete, budget-sized result.
+        media._process(source,'ffmpeg',['-nostdin','-map','0:a:0','-t',str(MAX_DURATION+1),'-ac','1','-ar','16000','-c:a','pcm_s16le','-fs',str(MAX_PCM_BYTES),str(pcm)],timeout=600)
         with wave.open(str(pcm),'rb') as audio:
             if (audio.getnchannels(),audio.getsampwidth(),audio.getframerate())!=(1,2,16000):raise ValueError('Unexpected analysis PCM profile')
             if not 0<audio.getnframes()<=MAX_SAMPLES or pcm.stat().st_size>MAX_PCM_BYTES:raise BudgetError('inference_pcm_budget','Analysis PCM exceeds the selected resource profile')
-            if abs(audio.getnframes()/16000-info['duration'])>max(.5,info['duration']*.001):raise BudgetError('inference_duration_mismatch','Decoded timeline disagrees with the input duration')
+            duration=audio.getnframes()/16000
+            mismatch=abs(duration-info['duration'])>max(.5,info['duration']*.001)
+            # Raw MP3 has a sample timeline; a bitrate/header estimate is not
+            # authoritative. Keep the mismatch gate for timestamped containers
+            # and multiple streams, whose discontinuities need separate review.
+            raw_mp3=info.get('container')=='mp3' and info.get('codec')=='mp3' and info.get('audio_stream_count')==1
+            if mismatch and not raw_mp3:raise BudgetError('inference_duration_mismatch','Decoded timeline disagrees with the input duration')
             samples=None
             if load_samples:
                 import numpy as np
                 samples=np.frombuffer(audio.readframes(audio.getnframes()),dtype='<i2').astype(np.float32)/32768.0
-        yield pcm,samples
+        yield pcm,samples,{'source':'decoded_pcm','reported_seconds':info['duration'],'decoded_seconds':duration,'header_mismatch':mismatch}
 
 
 def execute(body, on_model_loaded=None):
@@ -88,15 +96,15 @@ def execute(body, on_model_loaded=None):
     if BACKEND=='pc2':
         from .remote_asr import Engine
         from .forced_alignment import align_with_provider
-        with analysis_audio(source,body,info,load_samples=bool(body.get('reference_text'))) as (pcm,samples),Engine() as engine:
-            with wave.open(str(pcm),'rb') as decoded:pcm_duration=decoded.getnframes()/16000
+        with analysis_audio(source,body,info,load_samples=bool(body.get('reference_text'))) as (pcm,samples,duration_evidence),Engine() as engine:
+            pcm_duration=duration_evidence['decoded_seconds']
             result=engine.transcribe(pcm,body.get('language'),pcm_duration)
             alignment=None
             if body.get('reference_text'):
-                alignment=align_with_provider(samples,body['reference_text'],result['words'],info['duration'],lambda clip,text:engine.align_window(clip,text,result['language']))
+                alignment=align_with_provider(samples,body['reference_text'],result['words'],pcm_duration,lambda clip,text:engine.align_window(clip,text,result['language']))
                 alignment['engine_device']='pc2_cuda'
         media._expect(source,body['sha256'])
-        return {**result,'duration':info['duration'],'alignment':alignment,'state':'draft','input_sha256':body['sha256']}
+        return {**result,'duration':pcm_duration,'duration_evidence':duration_evidence,'alignment':alignment,'state':'draft','input_sha256':body['sha256']}
     from .inference_budget import require_cpu_capacity
     require_cpu_capacity()
     if MODEL_INSTANCE is None:
@@ -110,7 +118,7 @@ def execute(body, on_model_loaded=None):
     if on_model_loaded:
         on_model_loaded()
     # Decode in a bounded, network-disabled ffmpeg process. Input timestamps remain unchanged.
-    with analysis_audio(source,body,info) as (pcm,samples):
+    with analysis_audio(source,body,info) as (pcm,samples,duration_evidence):
         segments,info_asr=MODEL_INSTANCE.transcribe(samples,language=body.get('language'),beam_size=5,word_timestamps=True,vad_filter=False,condition_on_previous_text=False)
         words=[];lines=[]
         for segment in segments:
@@ -121,9 +129,9 @@ def execute(body, on_model_loaded=None):
     alignment=None
     if body.get('reference_text'):
         from .forced_alignment import align_reference
-        alignment=align_reference(MODEL_INSTANCE,samples,body['reference_text'],info_asr.language,words,info['duration'])
+        alignment=align_reference(MODEL_INSTANCE,samples,body['reference_text'],info_asr.language,words,duration_evidence['decoded_seconds'])
     media._expect(source,body['sha256'])
-    return {'alignment':alignment,'state':'draft','engine':'faster-whisper','engine_version':'1.2.1','model':MODEL,'model_revision':MODEL_REVISION,'language':info_asr.language,'duration':info['duration'],'input_sha256':body['sha256'],'words':words,'segments':lines,'text':'\n'.join(x['text'].strip() for x in lines),'automatic_acceptance':False,'timeline':'original_audio_seconds'}
+    return {'alignment':alignment,'state':'draft','engine':'faster-whisper','engine_version':'1.2.1','model':MODEL,'model_revision':MODEL_REVISION,'language':info_asr.language,'duration':duration_evidence['decoded_seconds'],'duration_evidence':duration_evidence,'input_sha256':body['sha256'],'words':words,'segments':lines,'text':'\n'.join(x['text'].strip() for x in lines),'automatic_acceptance':False,'timeline':'original_audio_seconds'}
 
 
 def model_rss(current, peak):

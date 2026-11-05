@@ -10,7 +10,7 @@ import threading
 import time
 
 REMOTE_BACKEND=os.environ.get('ASR_BACKEND','cpu')=='pc2'
-PROFILE = 'pc2-large-v3-https-supervised-v2' if REMOTE_BACKEND else 'cpu-small-int8-unpacked-supervised-v4'
+PROFILE = 'pc2-large-v3-https-supervised-v3' if REMOTE_BACKEND else 'cpu-small-int8-unpacked-supervised-v5'
 MAX_DURATION = 1800
 MAX_SAMPLES = MAX_DURATION * 16000
 MAX_PCM_BYTES = 60 * 1024 ** 2
