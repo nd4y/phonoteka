@@ -110,11 +110,14 @@ export function CollectionOverview({ counts, onBrowse, onGuide }: Props) {
         <FileAudio size={28} />
         <div>
           <strong>{formatted(total)}</strong>
-          <span>аудиофайлов в каталоге</span>
+          <span>аудиофайлов для коллекции</span>
         </div>
         <p>
           Записей: {formatted(counts.files)} · документов CUE: {formatted(counts.cue_sheets)}.
-          Документы с границами композиций не входят в заполненность аудио.
+          {counts.source_audio_files > 0 && (
+            <> Сохраненных исходников: {formatted(counts.source_audio_files)}.</>
+          )}{" "}
+          Документы CUE и исходники с подготовленными копиями не входят в заполненность аудио.
         </p>
         {onBrowse && (
           <button className="button subtle" onClick={() => onBrowse("all")}>

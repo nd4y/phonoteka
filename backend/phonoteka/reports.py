@@ -4,7 +4,7 @@ import csv
 import io
 import json
 import re
-from . import audit_status,db,provider_policy
+from . import audit_status,catalog_sources,db,provider_policy
 from .providers import scalar, normalized
 
 
@@ -24,9 +24,10 @@ def summary(settings, conn=None):
             active.execute('BEGIN')
             return summary(settings,active)
     exact=defaultdict(list);audio=defaultdict(list);albums=defaultdict(list);candidates=defaultdict(list);by_id={}
+    source_outputs=catalog_sources.completed_sources(conn)
     counts={'youtube_recorded':0,'youtube_confirmed':0,'youtube_candidates':0,'youtube_conflicts':0,'files':0,'cue_sheets':0,'input_errors':0,'writable_profiles':0,'with_lyrics':0,'with_cover':0,'analyzed':0,'with_candidates':0,'no_match':0,'asr_drafts':0,'fingerprint_matches':0,'fingerprint_no_match':0,'fingerprint_unavailable':0}
     counts.update(dict.fromkeys(('audio_files','with_core_tags','audit_clean','audit_warnings','audit_errors','audit_unchecked',
-        'published_current','current_proposals','stale_analysis','eligible_files','metadata_pending','recognition_pending'),0))
+        'published_current','current_proposals','stale_analysis','eligible_files','metadata_pending','recognition_pending','source_audio_files'),0))
     # Match the editor: only the newest proposal is visible, and its input must
     # still be current. A source candidate is not a saved proposal.
     proposals={r['track_id']:r for r in conn.execute('''SELECT track_id,input_sha256 FROM (
@@ -36,9 +37,10 @@ def summary(settings, conn=None):
         FROM tracks t LEFT JOIN analyses a ON a.track_id=t.id WHERE t.is_current=1 ORDER BY t.relative_path'''):
         meta=json.loads(row['metadata'])
         counts['files']+=1
+        if meta.get('format')=='cue':counts['cue_sheets']+=1;continue
+        if row['id'] in source_outputs:counts['source_audio_files']+=1;continue
         state=meta.get('youtube',{}).get('state')
         for key,value in [('youtube_recorded','recorded'),('youtube_confirmed','owner_confirmed'),('youtube_candidates','candidates'),('youtube_conflicts','conflict')]:counts[key]+=state==value
-        if meta.get('format')=='cue':counts['cue_sheets']+=1;continue
         counts['audio_files']+=1
         tags=meta.get('tags',{})
         counts['with_core_tags']+=all(bool(scalar(tags,key).strip()) for key in ('title','artist','album'))
@@ -52,7 +54,7 @@ def summary(settings, conn=None):
         eligible=row['status'] not in ('error','missing') and not meta.get('cue_album_image',False)
         counts['eligible_files']+=eligible
         if eligible:
-            sources={s.get('provider'):s.get('state') for s in json.loads(row['analysis_payload']).get('sources',[])} if current else {}
+            sources=provider_policy.source_states(conn,json.loads(row['analysis_payload'])) if current else {}
             done={'candidates','candidate','no_match','fingerprint_match'}
             counts['metadata_pending']+=any(sources.get(provider) not in done for provider in ('musicbrainz','lrclib'))
             counts['recognition_pending']+=not any(sources.get(provider) in done for provider in ('shazam','acoustid'))
@@ -72,6 +74,7 @@ def summary(settings, conn=None):
             albums[(normalized(artist),normalized(album))].append({**entry,'album':album,'artist':artist,'track':scalar(tags,'tracknumber'),'disc':scalar(tags,'discnumber')})
     counts['metadata_pending_retry']=0
     for row in conn.execute('SELECT a.track_id,a.payload FROM analyses a JOIN tracks t ON t.id=a.track_id AND t.is_current=1 AND t.sha256=a.input_sha256'):
+        if row['track_id'] not in by_id:continue
         data=json.loads(row['payload']);counts['analyzed']+=1;counts['with_candidates']+=bool(data.get('candidates'));counts['no_match']+=data.get('state')=='no_match';counts['asr_drafts']+=bool(data.get('asr'))
         if row['track_id'] in by_id:
             for candidate in data.get('candidates',[]):
@@ -111,6 +114,7 @@ def export(settings, kind):
     with db.connect(settings.db_path) as conn:
         conn.execute('BEGIN')
         records=list(rows(settings,conn))
+        source_outputs=catalog_sources.completed_sources(conn)
         analyses={row['track_id']:row for row in conn.execute('SELECT * FROM analyses')}
         outcomes=defaultdict(list)
         for row in conn.execute("""WITH ranked AS (
@@ -126,6 +130,8 @@ def export(settings, kind):
         for row,meta in records:
             input_error=meta.get('input_error') if isinstance(meta.get('input_error'),dict) else {}
             entry={'id':row['id'],'path':row['relative_path'],'sha256':row['sha256'],'format':meta.get('format'),
+                   'collection_role':'cue' if meta.get('format')=='cue' else 'source' if row['id'] in source_outputs else 'track',
+                   'prepared_track_ids':json.dumps(source_outputs.get(row['id'],[])),
                    'status':row['status'],'title':scalar(meta.get('tags',{}),'title'),
                    'artist':scalar(meta.get('tags',{}),'artist'),'album':scalar(meta.get('tags',{}),'album'),
                    'duration':meta.get('duration'),'has_art':bool(meta.get('has_art')),'has_lrc':bool(meta.get('lrc')),
