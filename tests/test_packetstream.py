@@ -272,9 +272,14 @@ def test_audit_reports_the_stage_without_turning_resource_refusal_into_damage(tm
     def fail(*_args, **_kwargs):
         raise media.MediaError(code, 'Sanitized fixture failure')
 
-    monkeypatch.setattr(media, 'probe_audio', fail if stage == 'header' else lambda _path: {'audio_stream_count': 1})
+    inventory = {'audio_stream_count':1,'audio_streams':[{'codec':'flac','channels':2}],'duration':12.5}
+    monkeypatch.setattr(media, 'probe_audio', fail if stage == 'header' else lambda _path: inventory)
     monkeypatch.setattr(media, 'audio_identity', fail if stage == 'packets' else lambda _path: 'a'*64)
     monkeypatch.setattr(media, '_process', fail)
     result = media.audit_audio(path, roots)
     assert result['state'] == 'failed' and result['error'] == code and result['failure_stage'] == stage
     assert 'stderr' not in result and result['sha256'] == media.sha256_file(path)
+    if stage == 'header':
+        assert 'audio_stream_count' not in result
+    else:
+        assert all(result[key] == value for key,value in inventory.items())

@@ -36,7 +36,8 @@ def test_normalize_job_catalogs_lineage(settings):
         assert derived['derived_from']['parent_track_id']==tid and derived['can_write']
 
 
-def test_decode_recovery_preserves_decodable_pcm_and_original_via_api(settings):
+@pytest.mark.parametrize('invalid_artwork', [False, True])
+def test_decode_recovery_preserves_decodable_pcm_and_original_via_api(settings, invalid_artwork):
     cfg=replace(settings,read_only=False,storage_verified=True)
     path=cfg.work_root/'damaged.mp3'
     subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=2','-c:a','libmp3lame','-b:a','128k','-write_xing','0',str(path)],check=True)
@@ -49,6 +50,12 @@ def test_decode_recovery_preserves_decodable_pcm_and_original_via_api(settings):
     assert damaged[offset]==255 and damaged[offset+1]&254==250
     damaged[offset+4:offset+21]=b'\xff'*17
     path.write_bytes(damaged)
+    if invalid_artwork:
+        from mutagen.id3 import APIC
+        from mutagen.mp3 import MP3
+        audio = MP3(path)
+        audio.tags.add(APIC(mime='image/jpeg',type=3,data=b'broken embedded image'))
+        audio.save()
     original=media.sha256_file(path)
     with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
         headers=authenticated(client,cfg);job(client,headers,'scan');drain(cfg)
@@ -56,11 +63,15 @@ def test_decode_recovery_preserves_decodable_pcm_and_original_via_api(settings):
         job(client,headers,'audit',[tid]);drain(cfg)
         detail=client.get('/api/tracks/'+tid).json()
         assert detail['audit']['state']=='failed' and detail['audit']['failure_stage']=='decode',detail['audit']
+        assert detail['audit']['audio_stream_count'] == 1
         assert detail['can_recover']
         queued=job(client,headers,'normalize_audio',[tid]);drain(cfg)
         assert client.get('/api/jobs/'+queued['id']).json()['state']=='succeeded'
         child=next(row for row in client.get('/api/tracks').json()['items'] if row['id']!=tid)
         assert child['derived_from']['recovery']['human_acceptance'] is False
+        if invalid_artwork:
+            assert not child['has_art']
+            assert child['derived_from']['warnings'][0]['code'] == 'invalid_cover_not_copied'
         target=cfg.work_root/child['relative_path']
         def pcm_hash(source):return media._process(source,'ffmpeg',['-nostdin','-map','0:a:0','-c:a','pcm_f32le','-f','hash','-hash','sha256','-']).stdout.strip()
         assert pcm_hash(target)==pcm_hash(path)

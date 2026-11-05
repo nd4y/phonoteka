@@ -56,5 +56,6 @@ def test_corrupted_second_stream_never_receives_successful_audit(roots):
     assert pcm_hash(path,0)==first_before and second.returncode!=0
     before=path.read_bytes()
     result=media.audit_audio(path,roots)
+    assert result['audio_stream_count']==2
     assert result['state']=='failed' and result['error']=='invalid_audio'
     assert path.read_bytes()==before
