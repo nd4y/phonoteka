@@ -308,6 +308,27 @@ def _clean_release_reviews(conn):
 CONTENT_FIELDS = {"tags", "lrc", "plain_lyrics", "cover", "title", "artist", "album", "release", "releases"}
 
 
+def source_states(conn, analysis):
+    """A previous match is complete only while its result remains usable."""
+    current = prepare_analysis(conn, analysis, register=False)
+    sources = {source.get("provider"): source.get("state") for source in current.get("sources", [])}
+    candidates = current.get("candidates", [])
+    unavailable = set()
+    for candidate in candidates:
+        usage = candidate.get("usage") or {}
+        policy = rule(conn, usage.get("provider"), usage.get("data_type"))
+        # A refresh must be able to retain a new result. Cache denial is an
+        # intentional policy boundary, not an invitation to repeat recognition.
+        if (candidate.get("transient_only") and policy.get("allow_fetch")
+                and policy.get("allow_cache") and policy.get("cache_ttl", 0) > 0):
+            unavailable.add(candidate.get("provider"))
+    available = {candidate.get("provider") for candidate in candidates if not candidate.get("transient_only")}
+    for provider in unavailable - available:
+        if sources.get(provider) in {"candidates", "candidate", "fingerprint_match"}:
+            sources[provider] = "refresh_required"
+    return sources
+
+
 def prepare_analysis(conn, data, *, register=True, now=None):
     data = deepcopy(data)
     now = time.time() if now is None else now

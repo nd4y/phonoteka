@@ -83,6 +83,23 @@ def test_remote_windows_keep_confidence_and_anchor_gates():
     result=align_with_provider([0]*16000,'hello world',words,1,lambda clip,text:bad)
     assert result['coverage']==0 and result['lrc'] is None
 
+
+def test_empty_lrc_rows_do_not_split_alignment_windows_or_claim_timing():
+    words=[{'word':'hello','start':.1,'end':.3,'probability':.9},
+           {'word':'world','start':.4,'end':.7,'probability':.95},
+           {'word':'another','start':.8,'end':1.1,'probability':.95},
+           {'word':'line','start':1.2,'end':1.5,'probability':.95}]
+    calls=[]
+    def provider(clip,text):
+        calls.append(text)
+        return copy.deepcopy(words)
+    result=align_with_provider([0]*32000,'[00:00.10]hello world\n[00:00.75]\n[00:00.80]another line',words,2,provider)
+    assert len(calls)==1 and result['coverage']==1 and result['complete']
+    blank=result['lines'][1]
+    assert blank['reason']=='empty_line' and blank['original_ms']==750 and blank['start_ms'] is None
+    assert len(result['lines'])==3 and not result['automatic_acceptance']
+    assert result['music_quality_gate']=='not_validated'
+
 def test_remote_health_registry_does_not_claim_nas_resident_weights():
     import os
     env={**os.environ,'ASR_BACKEND':'pc2','ASR_MODEL':remote_asr.MODEL}

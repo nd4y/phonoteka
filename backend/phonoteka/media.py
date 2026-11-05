@@ -290,9 +290,21 @@ def fallback_inventory(path, roots, error):
 
 def _process(path: Path, executable: str, arguments: list[str], *, timeout: int = 300,
              stdout_limit: int = 32 * 1024**2) -> subprocess.CompletedProcess:
+    strict_decode = executable == 'ffmpeg' and '-xerror' in arguments
+    arguments = list(arguments)
+    log_level = 'error'
+    if strict_decode:
+        # FFmpeg 6.1 can return zero after a decoder failure even with -xerror.
+        # Retain structured severity so that strict verification also rejects
+        # error diagnostics. Ordinary recovery decoding remains permissive.
+        for index in range(len(arguments) - 2, -1, -1):
+            if arguments[index] in {'-v', '-loglevel'}:
+                log_level = arguments[index + 1]
+                del arguments[index:index + 2]
+        log_level = 'level+' + log_level
     with _file(path) as stream:
         input_path = f"/proc/self/fd/{stream.fileno()}" if sys.platform == "linux" else str(path)
-        command = [executable, "-v", "error", "-protocol_whitelist", "file,pipe", "-format_whitelist", "mp3,flac,mov,aac,ogg,wav,aiff,ape,wv,asf,matroska,dsf,iff,ac3", "-i", input_path, *arguments]
+        command = [executable, "-v", log_level, "-protocol_whitelist", "file,pipe", "-format_whitelist", "mp3,flac,mov,aac,ogg,wav,aiff,ape,wv,asf,matroska,dsf,iff,ac3", "-i", input_path, *arguments]
         try:
             # Spool child output and enforce a bound while it runs: a malformed or
             # very long file must not consume unbounded Python heap or scratch space.
@@ -316,7 +328,13 @@ def _process(path: Path, executable: str, arguments: list[str], *, timeout: int 
                         raise MediaError("verification_too_large", "Verification output exceeded its safety limit")
                     output.seek(0)
                     errors.seek(0)
-                    return subprocess.CompletedProcess(command, process.returncode, output.read(), errors.read())
+                    diagnostics = errors.read()
+                    if strict_decode:
+                        levels = re.compile(rb'(?m)^((?:\[[^\]\r\n]* @ 0x[0-9a-fA-F]+\]\s*)?)\[(panic|fatal|error|warning|info|verbose|debug|trace)\]\s*')
+                        if any(match[2] in {b'panic', b'fatal', b'error'} for match in levels.finditer(diagnostics)):
+                            raise MediaError('invalid_audio', 'Media decoding reported an error despite a successful exit code')
+                        diagnostics = levels.sub(rb'\1', diagnostics)
+                    return subprocess.CompletedProcess(command, process.returncode, output.read(), diagnostics)
         except FileNotFoundError as exc:
             raise MediaError("tool_unavailable", f"{executable} is not installed") from exc
         except subprocess.TimeoutExpired as exc:

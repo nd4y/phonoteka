@@ -3,13 +3,14 @@ from dataclasses import replace
 import hashlib
 import io
 import json
+import time
 import zipfile
 
 import pytest
 
 from fastapi.testclient import TestClient
 
-from phonoteka import db, preparation
+from phonoteka import db, preparation, provider_policy
 from phonoteka.app import create_app
 from test_backend import settings, authenticated, synthetic, seed, job, drain, accept_publication_review
 
@@ -119,3 +120,59 @@ def test_stages_resume_once_with_frozen_folder_members(settings):
         preparation.tick(settings)
         final=client.get("/api/preparation").json()
         assert final["completed"]==["scan","recognize","analyze"] and final["scan_id"]==request["scan_id"]
+
+
+@pytest.mark.parametrize("kind,provider", [("analyze", "musicbrainz"), ("recognize", "acoustid")])
+def test_expired_matches_are_pending_in_wizard_and_processing(settings, kind, provider):
+    settings = replace(settings, external_metadata=True, external_fingerprints=True)
+    for name in ("expired", "fresh", "no-match"):
+        synthetic(settings).rename(settings.work_root / (name + ".flac"))
+    with TestClient(create_app(settings), base_url=settings.app_url) as client:
+        headers = authenticated(client, settings)
+        scan = job(client, headers, "scan")["id"]
+        drain(settings)
+        expected = []
+        with db.transaction(settings.db_path) as conn:
+            for row in conn.execute("SELECT * FROM tracks WHERE is_current=1").fetchall():
+                candidate = {"id": provider + ":fixture", "provider": provider, "kind": "metadata",
+                             "tags": {"title": "Fixture"}}
+                stamp = time.time() - 8 * 86400 if row["relative_path"] == "expired.flac" else time.time()
+                candidate["usage"] = provider_policy.candidate_usage(conn, candidate, stamp)
+                no_match = row["relative_path"] == "no-match.flac"
+                analysis = {"candidates": [] if no_match else [candidate], "sources": [
+                    {"provider": provider, "state": "no_match" if no_match else "candidates"},
+                    {"provider": "lrclib", "state": "no_match"}]}
+                conn.execute("INSERT INTO analyses VALUES(?,?,?,?)",
+                             (row["id"], row["sha256"], db.encode(analysis), db.utcnow()))
+                if row["relative_path"] == "expired.flac":
+                    expected.append(row["id"])
+            assert [item["track_id"] for item in preparation.pending(conn, scan, kind, "")] == expected
+        response = client.post("/api/jobs", json={"kind": kind, "params": {"scope": "pending"}},
+                               headers={**headers, "Idempotency-Key": "refresh-expired"})
+        assert response.status_code == 202, response.text
+        queued = db.fetchone(settings.db_path, "SELECT payload FROM jobs WHERE id=?", (response.json()["id"],))
+        assert [item["track_id"] for item in json.loads(queued["payload"])["items"]] == expected
+
+
+@pytest.mark.parametrize("code", ["recognition_attempt_budget_exhausted", "recognition_identity_required"])
+def test_metadata_job_preserves_old_fingerprint_error_without_failing(settings, monkeypatch, code):
+    from phonoteka.providers import Providers
+
+    settings = replace(settings, external_metadata=True)
+    async def analyzed(self, meta, relative, identified=None, authorize=lambda: None):
+        return {"input_sha256": meta["sha256"], "state": "no_match", "candidates": [], "sources": [
+            {"provider": "musicbrainz", "state": "no_match"}, {"provider": "lrclib", "state": "no_match"}]}
+
+    monkeypatch.setattr(Providers, "analyze", analyzed)
+    with TestClient(create_app(settings), base_url=settings.app_url) as client:
+        headers = authenticated(client, settings)
+        track, sha = seed(settings)
+        with db.transaction(settings.db_path) as conn:
+            conn.execute("INSERT INTO analyses VALUES(?,?,?,?)", (track, sha, db.encode({
+                "sources": [{"provider": "shazam", "state": code}], "candidates": []}), db.utcnow()))
+        queued = job(client, headers, "analyze", [track])
+        drain(settings)
+        result = client.get("/api/jobs/" + queued["id"]).json()
+        assert result["state"] == "succeeded", result
+        sources = client.get("/api/tracks/" + track).json()["analysis"]["sources"]
+        assert {"provider": "shazam", "state": code} in sources

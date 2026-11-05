@@ -1,5 +1,7 @@
 # From a folder to organized music
 
+Preparation and the pending-files search include expired provider matches whose content is no longer available. A historical successful search does not make those files ready for review. Current usable results and completed searches without matches are reused. Provider permissions still apply to each new request.
+
 The four main sections are **Overview**, **Collection**, **Processing**, and **Ready files**. Settings are in the left menu above the account button. Help opens guided setup. Previously saved navigation, filters, and scroll positions remain available after refresh.
 
 1. **Overview** suggests the next action. Its result count refers to current audio revisions already published into the output collection. CUE documents are separate. Empty or unknown totals never imply 100% completion. Proposal, error, and missing-data counts may overlap.
@@ -27,3 +29,11 @@ Review shows three steps: find data, review, write. One main button offers the n
 An expanded job shows the latest 200 loaded events. Search matches message, filename, code and provider; the problems filter includes failures and authorization waits. Pausing scrolling freezes the visible window for reading while processing and event reception continue. Jumping to latest resumes the live display. Search and filter changes pause scrolling. These controls do not search the complete server history.
 
 The Review lyrics action focuses and reveals the line editor. Normal navigation and reload retain their existing position restoration; returning from the initial source search takes one Back action.
+
+## Decoder failures and alignment
+
+Strict verification checks both FFmpeg's exit code and error-level diagnostics. A decoding error cannot pass verification just because FFmpeg exits with code 0; ordinary warnings remain separate diagnostics.
+
+A current full-audit decoding failure for a single MP3 stream offers a readable copy. The conversion retains decoded audio as FLAC or PCM WAV, compares decoded PCM SHA-256 and fully audits the output. It preserves the source and records the recovery origin. Missing or damaged original samples are not restored; listening remains necessary. Unreadable headers and stale audit revisions do not qualify.
+
+ASR coverage and timing comparisons count lyric content only. Blank LRC markers retain their original times in diagnostics but receive no invented anchors. A complete candidate includes the content rows only and is offered only when every such row aligns. Partial results retain original times separately and produce no complete LRC. Human listening and Poweramp acceptance remain separate.

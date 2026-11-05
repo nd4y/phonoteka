@@ -50,7 +50,7 @@ export type Track = {
   lyrics_document?: import("./lyrics-document").LyricsDocument;
   youtube?: YouTubeSource;
   cue_export?: { count: number; track_ids: string[] };
-  derived_from?: { sheet_id: string; track_number: number };
+  derived_from?: { sheet_id?: string; track_number?: number; recovery?: Record<string, unknown> };
   analysis?: Analysis | null;
   input_error?: { code: string; message: string };
   cue?: CueSheet;
@@ -70,6 +70,7 @@ export type Track = {
   lrc?: string;
   status: string;
   can_write: boolean;
+  can_recover?: boolean;
   proposal?: Proposal | null;
   audit?: Record<string, unknown> | null;
   history?: Array<Record<string, unknown>>;

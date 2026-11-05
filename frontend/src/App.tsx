@@ -2457,21 +2457,24 @@ function TrackEditor({
     changed,
     savedProposal: !!activeProposal,
     invalidLyrics: hasUntimed || !!lyricsInvalid,
+    canRecover: track.can_recover,
   });
   const nextHint =
     nextAction === "save"
       ? "Сохраните черновик, затем проверьте его перед записью. Аудиофайл пока не изменится."
-      : nextAction === "lyrics"
-        ? "В тексте есть строки без таймкодов или ошибки. Исправьте их перед записью."
-        : nextAction === "write"
-          ? !writable
-            ? "Файл недоступен для записи. Причина показана ниже."
-            : !summary?.capabilities.apply
-              ? "Запись сейчас недоступна. Проверьте состояние хранилища в настройках."
-              : "Проверьте значения ниже. Запись применит сохранённое предложение и откроет следующий трек."
-          : track.analysis?.candidates?.length
-            ? "Найдены варианты. Выберите подходящие данные или заполните поля вручную."
-            : "Найдите данные по аудио или заполните поля вручную. Исходный файл пока не изменяется.";
+      : nextAction === "recover"
+        ? "Декодер обнаружил ошибку. Создайте отдельную читаемую копию. Исходный файл сохранится, утраченные участки звука не восстанавливаются."
+        : nextAction === "lyrics"
+          ? "В тексте есть строки без таймкодов или ошибки. Исправьте их перед записью."
+          : nextAction === "write"
+            ? !writable
+              ? "Файл недоступен для записи. Причина показана ниже."
+              : !summary?.capabilities.apply
+                ? "Запись сейчас недоступна. Проверьте состояние хранилища в настройках."
+                : "Проверьте значения ниже. Запись применит сохранённое предложение и откроет следующий трек."
+            : track.analysis?.candidates?.length
+              ? "Найдены варианты. Выберите подходящие данные или заполните поля вручную."
+              : "Найдите данные по аудио или заполните поля вручную. Исходный файл пока не изменяется.";
   const reviewStep = sourcesOpen || nextAction === "find" ? 1 : nextAction === "write" ? 3 : 2;
   return (
     <div inert={editingBlocked || moving || undefined}>
@@ -2540,6 +2543,7 @@ function TrackEditor({
                   onClick={() => {
                     if (nextAction === "save") void save();
                     else if (nextAction === "write") void onApplyNext();
+                    else if (nextAction === "recover") void onJob("normalize_audio");
                     else if (nextAction === "lyrics") {
                       onTab("lyrics", true);
                       window.requestAnimationFrame(() => {
@@ -2573,11 +2577,13 @@ function TrackEditor({
                           ? moving
                             ? "Записываем..."
                             : "Записать и дальше"
-                          : nextAction === "lyrics"
-                            ? "Проверить текст"
-                            : track.analysis?.candidates?.length
-                              ? "Выбрать данные"
-                              : "Найти данные"}
+                          : nextAction === "recover"
+                            ? "Создать читаемую копию"
+                            : nextAction === "lyrics"
+                              ? "Проверить текст"
+                              : track.analysis?.candidates?.length
+                                ? "Выбрать данные"
+                                : "Найти данные"}
                     </>
                   )}
                 </button>
@@ -2633,24 +2639,36 @@ function TrackEditor({
           </div>
           {sourcesOpen && (
             <div className="workflow-sources">
+              {track.derived_from?.recovery && (
+                <p className="callout">
+                  Копия создана из аудио с ошибками декодирования. Декодированный звук совпадает с
+                  исходником, но утраченные участки не восстановлены. Требуется прослушивание.
+                </p>
+              )}
               {!track.possible_mix &&
-                !track.can_write &&
+                (!track.can_write || track.can_recover) &&
                 !track.input_error &&
                 !track.cue_album_image &&
                 !summary?.read_only && (
                   <section className="panel settings-panel">
-                    <h2>Редактируемая копия</h2>
+                    <h2>{track.can_recover ? "Читаемая копия аудио" : "Редактируемая копия"}</h2>
                     <p className="muted small">
                       Создать FLAC или PCM WAV для тегов, обложки и текста. Декодированное аудио
                       проверяется по SHA-256. Исходный файл сохраняется; размер копии может
                       увеличиться.
                     </p>
+                    {track.can_recover && (
+                      <p className="muted small">
+                        Копия сохранит звук, который удалось декодировать. Потерянные или
+                        повреждённые участки она не восстановит. Результат нужно прослушать.
+                      </p>
+                    )}
                     <button
                       className="button secondary"
                       disabled={busy}
                       onClick={() => void onJob("normalize_audio")}
                     >
-                      Создать редактируемую копию
+                      {track.can_recover ? "Создать читаемую копию" : "Создать редактируемую копию"}
                     </button>
                   </section>
                 )}
