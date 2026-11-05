@@ -9,7 +9,7 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1]/'dev/install-ci-codecs.sh'
 
 
-def run_setup(tmp_path, mode):
+def run_setup(tmp_path, mode, source=None):
     binaries=tmp_path/'bin';binaries.mkdir()
     ready=tmp_path/'ready';calls=tmp_path/'calls'
     if mode=='ready':ready.touch()
@@ -33,6 +33,8 @@ exit 98
     env={**os.environ,'PATH':str(binaries)+os.pathsep+os.environ['PATH'],
          'CODEC_READY':str(ready),'CODEC_CALLS':str(calls),'CODEC_MODE':mode,
          'CODEC_UPDATED':str(tmp_path/'updated')}
+    env.pop('CODEC_APT_SOURCES',None)
+    if source is not None:env['CODEC_APT_SOURCES']=str(source)
     result=subprocess.run(['bash',str(SCRIPT)],env=env,capture_output=True,text=True,timeout=15)
     return result,calls.read_text().splitlines() if calls.exists() else []
 
@@ -52,3 +54,15 @@ def test_stale_indexes_refresh_once_then_verify_tools(tmp_path):
 def test_install_or_refresh_failure_cannot_pass_media_gate(tmp_path,mode,expected_calls):
     result,calls=run_setup(tmp_path,mode)
     assert result.returncode!=0 and len(calls)==expected_calls
+
+
+def test_explicit_sources_apply_to_install_and_index_refresh(tmp_path):
+    source=SCRIPT.parent/'ubuntu-ci.sources'
+    result,calls=run_setup(tmp_path,'refresh',source)
+    assert result.returncode==0 and len(calls)==3
+    assert all('Dir::Etc::sourcelist='+str(source) in call and 'Dir::Etc::sourceparts=-' in call for call in calls)
+
+
+def test_missing_explicit_sources_cannot_fall_back_to_host_repositories(tmp_path):
+    result,calls=run_setup(tmp_path,'refresh',tmp_path/'missing.sources')
+    assert result.returncode!=0 and not calls
