@@ -1,5 +1,7 @@
 # phonoteka
 
+After a worker crash, unfinished read jobs pause while retaining completed results and provider budgets. ASR checks the actual reference words separately from tags and artwork: [recovery and alignment](docs/en/recovery-alignment.md).
+
 Owners can configure AcoustID in the UI: save, replace or remove an Application API key, enable recognition and test the connection. Chromaprint lookup supplements inconclusive Shazam results and produces review candidates. See [setup, transmitted data and limits](docs/en/acoustid.md).
 
 Recognition reports count each file outcome once; old AcoustID key-required markers do not become recognition errors after upgrading.

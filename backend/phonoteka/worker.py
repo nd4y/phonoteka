@@ -1132,6 +1132,25 @@ class Worker:
         """Mark interrupted before inspecting journals; never replay a mutation."""
         rows = db.fetchall(self.settings.db_path, "SELECT * FROM jobs WHERE state IN ('running','interrupted')")
         for job in rows:
+            if job['kind'] in {'analyze', 'recognize', 'audit', 'transcribe', 'align', 'replaygain', 'youtube'}:
+                # A dead process cannot still execute an item. Preserve spent
+                # provider attempts and completed results; require explicit
+                # resume rather than replaying network/ASR work at startup.
+                with db.transaction(self.settings.db_path) as conn:
+                    job = conn.execute('SELECT * FROM jobs WHERE id=?', (job['id'],)).fetchone()
+                    if job['state'] not in {'running', 'interrupted'}:
+                        continue
+                    for item in conn.execute("SELECT item_key,result FROM job_items WHERE job_id=? AND state='running'", (job['id'],)).fetchall():
+                        result = json.loads(item['result'])
+                        result.update(code='worker_restarted', recovery='awaiting_resume')
+                        conn.execute("UPDATE job_items SET state='deferred',result=? WHERE job_id=? AND item_key=?", (db.encode(result),job['id'],item['item_key']))
+                    payload = json.loads(job['payload'])
+                    payload['pause_requested'] = True
+                    state = ('cancelled_partial' if job['completed'] else 'cancelled') if job['cancel_requested'] else 'paused'
+                    conn.execute("UPDATE jobs SET state=?,stage=?,payload=?,error='worker_restarted',updated_at=? WHERE id=?", (state,state,db.encode(payload),db.utcnow(),job['id']))
+                    db.event(conn, 'job_paused' if state == 'paused' else 'job_finished', {'job_id':job['id'], 'state':state, 'reason':'worker_restarted'})
+                log('job_recovered', job_id=job['id'], kind=job['kind'], state=state, reason='worker_restarted')
+                continue
             self.finish(job["id"], "interrupted", "worker_restarted")
             if job['kind'] == 'publish_sidecars' and self.settings.writable:
                 # The owner grants a fresh retry before any uncommitted effect.

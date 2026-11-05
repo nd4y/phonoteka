@@ -760,7 +760,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     item['reference_text']=text
                     document=lyrics_document.effective(conn,dict(track))
                     item['reference_text'],item['lyrics_reference']=lyrics_document.alignment_reference(document,text)
-                    reference_payload=json.loads(proposal['payload']) if proposal and json.loads(proposal['payload']).get('lrc') else {'lrc':text,'field_sources':meta.get('usage_provenance',{})}
+                    reference_proposal=json.loads(proposal['payload']) if proposal and json.loads(proposal['payload']).get('lrc') else None
+                    reference_payload=provider_policy.alignment_payload(conn,track,text,reference_proposal)
                     reference_payload=provider_policy.api_payload(conn,track,reference_payload,'derived_analysis')
                     item['reference_sources']=reference_payload.get('field_sources',{})
                 if body.kind == "apply":

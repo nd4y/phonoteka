@@ -244,6 +244,38 @@ def media_sources(provenance):
     return [mark(usage) for usage in references({'field_sources':provenance})]
 
 
+def alignment_payload(conn, row, text, proposal=None):
+    """Freeze only the words being aligned, with their actual restrictions.
+
+    Album tags/art are not ASR inputs. Already embedded words retain revoked
+    permissions, but do not inherit the lifetime of an old HTTP response cache.
+    A pending proposal remains cached provider content and keeps its TTL.
+    """
+    meta = loads(row['metadata'])
+    source = proposal if proposal is not None else {'field_sources': meta.get('usage_provenance', {})}
+    payload = {'lrc': text, 'field_sources': {}}
+    if source.get('field_sources', {}).get('lrc'):
+        payload['field_sources']['lrc'] = deepcopy(source['field_sources']['lrc'])
+    if proposal is not None:
+        payload['sources'] = [deepcopy(item) for item in proposal.get('sources', [])
+                              if isinstance(item, dict) and
+                              ((item.get('usage') or {}).get('data_type') or item.get('kind'))
+                              not in {'metadata', 'cover', 'provenance'}]
+        payload = decorate_manual(conn, row, payload)
+        usage = deepcopy(references(payload))
+        if usage:
+            payload['field_sources']['lrc']['usage'] = usage
+        payload.pop('sources', None)
+        return payload
+    if text not in {meta.get('lrc'), meta.get('lyrics')}:
+        raise media.MediaError('lyrics_document_stale', 'Embedded reference words changed')
+    payload = decorate_manual(conn, row, payload)
+    usage = media_sources(payload['field_sources'])
+    if usage:
+        payload['field_sources']['lrc']['usage'] = usage
+    return payload
+
+
 def require_export_entry(settings, entry):
     with db.connect(settings.db_path) as conn:
         require_sources(conn,references({'field_sources':entry.get('usage_provenance',{})}),'export')
