@@ -4,10 +4,13 @@ import base64
 from contextlib import asynccontextmanager, contextmanager, ExitStack
 from contextvars import ContextVar
 from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
+import random
 import time
 import unicodedata
 from urllib.parse import urlsplit
@@ -19,9 +22,20 @@ from .telemetry import Metrics, provider_operation
 POLICY_VERSION = 'public-v1'
 USER_AGENT = 'Phonoteka/0.2 (https://github.com/nd4y/phonoteka; personal music catalog)'
 HOSTS = {'www.youtube.com','beta.musicbrainz.org','musicbrainz.org','lrclib.net','coverartarchive.org','archive.org','api.acoustid.org','www.theaudiodb.com','r2.theaudiodb.com','api.discogs.com'}
-INTERVAL = {'youtube':3.0,'musicbrainz':1.1,'lrclib':.5,'coverartarchive':1.1,'acoustid':.4,'shazam':10.0,'theaudiodb':2.1,'discogs':1.1}
+INTERVAL = {'youtube':3.0,'musicbrainz':1.1,'lrclib':1.0,'coverartarchive':1.1,'acoustid':.4,'shazam':10.0,'theaudiodb':2.1,'discogs':1.1}
 GET_DEADLINE_SECONDS = 90
 REQUEST_AUTHORIZATION=ContextVar('provider_request_authorization',default=None)
+
+def retry_after_seconds(value, fallback=60):
+    """Honor delta-seconds and HTTP-date without shortening a server's pause."""
+    try:
+        raw=(value or '').strip()
+        seconds=float(int(raw)) if raw.isdigit() else parsedate_to_datetime(raw).timestamp()-time.time()
+        if not math.isfinite(seconds):seconds=fallback
+    except (ValueError,TypeError,OverflowError):
+        seconds=fallback
+    seconds=max(1,seconds)
+    return seconds+random.uniform(0,min(30,seconds*.25))
 
 
 @contextmanager
@@ -96,6 +110,11 @@ class Providers:
         async with lock:
             delay=self.next.get(provider,0)-time.monotonic()
             if delay>0: await asyncio.sleep(delay)
+            # A waiter may have entered before the preceding response set a
+            # shared cooldown. Recheck at admission, before spending/sending.
+            breaker=json.loads(await asyncio.to_thread(db.setting,self.settings.db_path,'provider_breaker:'+provider,'{}'))
+            if breaker.get('until',0)>time.time():
+                raise ProviderError('provider_cooldown',provider,'Источник попросил выдержать паузу перед следующим запросом')
             authorize=REQUEST_AUTHORIZATION.get()
             if authorize:await asyncio.to_thread(authorize)
             interval=INTERVAL.get(provider,1)
@@ -193,11 +212,11 @@ class Providers:
                             continue
                         if response.status_code==404 or (provider=='youtube' and response.status_code in {400,401,403,410}): data=None;break
                         if response.status_code in (401,403): raise ProviderError('provider_unauthorized',provider,'Источник отклонил доступ')
-                        if response.status_code==429:
-                            retry=response.headers.get('retry-after','60')
-                            seconds=min(86400,max(60,int(retry))) if retry.isdigit() else 300
-                            await asyncio.to_thread(db.set_setting,self.settings.db_path,'provider_breaker:'+provider,db.encode({'until':time.time()+seconds,'reason':'rate_limited'}))
-                            raise ProviderError('rate_limited',provider,'Источник ограничил частоту запросов')
+                        if response.status_code in (429,503):
+                            reason='rate_limited' if response.status_code==429 else 'provider_unavailable'
+                            seconds=retry_after_seconds(response.headers.get('retry-after'))
+                            await asyncio.to_thread(db.set_setting,self.settings.db_path,'provider_breaker:'+provider,db.encode({'until':time.time()+seconds,'reason':reason}))
+                            raise ProviderError('rate_limited' if response.status_code==429 else 'provider_cooldown',provider,'Источник попросил выдержать паузу перед следующим запросом')
                         if response.status_code>=500: raise ProviderError('provider_unavailable',provider,'Источник временно недоступен: HTTP '+str(response.status_code))
                         if response.status_code!=200: raise ProviderError('provider_error',provider,'Неожиданный ответ источника')
                         content=bytearray();limit=5*1024**2 if binary else 2*1024**2

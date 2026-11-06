@@ -35,3 +35,5 @@ Sign-in is controlled by AUTH_ENABLED (enabled by default). [Configuration and r
 Guided setup prepares a selected directory in the mounted music folder for review and refreshes expired search results. Accepted revisions can be published through the plan and downloaded with the playlist in one ZIP. [Folder-to-collection workflow](docs/en/collection-workflow.md)
 
 ASR coverage counts lyric content rather than blank LRC markers. A current MP3 decoding failure can be processed into a separate verified PCM copy while preserving the original; this does not restore missing audio.
+
+Set PROVIDER_DAILY_LIMIT=0 to disable Phonoteka's local daily request quota while preserving provider pacing and cooldowns. [Quota and Retry-After](docs/en/provider-quotas.md).

@@ -947,7 +947,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             provider['state']='disabled' if not provider['configured'] else breaker.get('reason','ready') if provider['retry_at'] else 'ready'
             if provider['id'] in {'audd','acrcloud'}:provider['state']='key_required'
             if provider['id']=='acoustid' and not acoustid.public_connection(settings)['key_set']:provider['state']='key_required'
-        return {'external_metadata':settings.external_metadata,'external_fingerprints':settings.external_fingerprints,'daily_limit':settings.provider_daily_limit,'providers':providers}
+        return {'external_metadata':settings.external_metadata,'external_fingerprints':settings.external_fingerprints,'daily_limit':settings.provider_daily_limit,'daily_limit_enabled':settings.provider_daily_limit>0,'providers':providers}
 
     @app.post('/api/tracks/{track_id}/analysis/select',status_code=201)
     async def select_analysis(request: Request, track_id: str):
