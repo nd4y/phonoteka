@@ -145,22 +145,30 @@ def test_rate_admission_follows_connection_capacity_without_release_burst(tmp_pa
 
 
 def test_overall_deadline_closes_slow_stream_without_hidden_retry(tmp_path,monkeypatch):
-    monkeypatch.setattr('phonoteka.providers.GET_DEADLINE_SECONDS',.2)
+    monkeypatch.setattr('phonoteka.providers.GET_DEADLINE_SECONDS',10)
     async def run():
+        deadlines=[];timeout=asyncio.timeout
+        def capture_deadline(seconds):
+            deadline=timeout(seconds);deadlines.append(deadline);return deadline
+        monkeypatch.setattr(providers.asyncio,'timeout',capture_deadline)
         class SlowStream(httpx.AsyncByteStream):
             def __init__(self):self.chunks=0;self.closed=False
             async def __aiter__(self):
-                for _ in range(100):
-                    await asyncio.sleep(.01);self.chunks+=1;yield b' '
+                self.chunks+=1;yield b' '
+                # Exercise the real overall timeout only after the response
+                # starts. A busy runner may spend >200ms on SQLite admission.
+                assert len(deadlines)==1
+                deadlines[0].reschedule(asyncio.get_running_loop().time())
+                await asyncio.Future()
             async def aclose(self):self.closed=True
         stream=SlowStream();calls=[]
         def response(request):calls.append(request);return httpx.Response(200,stream=stream)
         p=Providers(settings(tmp_path),httpx.MockTransport(response))
         try:
             with pytest.raises(ProviderError) as exc:
-                await asyncio.wait_for(p.get('lrclib','https://lrclib.net/api/search'),2)
+                await asyncio.wait_for(p.get('lrclib','https://lrclib.net/api/search'),15)
             assert exc.value.code=='unknown_outcome'
-            assert len(calls)==1 and 0<stream.chunks<100 and stream.closed
+            assert len(calls)==1 and stream.chunks==1 and stream.closed
             assert db.fetchone(p.settings.db_path,"SELECT COUNT(*) n FROM provider_calls WHERE provider='lrclib'")['n']==1
         finally:await p.close()
     asyncio.run(run())
