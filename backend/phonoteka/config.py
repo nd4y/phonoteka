@@ -61,6 +61,8 @@ class Settings:
     webhook_max_pending: int = 10000
 
     def __post_init__(self):
+        if type(self.provider_daily_limit) is not int or self.provider_daily_limit < 0:
+            raise ValueError("PROVIDER_DAILY_LIMIT must be a non-negative integer (0 disables the local quota)")
         if type(self.auth_enabled) is not bool:
             raise ValueError("auth_enabled must be a boolean")
         if type(self.input_grace_seconds) is not int or not 0 <= self.input_grace_seconds <= 86400:
@@ -111,7 +113,7 @@ class Settings:
             discogs_enabled=boolean('DISCOGS_ENABLED',False),
             discogs_token_file=Path(os.environ['DISCOGS_TOKEN_FILE']) if os.environ.get('DISCOGS_TOKEN_FILE') else None,
             musicbrainz_host=os.environ.get("MUSICBRAINZ_HOST", "musicbrainz.org"),
-            provider_daily_limit=max(1,min(int(os.environ.get("PROVIDER_DAILY_LIMIT","2500")),10000)),
+            provider_daily_limit=min(int(os.environ.get("PROVIDER_DAILY_LIMIT","2500")),10000),
             io_threads=max(1, min(int(os.environ.get("IO_THREADS", "2")), 8)),
             input_grace_seconds=int(os.environ.get('INPUT_GRACE_SECONDS', '60')),
             session_hours=int(os.environ.get('SESSION_HOURS', '12')),

@@ -107,7 +107,7 @@ def reserve(settings,provider,operation='metadata',revision=None,kind=None):
             usage=json.loads(row[0]) if row else {'calls':0,'limit':RECOGNITION_CALL_LIMIT}
             if usage['calls']>=RECOGNITION_CALL_LIMIT:raise UsageError('recognition_attempt_budget_exhausted')
         conn.execute('DELETE FROM provider_calls WHERE at<?',(now-86400,))
-        if conn.execute('SELECT COUNT(*) FROM provider_calls WHERE provider=?',(provider,)).fetchone()[0]>=settings.provider_daily_limit:
+        if settings.provider_daily_limit and conn.execute('SELECT COUNT(*) FROM provider_calls WHERE provider=?',(provider,)).fetchone()[0]>=settings.provider_daily_limit:
             raise UsageError('budget_exhausted')
         if conn.execute("SELECT COUNT(*) FROM settings WHERE key LIKE 'provider_attempt:%'").fetchone()[0]>=MAX_RECORDS:
             # The count cap may shorten terminal history, but never the current
