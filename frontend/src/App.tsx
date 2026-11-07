@@ -1892,7 +1892,7 @@ export default function App() {
                   busy={busy}
                   revision={publicationRevision}
                   onPlan={showPlan}
-                  onExport={() => submitJob("export_ready")}
+                  onExport={(layout) => submitJob("export_ready", [], { layout })}
                 />
                 <details className="panel policy-details">
                   <summary>Обложки и тексты рядом с аудио текущей страницы</summary>

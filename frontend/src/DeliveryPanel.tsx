@@ -8,6 +8,7 @@ type ExportJob = Job & {
   export_progress?: { copied: number; total: number; eta_seconds: number | null };
 };
 type Snapshot = {
+  layout?: "source" | "artist_album";
   snapshot_available?: boolean;
   id: string;
   created_at: string;
@@ -27,7 +28,7 @@ export function DeliveryPanel({
   onPlan,
   revision,
 }: {
-  onExport: () => Promise<Job | null>;
+  onExport: (layout: "source" | "artist_album") => Promise<Job | null>;
   busy: boolean;
   onPlan: () => void;
   revision: string;
@@ -36,6 +37,7 @@ export function DeliveryPanel({
     [starting, setStarting] = useState(false),
     [watch, setWatch] = useState(0);
   const [finished, setFinished] = useState("");
+  const [catalogFolders, setCatalogFolders] = useState(true);
   const admission = useRef(false);
   const fetchSeq = useRef(0),
     snapshotKey = useRef("");
@@ -86,7 +88,7 @@ export function DeliveryPanel({
     admission.current = true;
     setStarting(true);
     try {
-      const admitted = await onExport();
+      const admitted = await onExport(catalogFolders ? "artist_album" : "source");
       if (admitted) {
         sessionStorage.setItem("phonoteka-export-job", admitted.id);
         setJob(admitted);
@@ -211,6 +213,17 @@ export function DeliveryPanel({
           </button>
         </div>
       )}
+      {status && status.ready_count > 0 && (
+        <label className="checkline">
+          <input
+            type="checkbox"
+            checked={catalogFolders}
+            disabled={busy || starting || (!!job && isActiveJob(job))}
+            onChange={(event) => setCatalogFolders(event.target.checked)}
+          />
+          Новый снимок: папки Исполнитель / Альбом / Трек
+        </label>
+      )}
       {status && status.ready_count > 0 && !snapshot?.snapshot_available && exportButton}
       {job && (
         <div role="status">
@@ -260,6 +273,9 @@ export function DeliveryPanel({
             </strong>
             <p className="muted small">
               Снимок от {new Date(snapshot.created_at).toLocaleString("ru-RU")}
+              {snapshot.layout === "artist_album"
+                ? " · Исполнитель / Альбом / Трек"
+                : " · Исходные имена и папки"}
             </p>
           </div>
           {snapshot.snapshot_available && (

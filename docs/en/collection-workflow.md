@@ -1,5 +1,15 @@
 # From a folder to organized music
 
+## Catalog export
+
+In Ready files, **New snapshot: Artist / Album / Track folders** controls the next snapshot. It is enabled initially; deselect it to keep Ready paths. Existing snapshots retain their own layout until a new one succeeds. The API accepts `params.layout: "artist_album"` for `export_ready`; omitted values keep the compatible `source` layout.
+
+Catalog folders use album artist (or artist), album, disc/track numbers when present, and title. Missing artist or album produces an `Unknown Artist` or `Unknown Album` folder; missing title uses the source filename. These labels do not fill tags or claim recognition. Case, Unicode, reserved characters and long names are normalized for portable paths. Collisions receive stable suffixes instead of overwriting or merging unrelated folders. The manifest records `source_path` alongside each new path and checksum.
+
+Only accepted, current Ready revisions enter the snapshot. LRC files stay beside their audio; registered cover sidecars use a matching `.cover.jpg` or `.cover.png` name. Shared cover content may be copied for each track while retaining all source permissions and provenance. The ZIP and playlist use the new names. Work, Ready and original audio are not renamed. Profile exceptions remain in the manifest; folder organization is not a claim of complete metadata, listening acceptance or device verification.
+
+## Review and delivery
+
 Preparation and the pending-files search include expired provider matches whose content is no longer available. A historical successful search does not make those files ready for review. Current usable results and completed searches without matches are reused. Provider permissions still apply to each new request.
 
 The four main sections are **Overview**, **Collection**, **Processing**, and **Ready files**. Settings are in the left menu above the account button. Help opens guided setup. Previously saved navigation, filters, and scroll positions remain available after refresh.
