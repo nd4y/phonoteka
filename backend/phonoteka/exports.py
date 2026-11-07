@@ -14,14 +14,33 @@ from . import db,media,security,provider_policy,export_leases,publication_paths,
 from .providers import scalar
 
 
+MAX_MANIFEST_BYTES = 32 * 1024**2
+
+
+def _check_manifest_size(document):
+    # Match media._journal's UTF-8 serialization without retaining a second
+    # complete copy. Reject before copying audio or replacing latest_export.
+    size = 0
+    for chunk in json.JSONEncoder(ensure_ascii=False,sort_keys=True).iterencode(document):
+        size += len(chunk.encode('utf-8'))
+        if size > MAX_MANIFEST_BYTES:
+            raise media.MediaError('export_manifest_too_large','Манифест экспорта превышает безопасный размер')
+
+
 def manifest(settings,identity):
     try:identity=str(uuid.UUID(identity))
     except ValueError:raise security.error(404,'export_missing','Экспорт не найден')
     path=settings.state_dir/'exports'/identity/'manifest.json'
     try:media._no_links(path)
     except media.MediaError:raise security.error(404,'export_missing','Экспорт не найден')
-    if not path.is_file() or path.stat().st_size>10*1024**2:raise security.error(404,'export_missing','Экспорт не найден')
-    document = json.loads(path.read_text(encoding='utf-8'))
+    if not path.is_file():raise security.error(404,'export_missing','Экспорт не найден')
+    with media._file(path) as stream:
+        if os.fstat(stream.fileno()).st_size > MAX_MANIFEST_BYTES:
+            raise security.error(409,'export_manifest_too_large','Манифест экспорта превышает безопасный размер')
+        raw = stream.read(MAX_MANIFEST_BYTES + 1)
+    if len(raw) > MAX_MANIFEST_BYTES:
+        raise security.error(409,'export_manifest_too_large','Манифест экспорта превышает безопасный размер')
+    document = json.loads(raw)
     if document.get('id') != identity:
         raise security.error(409, 'export_conflict', 'Идентификатор снимка изменился')
     return document
@@ -76,6 +95,7 @@ def generate(settings,authorize=lambda:None,progress=None,*,layout='source'):
     entries.extend(sidecars)
     identity=str(uuid.uuid4());base=settings.state_dir/'exports';media._make_directory(base)
     document={'id':identity,'created_at':db.utcnow(),'files':entries,'audio_files':len(audio_entries),'sidecar_files':len(sidecars),'multi_file_atomic':False,'total_bytes':sum(x['size'] for x in entries),'verified_on':'server_ready','delivery_verified':False,'snapshot_available':True,'resolved_track_ids':aliases,'layout':layout,'layout_version':1}
+    _check_manifest_size(document)
     playlist=['#EXTM3U']
     for entry in audio_entries:
         label=(entry['artist']+' - '+entry['title']).replace('\n',' ').replace('\r',' ')
