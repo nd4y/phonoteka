@@ -1,5 +1,7 @@
 # phonoteka
 
+Full reports read metadata sequentially without retaining the collection's cached artwork and drafts: [report memory](docs/en/report-memory.md).
+
 Local tag encoding repairs retain their file origin: [rules and limits](docs/en/local-tag-encoding.md).
 
 Ready-file snapshots can use **Artist / Album / Track** folders with portable names and collision protection. The manifest retains the original Ready paths. Work files, accepted revisions and provider restrictions remain unchanged. See [catalog export](docs/en/collection-workflow.md#catalog-export).
