@@ -285,7 +285,9 @@ export function AnalysisPanel({
                   <strong>
                     {candidate.kind === "cover"
                       ? "Обложка"
-                      : text(candidate.tags?.title) || candidate.title || "Вариант"}
+                      : candidate.kind === "release"
+                        ? `Альбом: ${text(candidate.tags?.album) || candidate.title || "издание"}`
+                        : text(candidate.tags?.title) || candidate.title || "Вариант"}
                   </strong>
                   <span className="muted small">
                     {text(candidate.tags?.artist) || candidate.artist || candidate.provider}

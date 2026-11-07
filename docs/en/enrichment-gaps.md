@@ -19,3 +19,7 @@ When an ASR result is retained, the missing-lyrics explanation includes the frac
 When LRCLIB's exact result contains only plain text, the search also checks other variants. If that extra request fails, the plain result is preserved and the search remains incomplete. Cover lookup checks up to three matching album editions, or an explicit MusicBrainz release ID embedded in the file. Artwork remains subject to review; multiple editions no longer suppress the entire lookup.
 
 Catalog explanations use a compact SQL projection without cached artwork, song lyrics or transcripts. Reading reasons does not enqueue processing or modify the collection.
+
+Releases of matching MusicBrainz recordings appear as separate album candidates. Selecting an edition proposes its album name, MusicBrainz release ID and available date while preserving the song title and artist. When the album is missing, cover lookup runs only if all returned editions share one album name; different album names require selection. Nothing is applied automatically. The list is bounded to eight edition candidates.
+
+Fingerprint recognition preserves an existing album in the search query when both embedded title and artist exactly match the recognized identity. Conflicting or missing identity tags use the fingerprint result instead.

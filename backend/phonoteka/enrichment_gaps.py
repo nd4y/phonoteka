@@ -106,8 +106,8 @@ def describe(conn, settings, row, *, analysis=None, proposal=None, connection=No
                 'Результат поиска относится к прежней версии файла.' if analysis else 'Поиск для этой записи ещё не выполнялся.',
                 'search', 'Запустите поиск для текущей версии файла.')
             continue
-        relevant = [c for c in candidates if
-                    c.get('kind') == ('cover' if field == 'cover' else 'lyrics' if field == 'synced_lyrics' else 'metadata')]
+        relevant_kinds = {'cover'} if field == 'cover' else {'lyrics'} if field == 'synced_lyrics' else {'metadata', 'release'}
+        relevant = [c for c in candidates if c.get('kind') in relevant_kinds]
         usable = [c for c in relevant if not c.get('transient') and
                   (not c.get('usage') or (provider_policy._allowed(conn, c['usage'], 'cache') and
                                          provider_policy._allowed(conn, c['usage'], 'embed')))]

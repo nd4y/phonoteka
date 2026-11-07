@@ -3,6 +3,7 @@ import time
 import tracemalloc
 
 from phonoteka import db, enrichment_gaps
+from phonoteka.providers import album_candidates
 from test_backend import authenticated, client, seed, settings
 
 
@@ -16,6 +17,20 @@ def gaps(client, identity):
     response = client.get('/api/tracks/' + identity)
     assert response.status_code == 200, response.text
     return {r['field']: r for r in response.json()['enrichment_gaps']}
+
+
+def test_album_release_is_visible_and_selectable_without_changing_title(client, settings):
+    headers=authenticated(client,settings);identity,sha=seed(settings)
+    candidates=album_candidates([{'releases':[{'id':'00000000-0000-0000-0000-000000000001','title':'Album','date':'2001'}]}],'')
+    analysis(settings,identity,sha,{'sources':[{'provider':'musicbrainz','state':'candidates'}],'candidates':candidates})
+    value=gaps(client,identity)['album']
+    assert value['code']=='candidates_require_review' and value['candidate_count']==1
+    response=client.post('/api/tracks/'+identity+'/analysis/select',headers={**headers,'If-Match':sha},json={'candidate_ids':[candidates[0]['id']]})
+    assert response.status_code==201,response.text
+    payload=json.loads(db.fetchone(settings.db_path,'SELECT payload FROM proposals WHERE id=?',(response.json()['id'],))['payload'])
+    assert payload['tags']['album']=='Album' and 'title' not in payload['tags'] and 'artist' not in payload['tags']
+    assert payload['field_sources']['album']['provider']=='musicbrainz'
+    assert client.get('/api/tracks/'+identity).json()['tags']['title']=='Example'
 
 
 def test_reasons_are_current_and_field_specific(client, settings):
