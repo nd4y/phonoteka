@@ -20,6 +20,45 @@ def candidate(identity):
             'match':{'state':'fingerprint_match','reasons':['recording_version_unverified']}}
 
 
+def pending_fallback(sha='a'*64):
+    return {'input_sha256':sha, 'sources':[{'provider':'shazam','state':'no_match'},
+            {'provider':'acoustid','state':'key_required'}],
+            'recognition_segments':[{'state':'no_match','offset':offset,'sample_sha256':'c'*64,
+                'extractor_profile':recognition.POLICY} for offset in recognition.offsets(240)]}
+
+
+def test_newly_configured_fallback_reuses_only_conclusive_negative_fragment_evidence():
+    previous=pending_fallback()
+    result=recognition.pending_acoustid(previous,'a'*64,240)
+    assert result['reused_for_acoustid'] and result['state']=='insufficient'
+    assert not result['possible_mix'] and not result['release_verified'] and not result['lyrics_verified']
+    result['segments'][0]['state']='changed'
+    assert previous['recognition_segments'][0]['state']=='no_match'
+
+
+@pytest.mark.parametrize('change', [
+    'revision','mixed','matched','unknown','incomplete','profile','offset','sample',
+    'no_key_history','already_tried','unknown_duration','candidate','recording_id',
+])
+def test_pending_fallback_rejects_changed_incomplete_ambiguous_or_previously_sent_evidence(change):
+    previous=pending_fallback();duration=240
+    segment=previous['recognition_segments'][0]
+    if change=='revision':previous['input_sha256']='b'*64
+    elif change=='mixed':previous['possible_mix']=True
+    elif change=='matched':segment['state']='match'
+    elif change=='unknown':segment['state']='unknown_outcome'
+    elif change=='incomplete':previous['recognition_segments'].pop()
+    elif change=='profile':segment['extractor_profile']='older-policy'
+    elif change=='offset':segment['offset']+=10
+    elif change=='sample':segment['sample_sha256']='not-a-digest'
+    elif change=='no_key_history':previous['sources'].pop()
+    elif change=='already_tried':previous['sources'][1]['state']='unknown_outcome'
+    elif change=='unknown_duration':duration=float('nan')
+    elif change=='candidate':segment['candidate']=candidate('one')
+    elif change=='recording_id':segment['provider_recording_id']='one'
+    assert recognition.pending_acoustid(previous,'a'*64,duration) is None
+
+
 @pytest.mark.parametrize('answers,expected', [(['one','one'],'agreement'),(['one','two'],'conflict'),
                                               ([None,'one'],'insufficient'),([None,None],'insufficient')])
 def test_second_fragment_even_after_match_and_recording_only_verdict(monkeypatch,answers,expected):
