@@ -174,6 +174,45 @@ def references(payload):
     return values
 
 
+def local_tag_encoding_source(row, meta, name, value):
+    """Prove a byte-preserving metadata repair from this file, not a suggestion."""
+    if name not in {'title', 'artist', 'album', 'albumartist'}:
+        return None
+    provenance = meta.get('usage_provenance', {}).get(name, {})
+    if (provenance.get('usage') or provenance.get('inherited_restrictions')
+            or provenance.get('origin') not in {None, 'preexisting', 'owner_supplied'}
+            or provenance.get('provider') not in LOCAL | {None}):
+        return None
+    original = field_values({'tags': meta.get('tags', {})}).get(name)
+    if not original or len(original) != 1 or not isinstance(value, list) or len(value) != 1:
+        return None
+    if not original[0] or len(original[0]) > 4096 or value == original:
+        return None
+    frontier = [(original[0], [])]
+    seen = {original[0]}
+    for _ in range(2):
+        following = []
+        for text, steps in frontier:
+            for encoding, decoding in [('latin1', 'utf-8'), ('latin1', 'cp1251'), ('cp1251', 'utf-8')]:
+                try:
+                    repaired = text.encode(encoding).decode(decoding)
+                    if repaired.encode(decoding).decode(encoding) != text:
+                        continue
+                except UnicodeError:
+                    continue
+                if repaired in seen:
+                    continue
+                seen.add(repaired)
+                path = steps + [[encoding, decoding]]
+                if repaired == value[0]:
+                    return {'origin': 'preexisting', 'license_verified': False, 'rights_status': 'unknown',
+                            'value_sha256': digest(value), 'local_transform': {'kind': 'reversible_tag_encoding',
+                            'input_sha256': row['sha256'], 'source_value_sha256': digest(original), 'steps': path}}
+                following.append((repaired, path))
+        frontier = following
+    return None
+
+
 def decorate_manual(conn, row, payload):
     """Keep known restrictions when values are copied or owner-edited."""
     payload = deepcopy(payload)
@@ -186,6 +225,12 @@ def decorate_manual(conn, row, payload):
     embedded = field_values({"tags": meta.get("tags", {}), "lrc": meta.get("lrc", "")})
     for name, value in field_values(payload).items():
         if fields.get(name, {}).get("usage"):
+            continue
+        field = fields.get(name, {})
+        repair_input = not field or field.get('local_transform', {}).get('kind') == 'reversible_tag_encoding'
+        local_repair = local_tag_encoding_source(row, meta, name, value) if repair_input else None
+        if local_repair:
+            fields[name] = local_repair
             continue
         previous_field = known.get(name, {})
         if previous_field.get("usage"):

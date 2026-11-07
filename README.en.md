@@ -1,5 +1,7 @@
 # phonoteka
 
+Local tag encoding repairs retain their file origin: [rules and limits](docs/en/local-tag-encoding.md).
+
 Ready-file snapshots can use **Artist / Album / Track** folders with portable names and collision protection. The manifest retains the original Ready paths. Work files, accepted revisions and provider restrictions remain unchanged. See [catalog export](docs/en/collection-workflow.md#catalog-export).
 
 After CUE extraction or audio recovery, collection progress counts the prepared files. Retained inputs are listed separately, and pending-search counts use the same expiry rules as launching a job: [prepared files and sources](docs/en/prepared-sources.md).
