@@ -39,6 +39,7 @@ export type RecordingClassification = {
   at?: string;
 };
 export type Track = {
+  enrichment_gaps?: EnrichmentGap[];
   possible_mix?: boolean;
   record_type?: "possible_mix" | "single_recording" | "audio" | "cue_sheet" | "cue_album_image";
   recording_classification?: RecordingClassification;
@@ -74,6 +75,18 @@ export type Track = {
   proposal?: Proposal | null;
   audit?: Record<string, unknown> | null;
   history?: Array<Record<string, unknown>>;
+};
+export type EnrichmentGap = {
+  field: "title" | "artist" | "album" | "cover" | "synced_lyrics";
+  code: string;
+  message: string;
+  action: "sources" | "review" | "lyrics" | "settings" | "search" | "recognize";
+  next_step: string;
+  provider?: string | null;
+  checked_at?: string | null;
+  analysis_current: boolean;
+  candidate_count?: number | null;
+  last_alignment_coverage?: number;
 };
 export type TrackPage = { items: Track[]; total: number; page: number; page_size: number };
 export type Summary = {

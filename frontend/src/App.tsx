@@ -1,5 +1,6 @@
 import { requestId } from "./api";
 import { reviewNextAction } from "./reviewNextAction";
+import { EnrichmentGaps, GapSummary } from "./EnrichmentGaps";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
@@ -2154,6 +2155,7 @@ function TrackList({
                   {recordingLabel(track) && ` · ${recordingLabel(track)}`}
                   {track.proposal?.input_sha256 === track.sha256 ? " · Предложение" : ""}
                 </span>
+                <GapSummary gaps={track.enrichment_gaps} />
               </span>
             </span>
             <span className="format-cell">
@@ -2167,7 +2169,11 @@ function TrackList({
             </span>
             <span className="state-cell">
               <StatusMark
-                ok={!!textTag(track.tags, "title") && !!textTag(track.tags, "artist")}
+                ok={
+                  !!textTag(track.tags, "title") &&
+                  !!textTag(track.tags, "artist") &&
+                  !!textTag(track.tags, "album")
+                }
                 label="Теги"
               />
             </span>
@@ -2609,6 +2615,21 @@ function TrackEditor({
               <ArrowRight size={17} />
             </button>
           </div>
+          <EnrichmentGaps
+            gaps={track.enrichment_gaps}
+            disabled={busy || saving || changed || editingBlocked}
+            onAction={(gap) => {
+              if (gap.action === "settings") onTab("settings");
+              else if (gap.action === "review" || gap.action === "lyrics") {
+                setSourcesOpen(false);
+                onTab(gap.action === "lyrics" ? "lyrics" : "review");
+              } else if (gap.action === "search" && summary?.capabilities.metadata_search) {
+                void onJob("analyze");
+              } else if (gap.action === "recognize" && summary?.capabilities.recognition) {
+                void onJob("recognize");
+              } else setSourcesOpen(true);
+            }}
+          />
           <div className="editor-tabs" role="tablist" aria-label="Редактор трека">
             <button
               role="tab"

@@ -1,0 +1,177 @@
+"""Explain missing fields from current evidence, without fetching provider data.
+
+Catalog pages project candidate flags in SQLite. Cover bytes, lyrics and ASR
+transcripts must not be copied into this read model or accumulated for a page.
+"""
+import json
+
+from . import acoustid, media, provider_policy, recording_review
+from .providers import scalar
+
+
+FIELDS = ('title', 'artist', 'album', 'cover', 'synced_lyrics')
+RETRY_STATES = {
+    'provider_cooldown', 'provider_unavailable', 'rate_limited', 'budget_exhausted',
+    'recognition_attempt_budget_exhausted', 'timeout', 'network_error', 'deadline_exceeded', 'partial',
+}
+CONFIG_STATES = {'key_required', 'provider_unauthorized', 'disabled', 'provider_disabled'}
+
+
+def project(conn, ids):
+    if not ids:
+        return {}
+    query = '''SELECT a.track_id,a.input_sha256,a.updated_at,
+        json_extract(a.payload,'$.sources') AS sources,
+        json_extract(a.payload,'$.alignment.coverage') AS alignment_coverage,
+        (SELECT json_group_array(json_object(
+            'provider',json_extract(c.value,'$.provider'),
+            'kind',json_extract(c.value,'$.kind'),
+            'match',json_extract(c.value,'$.match'),
+            'usage',json_extract(c.value,'$.usage'),
+            'transient',COALESCE(json_extract(c.value,'$.transient_only'),0),
+            'title',COALESCE(length(json_extract(c.value,'$.tags.title'))>0,0),
+            'artist',COALESCE(length(json_extract(c.value,'$.tags.artist'))>0,0),
+            'album',COALESCE(length(json_extract(c.value,'$.tags.album'))>0,0),
+            'releases',COALESCE(json_array_length(c.value,'$.releases'),0),
+            'cover',COALESCE(length(json_extract(c.value,'$.cover'))>0,0),
+            'synced_lyrics',COALESCE(length(json_extract(c.value,'$.lrc'))>0,0),
+            'plain',COALESCE(length(json_extract(c.value,'$.plain_lyrics'))>0,0),
+            'instrumental',COALESCE(json_extract(c.value,'$.instrumental_claim'),0)
+        )) FROM json_each(a.payload,'$.candidates') c) AS candidates
+        FROM analyses a WHERE a.track_id IN (%s)''' % ','.join('?' for _ in ids)
+    return {r['track_id']: {**dict(r), 'sources': json.loads(r['sources'] or '[]'),
+                          'candidates': json.loads(r['candidates'] or '[]')}
+            for r in conn.execute(query, ids)}
+
+
+def missing_fields(meta):
+    if meta.get('format') == 'cue' or meta.get('cue_album_image'):
+        return []
+    tags = meta.get('tags', {})
+    return [field for field in FIELDS if not (
+        meta.get('has_art') if field == 'cover' else
+        meta.get('lrc') if field == 'synced_lyrics' else scalar(tags, field).strip())]
+
+
+def describe(conn, settings, row, *, analysis=None, proposal=None, connection=None):
+    meta = json.loads(row['metadata'])
+    missing = missing_fields(meta)
+    if not missing:
+        return []
+    if connection is None:
+        connection = acoustid.public_connection(settings)
+    current = bool(analysis and analysis['input_sha256'] == row['sha256'])
+    checked_at = analysis['updated_at'] if analysis else None
+    candidates = analysis['candidates'] if current else []
+    sources = {s.get('provider'): s.get('state') for s in analysis['sources']} if current else {}
+    draft = json.loads(proposal['payload']) if proposal and proposal['input_sha256'] == row['sha256'] else {}
+    draft = provider_policy.redact_payload(conn, draft) if draft else {}
+    result = []
+    for field in missing:
+        def add(code, message, action, next_step, provider=None, count=None):
+            result.append({'field': field, 'code': code, 'message': message, 'action': action,
+                           'next_step': next_step, 'provider': provider,
+                           'checked_at': checked_at, 'analysis_current': current,
+                           'candidate_count': count})
+            coverage = analysis.get('alignment_coverage') if analysis else None
+            if field == 'synced_lyrics' and type(coverage) in (int, float) and 0 <= coverage <= 1:
+                result[-1]['last_alignment_coverage'] = coverage
+
+        if row['status'] == 'missing':
+            add('file_missing', 'Файл недоступен в подключённой папке.', 'sources', 'Проверьте папку и повторите сканирование.')
+            continue
+        if meta.get('input_error'):
+            add('invalid_audio', 'Аудио не удалось прочитать.', 'sources', 'Проверьте исходный файл или создайте читаемую копию, если звук декодируется.')
+            continue
+        if recording_review.possible_mix(meta, row['sha256']):
+            add('recording_unconfirmed', 'Возможно, это несколько композиций в одном файле.', 'sources', 'Прослушайте запись и уточните её тип перед применением данных.')
+            continue
+        if not meta.get('write_supported', meta.get('format') in {'mp3', 'flac'}):
+            add('format_requires_preparation', 'В этот формат нельзя записать данные напрямую.', 'sources', 'Создайте редактируемую копию в разделе источников.')
+            continue
+        draft_value = draft.get('lrc' if field == 'synced_lyrics' else 'cover') if field in {'synced_lyrics', 'cover'} else scalar(draft.get('tags', {}), field).strip()
+        if field == 'synced_lyrics' and draft_value:
+            try:
+                draft_value = media.parse_lrc(draft_value)['complete']
+            except media.MediaError:
+                draft_value = False
+        if draft_value:
+            add('proposal_ready', 'Есть сохранённый вариант, ещё не записанный в файл.', 'review', 'Проверьте предложение и запишите изменения.')
+            continue
+        if field == 'synced_lyrics' and meta.get('lyrics') and not analysis:
+            add('plain_lyrics_only', 'В файле есть текст без таймкодов.', 'lyrics', 'Проверьте текст и запустите выравнивание с аудио.')
+            continue
+        if not analysis or not current:
+            add('search_stale' if analysis else 'not_searched',
+                'Результат поиска относится к прежней версии файла.' if analysis else 'Поиск для этой записи ещё не выполнялся.',
+                'search', 'Запустите поиск для текущей версии файла.')
+            continue
+        relevant = [c for c in candidates if
+                    c.get('kind') == ('cover' if field == 'cover' else 'lyrics' if field == 'synced_lyrics' else 'metadata')]
+        usable = [c for c in relevant if not c.get('transient') and
+                  (not c.get('usage') or (provider_policy._allowed(conn, c['usage'], 'cache') and
+                                         provider_policy._allowed(conn, c['usage'], 'embed')))]
+        filled = [c for c in usable if c.get(field)]
+        if filled:
+            reasons = {r for c in filled for r in (c.get('match') or {}).get('reasons', [])}
+            code = 'timing_requires_review' if field == 'synced_lyrics' and reasons & {'invalid_lyrics', 'lyrics_out_of_range'} else 'candidates_require_review'
+            message = 'В найденном тексте есть ошибки таймкодов.' if code == 'timing_requires_review' else 'Найдены варианты, но подходящий ещё не выбран.'
+            add(code, message, 'sources', 'Сравните варианты источников с этой записью.', count=len(filled))
+            continue
+        if relevant and not usable:
+            kinds = 'cover' if field == 'cover' else 'lyrics' if field == 'synced_lyrics' else 'metadata'
+            can_refresh = any(provider_policy.rule(conn, c.get('provider'), kinds).get('allow_cache') and
+                              provider_policy.rule(conn, c.get('provider'), kinds).get('allow_embed') for c in relevant)
+            add('results_expired' if can_refresh else 'source_policy_restricted',
+                'Сохранённые результаты больше нельзя применить; нужен новый поиск.' if can_refresh else 'Настройки источника запрещают сохранение или запись этих данных.',
+                'search' if can_refresh else 'settings',
+                'Обновите результаты поиска.' if can_refresh else 'Проверьте разрешённые операции источника в настройках.')
+            continue
+        providers = ('coverartarchive',) if field == 'cover' else ('lrclib',) if field == 'synced_lyrics' else ('musicbrainz', 'acoustid', 'shazam')
+        failed = next((p for p in providers if sources.get(p) in RETRY_STATES), None)
+        if failed:
+            add('provider_retry', 'Поиск не завершён: источник временно недоступен или запрос отложен.', 'search', 'Повторите поиск после окончания паузы источника.', failed)
+            continue
+        if field == 'synced_lyrics':
+            if meta.get('lyrics') or any(c.get('plain') for c in usable):
+                add('plain_lyrics_only', 'Найден текст без таймкодов.', 'sources', 'Проверьте текст, затем выровняйте его с аудио.', 'lrclib')
+                continue
+            if any(c.get('instrumental') for c in usable):
+                add('instrumental_unconfirmed', 'Источник пометил вариант как инструментальный. Это ещё не подтверждено.', 'sources', 'Прослушайте запись и проверьте совпадение; текст не исключён автоматически.', 'lrclib')
+                continue
+        if field == 'album' and any(c.get('releases') for c in usable):
+            add('release_unselected', 'Для записи найдены издания, но альбом ещё не выбран.', 'sources', 'Проверьте альбом и состав издания в вариантах источников.', 'musicbrainz')
+            continue
+        if field == 'cover' and not sources.get('coverartarchive'):
+            if sources.get('musicbrainz') in RETRY_STATES:
+                add('provider_retry', 'Поиск обложки не начат: не завершён поиск издания.', 'search', 'Повторите поиск метаданных после окончания паузы источника.', 'musicbrainz')
+                continue
+            add('cover_not_searched', 'Нет результата отдельного поиска обложки.', 'sources', 'Проверьте альбом и варианты изданий, затем повторите поиск.', 'coverartarchive')
+            continue
+        restricted = next((p for p in providers if sources.get(p) == 'provider_policy_denied'), None)
+        if restricted:
+            add('source_policy_restricted', 'Запрос запрещён настройками использования источника.', 'settings', 'Проверьте разрешённые операции источника в настройках.', restricted)
+            continue
+        configured = next((p for p in providers if sources.get(p) in CONFIG_STATES), None)
+        if configured:
+            refreshed = configured == 'acoustid' and connection['configured']
+            add('connection_now_ready' if refreshed else 'connection_required',
+                'AcoustID уже подключён; прошлый поиск выполнялся без доступа.' if refreshed else 'Один из источников не подключён или отклонил доступ.',
+                'recognize' if refreshed else 'settings',
+                'Повторите распознавание с текущим подключением.' if refreshed else 'Проверьте подключение источника в настройках.', configured)
+            continue
+        if any(sources.get(p) == 'insufficient_metadata' for p in providers):
+            add('identity_required', 'Для поиска не хватает названия или исполнителя.', 'recognize', 'Сначала распознайте запись по аудиоотпечатку.')
+            continue
+        if any(sources.get(p) == 'no_match' for p in providers):
+            add('no_result_for_query', 'Последний поиск не дал подходящих данных для этого поля.', 'sources', 'Проверьте название и исполнителя, попробуйте другой вариант или источник.')
+            continue
+        add('field_not_returned', 'Поиск не дал значения для этого поля; причина не установлена.', 'sources', 'Откройте результаты источников и проверьте исходные данные.')
+    return result
+
+
+def for_page(conn, settings, rows, proposals):
+    analyses = project(conn, [r['id'] for r in rows])
+    connection = acoustid.public_connection(settings)
+    return {r['id']: describe(conn, settings, r, analysis=analyses.get(r['id']),
+                              proposal=proposals.get(r['id']), connection=connection) for r in rows}
