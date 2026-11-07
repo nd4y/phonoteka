@@ -165,7 +165,7 @@ def describe(conn, settings, row, *, analysis=None, proposal=None, connection=No
             if sources.get('musicbrainz') in RETRY_STATES:
                 add('provider_retry', 'Поиск обложки не начат: не завершён поиск издания.', 'search', 'Повторите поиск метаданных после окончания паузы источника.', 'musicbrainz')
                 continue
-            add('cover_not_searched', 'Нет результата отдельного поиска обложки.', 'sources', 'Проверьте альбом и варианты изданий, затем повторите поиск.', 'coverartarchive')
+            add('cover_not_searched', 'Отдельный поиск обложки ещё не выполнялся.', 'sources', 'Проверьте альбом и варианты изданий, затем повторите поиск.', 'coverartarchive')
             continue
         restricted = next((p for p in providers if sources.get(p) == 'provider_policy_denied'), None)
         if restricted:

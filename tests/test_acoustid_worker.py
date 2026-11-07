@@ -67,8 +67,9 @@ def test_worker_fallback_and_metadata_refresh_preserve_evidence_without_file_wri
 
 
 @pytest.mark.parametrize('spent', [2,3])
-def test_new_acoustid_connection_continues_negative_search_without_repeating_shazam_or_resetting_budget(client, settings, monkeypatch, spent):
-    from test_recognition_segments import pending_fallback
+@pytest.mark.parametrize('historical', [False,True])
+def test_new_acoustid_connection_continues_search_without_repeating_shazam_or_resetting_budget(client, settings, monkeypatch, spent, historical):
+    from test_recognition_segments import pending_fallback,historical_match_fallback
     cfg=replace(settings,external_fingerprints=True,external_metadata=False)
     acoustid.save_connection(cfg,'initial',True,CLIENT)
     identity,sha=seed(cfg)
@@ -77,14 +78,15 @@ def test_new_acoustid_connection_continues_negative_search_without_repeating_sha
         meta.update(duration=240,has_art=True,audit={'state':'passed','sha256':sha,
             'profile':'full_decode_all_audio_streams','audio_identity':'b'*64})
         conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),identity))
-        conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(identity,sha,db.encode(pending_fallback(sha)),db.utcnow()))
+        previous=(historical_match_fallback if historical else pending_fallback)(sha)
+        conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(identity,sha,db.encode(previous),db.utcnow()))
     with provider_attempts.recognition_scope('b'*64,'original-job'):
         for _ in range(spent):
             attempt=provider_attempts.reserve(cfg,'shazam','fingerprint',sha,'file_sha256')
             provider_attempts.mark_sent(cfg,attempt['id'])
             provider_attempts.finish(cfg,attempt['id'],'no_match','not_found',200)
     async def forbidden(*args,**kwargs):
-        pytest.fail('Conclusive Shazam negatives must not be sent again to enable a newly configured fallback')
+        pytest.fail('Conclusive Shazam fragments must not be sent again to enable a newly configured fallback')
     monkeypatch.setattr(recognition,'identify_segments',forbidden)
     monkeypatch.setattr(acoustid,'fingerprint',lambda *args:'AQAAA_fixture_signature')
     sent=[]
@@ -109,6 +111,10 @@ def test_new_acoustid_connection_continues_negative_search_without_repeating_sha
             assert len(sent)==1 and sent[0]['audio_identity']=='b'*64
         payload=json.loads(db.fetchone(cfg.db_path,'SELECT payload FROM analyses WHERE track_id=?',(identity,))['payload'])
         assert next(s for s in payload['sources'] if s['provider']=='shazam')['reused_for_acoustid']
+        source=next(s for s in payload['sources'] if s['provider']=='shazam')
+        assert source['state']==('fingerprint_match' if historical else 'no_match')
+        assert bool(source.get('historical_result'))==historical
+        assert not any(c.get('provider')=='shazam' and c.get('tags') for c in payload.get('candidates',[]))
         assert len(payload['recognition_segments'])==2
         assert json.loads(db.setting(cfg.db_path,provider_attempts.RECOGNITION_PREFIX+'b'*64))['calls']==3
         assert media.sha256_file(cfg.work_root/'a.mp3')==sha

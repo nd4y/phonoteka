@@ -27,6 +27,42 @@ def pending_fallback(sha='a'*64):
                 'extractor_profile':recognition.POLICY} for offset in recognition.offsets(240)]}
 
 
+def historical_match_fallback(sha='a'*64):
+    value=pending_fallback(sha)
+    value['sources'][0]['state']='fingerprint_match'
+    value['recording_confirmation']='agreement'
+    value['candidates']=[{'id':'shazam:old','provider':'shazam','transient_only':True}]
+    for segment in value['recognition_segments']:
+        segment.update(state='match',provider='shazam',provider_recording_id='old',isrc='GBABC2400001')
+    return value
+
+
+def test_pending_fallback_retains_historical_identity_without_reviving_provider_content():
+    previous=historical_match_fallback()
+    result=recognition.pending_acoustid(previous,'a'*64,240)
+    assert result['historical_match'] and result['state']=='agreement'
+    assert not result['possible_mix'] and not result['release_verified'] and not result['lyrics_verified']
+    assert all('candidate' not in segment and 'tags' not in segment for segment in result['segments'])
+    assert {s['provider_recording_id'] for s in result['segments']}=={'old'}
+
+
+@pytest.mark.parametrize('change',['id_conflict','isrc_conflict','missing_id','missing_provider','wrong_provider','blank_id','live_tags','confirmation','source','unknown','mixed'])
+def test_pending_historical_match_fails_closed(change):
+    previous=historical_match_fallback();segment=previous['recognition_segments'][0]
+    if change=='id_conflict':segment['provider_recording_id']='other'
+    elif change=='isrc_conflict':segment['isrc']='GBABC2400002'
+    elif change=='missing_id':segment.pop('provider_recording_id')
+    elif change=='missing_provider':segment.pop('provider')
+    elif change=='wrong_provider':segment['provider']='other'
+    elif change=='blank_id':segment['provider_recording_id']=' '
+    elif change=='live_tags':previous['candidates'][0]['tags']={'title':'Still available'}
+    elif change=='confirmation':previous['recording_confirmation']='insufficient'
+    elif change=='source':previous['sources'][0]['state']='no_match'
+    elif change=='unknown':segment['state']='unknown_outcome'
+    elif change=='mixed':previous['possible_mix']=True
+    assert recognition.pending_acoustid(previous,'a'*64,240) is None
+
+
 def test_newly_configured_fallback_reuses_only_conclusive_negative_fragment_evidence():
     previous=pending_fallback()
     result=recognition.pending_acoustid(previous,'a'*64,240)

@@ -802,6 +802,8 @@ class Worker:
             failures=[entry['state'] for entry in segment_result['segments'] if entry['state'] not in {'match','no_match'}]
             recognition_source={'provider':'shazam','state':failures[0] if failures else 'needs_review' if segment_result['possible_mix'] else 'fingerprint_match' if identified else 'no_match'}
             if segment_result.get('reused_for_acoustid'):recognition_source['reused_for_acoustid']=True
+            if segment_result.get('historical_match'):
+                recognition_source.update(state='fingerprint_match',historical_result=True)
             if (configured['configured'] and not identified and not segment_result['possible_mix']
                     and not recording_review.possible_mix(meta,item['sha256'])
                     and not any(state in {'unknown_outcome','recognition_attempt_budget_exhausted','recognition_identity_required','budget_exhausted'} for state in failures)):
