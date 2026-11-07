@@ -109,13 +109,11 @@ def safe_code(value):
 
 def export(settings, kind):
     from . import lyrics_review
-    report=[]
+    report=[];source={}
     # Every exported result and policy decision belongs to one DB read snapshot.
     with db.connect(settings.db_path) as conn:
         conn.execute('BEGIN')
-        records=list(rows(settings,conn))
         source_outputs=catalog_sources.completed_sources(conn)
-        analyses={row['track_id']:row for row in conn.execute('SELECT * FROM analyses')}
         outcomes=defaultdict(list)
         for row in conn.execute("""WITH ranked AS (
             SELECT ji.item_key,j.id AS job_id,j.kind,j.state AS job_state,ji.state,ji.result,j.created_at,
@@ -127,7 +125,7 @@ def export(settings, kind):
                 'state':row['state'],'job_state':row['job_state'],'code':safe_code(result.get('code')),
                 'skipped':result.get('skipped') is True,'reason':safe_code(result.get('reason')),
                 'job_created_at':row['created_at']})
-        for row,meta in records:
+        for row,meta in rows(settings,conn):
             input_error=meta.get('input_error') if isinstance(meta.get('input_error'),dict) else {}
             entry={'id':row['id'],'path':row['relative_path'],'sha256':row['sha256'],'format':meta.get('format'),
                    'collection_role':'cue' if meta.get('format')=='cue' else 'source' if row['id'] in source_outputs else 'track',
@@ -145,11 +143,17 @@ def export(settings, kind):
                     entry[field]='';excluded.append(field)
             entry['provenance']=json.dumps(provenance or {'origin':'preexisting','rights_status':'unknown','license_verified':False},ensure_ascii=False)
             entry['policy_excluded_fields']=';'.join(excluded)
-            previous=analyses.get(row['id'])
-            analysis=json.loads(previous['payload']) if previous and previous['input_sha256']==row['sha256'] else {}
-            entry['analysis_state']=safe_code(analysis.get('state')) or ('stale' if previous else 'not_started')
+            # Reports need status/source codes, never cached cover bytes or ASR
+            # drafts. Project only these fields and release each input row.
+            previous=conn.execute("""SELECT input_sha256,
+                CASE WHEN input_sha256=? THEN json_extract(payload,'$.state') END AS state,
+                CASE WHEN input_sha256=? THEN json_extract(payload,'$.sources') END AS sources
+                FROM analyses WHERE track_id=?""",(row['sha256'],row['sha256'],row['id'])).fetchone()
+            current=previous and previous['input_sha256']==row['sha256']
+            sources=json.loads(previous['sources'] or '[]') if current else []
+            entry['analysis_state']=safe_code(previous['state'] if current else None) or ('stale' if previous else 'not_started')
             entry['analysis_sources']=json.dumps([{'provider':safe_code(source.get('provider')),
-                'state':safe_code(source.get('state'))} for source in analysis.get('sources',[])],ensure_ascii=False)
+                'state':safe_code(source.get('state'))} for source in sources],ensure_ascii=False)
             entry['latest_outcomes']=json.dumps(outcomes.get(row['id'],[]),ensure_ascii=False)
             audit=meta.get('audit') if isinstance(meta.get('audit'),dict) else {}
             entry['audit_state']=safe_code(audit.get('state')) if audit.get('sha256')==row['sha256'] else 'not_current'
@@ -165,7 +169,7 @@ def export(settings, kind):
             entry['youtube_url']='https://www.youtube.com/watch?v='+meta['youtube']['linked_id'] if meta.get('youtube',{}).get('linked_id') else ''
             entry['youtube_state']=meta.get('youtube',{}).get('state','unknown')
             report.append(entry)
-        source={row['id']:meta.get('youtube',{}) for row,meta in records}
+            source[row['id']]=meta.get('youtube',{})
         snapshot_summary=summary(settings,conn) if kind=='json' else None
     if kind=='json':return json.dumps({'schema':2,'files':report,'youtube':source,'summary':snapshot_summary},ensure_ascii=False,indent=2)
     stream=io.StringIO();writer=csv.DictWriter(stream,fieldnames=list(report[0]) if report else ['id','path','status']);writer.writeheader()
