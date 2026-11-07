@@ -268,12 +268,21 @@ class Providers:
         return candidates
 
     async def lyrics(self, query, duration):
-        data=None
-        if query.get('album') and query.get('artist') and duration:
+        data=[]
+        fallback_error=None
+        if query.get('album') and query.get('artist') and 1 <= duration <= 3600:
             exact=await self.get('lrclib','https://lrclib.net/api/get',{'track_name':query['title'],'artist_name':query['artist'],'album_name':query['album'],'duration':round(duration)})
             if isinstance(exact,dict) and exact.get('id') is not None:data=[exact]
-        if data is None:
-            data=await self.get('lrclib','https://lrclib.net/api/search',{'track_name':query['title'],'artist_name':query['artist']})
+        # An exact album match can contain only plain text (or a disputed
+        # instrumental claim). It must not hide timed variants of the recording.
+        if not data or not data[0].get('syncedLyrics'):
+            try:
+                variants=await self.get('lrclib','https://lrclib.net/api/search',{'track_name':query['title'],'artist_name':query['artist']})
+                seen={row['id'] for row in data}
+                data.extend(row for row in (variants or []) if isinstance(row,dict) and row.get('id') not in seen)
+            except ProviderError as exc:
+                if not data:raise
+                fallback_error=exc.code
         candidates=[]
         for row in (data or [])[:20]:
             if not isinstance(row,dict): continue
@@ -287,7 +296,9 @@ class Providers:
                 except media.MediaError:
                     match['state']='needs_review';match['reasons'].append('invalid_lyrics')
             candidates.append({'id':'lrclib:'+str(row['id']),'provider':'lrclib','kind':'lyrics','title':row.get('trackName'),'artist':row.get('artistName'),'album':row.get('albumName'),'duration':row.get('duration'),'lrc':lrc,'plain_lyrics':row.get('plainLyrics') or '', 'instrumental_claim':bool(row.get('instrumental')),'match':match,'source_url':'https://lrclib.net/api/get/'+str(row['id']),'identification':'text_search','timing_verified':False})
-        return sorted(candidates,key=lambda x:(len(x['match']['reasons']),x['match']['duration_delta'] or 0))[:8]
+        if fallback_error:
+            for candidate in candidates:candidate['search_incomplete']=fallback_error
+        return sorted(candidates,key=lambda x:(len(x['match']['reasons']),not bool(x['lrc']),x['match']['duration_delta'] or 0))[:8]
 
     async def cover(self, release_id):
         if not re.fullmatch('[0-9a-fA-F-]{36}',release_id): raise ProviderError('invalid_release','coverartarchive','Неверный идентификатор релиза')
@@ -322,20 +333,31 @@ class Providers:
             try:
                 candidates=await call(query,meta.get('duration',0))
                 result['candidates'].extend(candidates)
-                result['sources'].append({'provider':provider,'state':'candidates' if candidates else 'no_match','count':len(candidates)})
+                incomplete=next((c['search_incomplete'] for c in candidates if c.get('search_incomplete')),None)
+                result['sources'].append({'provider':provider,'state':'partial' if incomplete else 'candidates' if candidates else 'no_match','count':len(candidates),**({'reason':incomplete} if incomplete else {})})
             except ProviderError as exc:
                 if exc.code=='provider_unavailable':
                     await asyncio.to_thread(self.unavailable,provider)
                 result['sources'].append({'provider':provider,'state':exc.code,'message':str(exc)})
         matching=[c for c in result['candidates'] if c['kind']=='metadata' and c['match']['state']=='matching_metadata']
-        releases={v['id'] for c in matching for v in c.get('releases',[]) if query['album'] and normalized(v['title'])==normalized(query['album'])}
-        if not meta.get('has_art') and len(releases)==1:
-            authorize()
-            try:
-                art=await self.cover(next(iter(releases)))
-                if art: result['candidates'].append(art)
-                result['sources'].append({'provider':'coverartarchive','state':'candidate' if art else 'no_match'})
-            except (ProviderError, media.MediaError) as exc: result['sources'].append({'provider':'coverartarchive','state':exc.code})
+        releases=sorted({v['id'] for c in matching for v in c.get('releases',[]) if query['album'] and normalized(v['title'])==normalized(query['album'])})
+        embedded_release=scalar(meta.get('tags',{}),'musicbrainz_albumid')
+        if re.fullmatch('[0-9a-fA-F-]{36}',embedded_release):
+            releases=[embedded_release]+[identity for identity in releases if identity!=embedded_release]
+        if not meta.get('has_art') and releases:
+            found=0;errors=[];attempted=0
+            # Alternative editions are review candidates, never automatic
+            # artwork replacement. Cache/pacing/budget still apply per request.
+            for release_id in releases[:3]:
+                authorize();attempted+=1
+                try:
+                    art=await self.cover(release_id)
+                    if art:result['candidates'].append(art);found+=1
+                except (ProviderError, media.MediaError) as exc:
+                    errors.append(exc.code)
+                    if exc.code in {'rate_limited','provider_cooldown','budget_exhausted','provider_policy_denied'}:break
+            result['sources'].append({'provider':'coverartarchive','state':'candidate' if found else errors[0] if errors else 'no_match',
+                'count':found,'attempted_releases':attempted,'matching_releases':len(releases),'errors':errors})
         result['state']='candidates' if result['candidates'] else 'no_match' if all(x['state']=='no_match' for x in result['sources']) else 'incomplete' 
         from . import catalogs
         await catalogs.enrich(self,result,query,meta,authorize)

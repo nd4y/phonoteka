@@ -93,8 +93,8 @@ def _public_proposal(row):
     return {"id": row["id"], "track_id": row["track_id"], "input_sha256": row["input_sha256"], "created_at": row["created_at"], **payload}
 
 
-def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, load_proposal=True):
-    from . import derivatives
+def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, load_proposal=True, gaps=None):
+    from . import derivatives, enrichment_gaps
     meta = json.loads(row["metadata"])
     if load_proposal:
         proposal = db.fetchone(settings.db_path, "SELECT * FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", (row["id"],))
@@ -113,6 +113,10 @@ def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, 
         'input_readiness': {**(meta['input_readiness'] if isinstance(meta.get('input_readiness'),dict) else {}),
             **input_readiness.describe(meta,grace_seconds=settings.input_grace_seconds)},
     }
+    if gaps is None:
+        with db.connect(settings.db_path) as conn:
+            gaps = enrichment_gaps.for_page(conn, settings, [row], {row['id']: proposal})[row['id']]
+    result['enrichment_gaps'] = gaps
     if detail:
         result['lyrics_document'] = lyrics_document.public_document(settings, row)
         result['artwork_transform'] = meta.get('artwork_transform')
@@ -389,7 +393,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ids=[row['id'] for row in rows]
             proposals={row['track_id']:row for row in conn.execute(
                 "SELECT p.* FROM proposals p WHERE p.track_id IN (%s) AND p.id=(SELECT latest.id FROM proposals latest WHERE latest.track_id=p.track_id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)" % ','.join('?' for _ in ids),ids)} if ids else {}
-        return {"items": [public_track(settings, row, proposal=proposals.get(row['id']),load_proposal=False) for row in rows], "total": total, "page": page, "page_size": page_size}
+            from . import enrichment_gaps
+            gaps = enrichment_gaps.for_page(conn, settings, rows, proposals)
+        return {"items": [public_track(settings, row, proposal=proposals.get(row['id']),load_proposal=False,gaps=gaps[row['id']]) for row in rows], "total": total, "page": page, "page_size": page_size}
 
     @app.get("/api/tracks/{track_id}/neighbors")
     def track_neighbors(request: Request, track_id: str, search: str = Query("", max_length=200), filter: str = Query("all")):
