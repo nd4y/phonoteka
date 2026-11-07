@@ -51,3 +51,5 @@ ASR coverage counts lyric content rather than blank LRC markers. A current MP3 d
 Set PROVIDER_DAILY_LIMIT=0 to disable Phonoteka's local daily request quota while preserving provider pacing and cooldowns. [Quota, Retry-After and timeout checks](docs/en/provider-quotas.md).
 
 Large snapshots use the same 32 MiB manifest limit for reading and pre-copy validation. Existing snapshots above the former 10 MiB limit become accessible without re-exporting their audio. [Size limit and verification](docs/en/export-manifest-size.md).
+
+Collection reports are completed in temporary storage and downloaded in chunks, avoiding duplicate full JSON bodies in memory. [Memory limits, cleanup and verification](docs/en/report-delivery.md).

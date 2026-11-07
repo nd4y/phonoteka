@@ -4,6 +4,8 @@ import csv
 import io
 import json
 import re
+import tempfile
+from starlette.responses import StreamingResponse
 from . import audit_status,catalog_sources,db,provider_policy
 from .providers import scalar, normalized
 
@@ -107,7 +109,7 @@ def safe_code(value):
     return value if isinstance(value,str) and re.fullmatch(r'[a-z][a-z0-9_:-]{0,100}',value) else ''
 
 
-def export(settings, kind):
+def export(settings, kind, *, output=None):
     from . import lyrics_review
     report=[];source={}
     # Every exported result and policy decision belongs to one DB read snapshot.
@@ -171,8 +173,45 @@ def export(settings, kind):
             report.append(entry)
             source[row['id']]=meta.get('youtube',{})
         snapshot_summary=summary(settings,conn) if kind=='json' else None
-    if kind=='json':return json.dumps({'schema':2,'files':report,'youtube':source,'summary':snapshot_summary},ensure_ascii=False,indent=2)
-    stream=io.StringIO();writer=csv.DictWriter(stream,fieldnames=list(report[0]) if report else ['id','path','status']);writer.writeheader()
+    if kind=='json':
+        document={'schema':2,'files':report,'youtube':source,'summary':snapshot_summary}
+        if output is None:return json.dumps(document,ensure_ascii=False,indent=2)
+        json.dump(document,output,ensure_ascii=False,indent=2)
+        return None
+    stream=output if output is not None else io.StringIO()
+    writer=csv.DictWriter(stream,fieldnames=list(report[0]) if report else ['id','path','status']);writer.writeheader()
     for row in report:
         writer.writerow({k:("'"+v if isinstance(v,str) and v.lstrip().startswith(('=','+','-','@')) else v) for k,v in row.items()})
-    return stream.getvalue()
+    return stream.getvalue() if output is None else None
+
+
+def export_file(settings, kind):
+    """Finish the snapshot before HTTP headers without duplicating its JSON body.
+
+    A single non-BMP character can make Python's complete JSON string occupy
+    four bytes per character. The HTTP response then used to allocate another
+    full UTF-8 copy. Encode incrementally into an unlinked temporary file;
+    callers own and close it after delivery (including disconnects).
+    """
+    stream=tempfile.TemporaryFile(mode='w+',encoding='utf-8',newline='')
+    try:
+        export(settings,kind,output=stream)
+        stream.flush()
+        stream.seek(0)
+        return stream
+    except BaseException:
+        stream.close()
+        raise
+
+
+class ExportResponse(StreamingResponse):
+    """Own the completed report until normal completion or disconnect."""
+    def __init__(self, stream, **kwargs):
+        self.report_stream=stream
+        super().__init__(iter(lambda:stream.read(64*1024),''),**kwargs)
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope,receive,send)
+        finally:
+            self.report_stream.close()
