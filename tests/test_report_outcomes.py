@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import pytest
 
 from phonoteka import db
 from test_backend import settings, client, authenticated, seed, job, drain
@@ -34,11 +35,12 @@ def test_report_contains_actual_file_outcomes_sources_and_exclusion_codes(client
     assert json.loads(exported[0]['latest_outcomes'])[0]['job_id']==pending['id']
 
 
-def test_report_does_not_present_stale_analysis_as_current(client,settings):
+@pytest.mark.parametrize('payload', [db.encode({'state':'candidates','sources':[]}), '{obsolete undecodable cache'])
+def test_report_does_not_present_stale_analysis_as_current(client,settings,payload):
     authenticated(client,settings)
     tid, _ = seed(settings)
     with db.transaction(settings.db_path) as conn:
-        conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(tid,'0'*64,db.encode({'state':'candidates','sources':[]}),db.utcnow()))
+        conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(tid,'0'*64,payload,db.utcnow()))
     row=client.get('/api/reports/export/json').json()['files'][0]
     assert row['analysis_state']=='stale' and json.loads(row['analysis_sources'])==[]
     assert json.loads(row['latest_outcomes'])==[] and row['audit_state']=='not_current'

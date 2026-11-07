@@ -146,9 +146,9 @@ def export(settings, kind):
             # Reports need status/source codes, never cached cover bytes or ASR
             # drafts. Project only these fields and release each input row.
             previous=conn.execute("""SELECT input_sha256,
-                json_extract(payload,'$.state') AS state,
-                json_extract(payload,'$.sources') AS sources
-                FROM analyses WHERE track_id=?""",(row['id'],)).fetchone()
+                CASE WHEN input_sha256=? THEN json_extract(payload,'$.state') END AS state,
+                CASE WHEN input_sha256=? THEN json_extract(payload,'$.sources') END AS sources
+                FROM analyses WHERE track_id=?""",(row['sha256'],row['sha256'],row['id'])).fetchone()
             current=previous and previous['input_sha256']==row['sha256']
             sources=json.loads(previous['sources'] or '[]') if current else []
             entry['analysis_state']=safe_code(previous['state'] if current else None) or ('stale' if previous else 'not_started')
