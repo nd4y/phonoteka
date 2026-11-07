@@ -1,6 +1,6 @@
 # phonoteka
 
-The catalog and track editor explain each missing tag, cover and synchronized lyric field. Reasons distinguish an unattempted search, stale results, temporary provider failures and candidates awaiting review or writing. Matching MusicBrainz editions are selectable album candidates. [Continue enrichment](docs/en/enrichment-gaps.md).
+The catalog and track editor explain each missing tag, cover and synchronized lyric field. Reasons distinguish an unattempted search, stale results, temporary provider failures and candidates awaiting review or writing. A failed new search is shown separately from its retained earlier results. Matching MusicBrainz editions are selectable album candidates. [Continue enrichment](docs/en/enrichment-gaps.md).
 
 After configuring AcoustID, an unfinished search can continue without resending conclusively checked fragments to Shazam. Historical recording IDs are retained as evidence, while expired tags are not reused. The existing attempt allowance and current-file evidence requirements remain in force.
 

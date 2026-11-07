@@ -6,6 +6,7 @@ The catalog shows a brief reason below the track name. Open the track to see “
 - An unattempted separate cover search does not mean artwork is unavailable online. Check the album and release candidates first.
 - Candidates require review; a saved proposal still needs writing to the file. A draft for one field does not explain other missing fields.
 - Temporary provider errors or throttling mean the search is incomplete. Retries respect provider cooldowns; IP rotation and quota resets are not used.
+- If a new search or recognition attempt for the current file fails, the track shows that failure instead of an earlier gap explanation. Previous analysis and saved proposals remain available. The timestamp is the job update time, not an individual request time; processing contains error details. A successfully refreshed analysis supersedes the old failure explanation. Recognition is never retried automatically and its attempt allowance is not reset.
 - Expired results need refreshing, whereas denied storage or embedding requires checking the provider usage settings. AcoustID that is configured now is not shown as missing a key solely because of an earlier search.
 - Plain lyrics can be reviewed and aligned with the audio. A provider's instrumental claim requires confirmation and does not automatically remove lyrics from the task.
 - No result refers only to the last query; it does not prove that enrichment is impossible.

@@ -1,6 +1,9 @@
 import json
 import time
 import tracemalloc
+import uuid
+
+import pytest
 
 from phonoteka import db, enrichment_gaps
 from phonoteka.providers import album_candidates
@@ -17,6 +20,72 @@ def gaps(client, identity):
     response = client.get('/api/tracks/' + identity)
     assert response.status_code == 200, response.text
     return {r['field']: r for r in response.json()['enrichment_gaps']}
+
+
+def failed_search(settings, identity, sha, *, kind='analyze', created='2090-01-02T00:00:00+00:00'):
+    job_id = str(uuid.uuid4())
+    with db.transaction(settings.db_path) as conn:
+        conn.execute('''INSERT INTO jobs(id,kind,state,stage,payload,created_at,updated_at)
+            VALUES(?,?,'completed_with_errors','finished',?,?,?)''',
+            (job_id, kind, db.encode({'items': [{'track_id': identity, 'sha256': sha}],
+                                      'private': 'private-job-payload'}), created, '2090-01-04T00:00:00+00:00'))
+        conn.execute('INSERT INTO job_items VALUES(?,?,?,?)',
+                     (job_id, identity, 'failed', db.encode({'error': 'private-error'})))
+    return job_id
+
+
+@pytest.mark.parametrize('kind,action', [('analyze', 'search'), ('recognize', 'sources')])
+def test_failed_search_supersedes_old_flags_without_losing_evidence(client, settings, kind, action):
+    authenticated(client, settings)
+    identity, sha = seed(settings)
+    payload = {'sources': [{'provider': 'lrclib', 'state': 'no_match'}]}
+    analysis(settings, identity, sha, payload)
+    job_id = failed_search(settings, identity, sha, kind=kind)
+    values = gaps(client, identity)
+    assert values['cover']['code'] == 'search_failed'
+    assert values['synced_lyrics']['code'] == 'search_failed'
+    assert values['cover']['action'] == action
+    assert 'Прежние результаты поиска сохранены.' in values['cover']['next_step']
+    assert values['cover']['failed_job_id'] == job_id
+    assert values['cover']['checked_at'] == '2090-01-04T00:00:00+00:00'
+    page = client.get('/api/tracks').json()['items'][0]
+    assert next(g for g in page['enrichment_gaps'] if g['field'] == 'cover')['code'] == 'search_failed'
+    with db.connect(settings.db_path) as conn:
+        projected = enrichment_gaps.project(conn, [identity])
+        saved = conn.execute('SELECT payload FROM analyses WHERE track_id=?', (identity,)).fetchone()
+    assert json.loads(saved['payload']) == payload
+    assert 'private-' not in json.dumps(projected)
+    assert 'private-' not in json.dumps(page)
+
+
+def test_first_failed_search_and_field_specific_saved_proposal(client, settings):
+    authenticated(client, settings)
+    identity, sha = seed(settings)
+    failed_search(settings, identity, sha)
+    with db.transaction(settings.db_path) as conn:
+        conn.execute('INSERT INTO proposals VALUES(?,?,?,?,?)',
+                     ('p', identity, sha, db.encode({'tags': {'album': 'Album'}}), db.utcnow()))
+    values = gaps(client, identity)
+    assert values['album']['code'] == 'proposal_ready'
+    assert values['cover']['code'] == 'search_failed'
+    assert values['synced_lyrics']['code'] == 'search_failed'
+    assert 'Прежние результаты' not in values['cover']['next_step']
+
+
+@pytest.mark.parametrize('case', ['changed_file', 'unrelated_job', 'replaced_analysis'])
+def test_unrelated_or_superseded_failure_does_not_override_current_analysis(client, settings, case):
+    authenticated(client, settings)
+    identity, sha = seed(settings)
+    analysis(settings, identity, sha, {'sources': [{'provider': 'lrclib', 'state': 'no_match'}]})
+    failed_search(settings, identity, 'b'*64 if case == 'changed_file' else sha,
+                  kind='apply' if case == 'unrelated_job' else 'analyze')
+    if case == 'replaced_analysis':
+        with db.transaction(settings.db_path) as conn:
+            conn.execute('UPDATE analyses SET updated_at=? WHERE track_id=?',
+                         ('2090-01-03T00:00:00+00:00', identity))
+    values = gaps(client, identity)
+    assert values['cover']['code'] == 'cover_not_searched'
+    assert values['synced_lyrics']['code'] == 'no_result_for_query'
 
 
 def test_album_release_is_visible_and_selectable_without_changing_title(client, settings):
