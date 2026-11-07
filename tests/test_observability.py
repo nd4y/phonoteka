@@ -76,6 +76,25 @@ def test_json_formatter_omits_library_messages_arguments_and_exception_text():
     assert data['timestamp'].endswith('+00:00') and data['service']=='worker'
 
 
+def test_json_formatter_exposes_bounded_group_causes_without_private_messages():
+    import sys
+    try:
+        try:
+            raise OSError('private-song.mp3 and private-token')
+        except OSError as cause:
+            raise ExceptionGroup('private-group-message', [cause, ExceptionGroup('private-nested-message', [ValueError('private-value')] * 12)])
+    except ExceptionGroup:
+        record = logging.LogRecord('phonoteka', logging.ERROR, __file__, 1, 'private-message', (), sys.exc_info())
+    data = json.loads(JsonFormatter('worker').format(record))
+    assert data['error_type'] == 'ExceptionGroup'
+    assert len(data['error_causes']) == 8
+    assert data['error_causes'][0]['error_type'] == 'OSError'
+    assert data['error_causes'][0]['stack']
+    assert any(x['error_type'] == 'ValueError' for x in data['error_causes'])
+    assert all(len(x['stack']) <= 8 for x in data['error_causes'])
+    assert 'private-' not in json.dumps(data)
+
+
 def test_missing_db_is_reported_without_creating_a_database(settings):
     collector=DatabaseCollector(settings)
     registry=Metrics('app').registry;registry.register(collector)

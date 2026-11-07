@@ -447,14 +447,14 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
                               : "Пауза"}
                         </button>
                       )}
-                    {active && (
+                    {(active || job.state === "interrupted") && (
                       <button
                         className="button subtle"
                         disabled={job.cancel_requested || pending === job.id}
                         onClick={() => void control(job, "cancel")}
                       >
                         <Square size={14} />
-                        Отменить
+                        {job.state === "interrupted" ? "Отменить оставшиеся файлы" : "Отменить"}
                       </button>
                     )}
                   </div>

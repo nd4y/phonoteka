@@ -3,6 +3,7 @@
 import asyncio
 import base64
 from contextlib import asynccontextmanager
+from datetime import datetime
 import hashlib
 import json
 import mimetypes
@@ -920,7 +921,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not row:
                 raise security.error(404, "job_not_found", "Задание не найдено")
             automation.check_job(active,row['kind'])
-            if row["state"] in {"queued", "waiting", "paused", "waiting_authorization"}:
+            if row['state'] == 'interrupted':
+                # The old executor may still be draining writes. A heartbeat
+                # newer than startup's worker_restarted marker is emitted only
+                # after journal reconciliation while both writer guards are held.
+                stored = conn.execute("SELECT value FROM settings WHERE key='worker_heartbeat'").fetchone()
+                heartbeat = json.loads(stored['value']) if stored else {}
+                recovery = conn.execute("SELECT value FROM settings WHERE key='recovery_required'").fetchone()
+                try:
+                    interrupted_at = datetime.fromisoformat(row['updated_at']).timestamp()
+                except (TypeError, ValueError):
+                    interrupted_at = float('inf')
+                seen = heartbeat.get('at') if isinstance(heartbeat, dict) else None
+                recovered = (settings.writable and row['error'] == 'worker_restarted'
+                    and (not recovery or recovery['value'] != 'true')
+                    and type(seen) in (int, float) and 0 <= time.time()-seen < 30
+                    and seen > interrupted_at and heartbeat.get('read_only') is False
+                    and heartbeat.get('instance_id') == settings.instance_id
+                    and heartbeat.get('state') not in {None, 'starting', 'stopped'})
+                if not recovered:
+                    raise security.error(409, 'job_recovery_pending', 'Дождитесь завершения восстановления обработчика перед отменой оставшихся файлов')
+            if row["state"] in {"queued", "waiting", "paused", "waiting_authorization", "interrupted"}:
                 state = 'cancelled_partial' if row['completed'] or row['failed'] else 'cancelled'
                 conn.execute("UPDATE jobs SET state=?,stage=?,cancel_requested=1,error='cancelled',updated_at=? WHERE id=?", (state,state,db.utcnow(),job_id))
             elif row["state"] == "running":

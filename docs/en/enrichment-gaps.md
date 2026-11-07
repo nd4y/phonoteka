@@ -30,3 +30,11 @@ An exhausted fingerprint-attempt allowance is distinct from a temporary provider
 If an earlier Shazam search conclusively found no match in every required fragment while AcoustID was unavailable because its connection was disabled or lacked a key, recognition can continue directly with the newly configured AcoustID. The file revision, fragment offsets, extractor profile and sample digests must still match the recorded evidence. Positive, incomplete, conflicting and unknown results are never treated as negatives. The new lookup retains cancellation, provider caching and the same durable attempt allowance; it does not reset or grant calls.
 
 Consistent historical recording IDs can also qualify when their matching verdict is preserved and the old provider tags are no longer available. They remain historical positive evidence. Only the fresh AcoustID result can supply a new fingerprint-based metadata query; expired titles, artists or releases are not restored.
+
+## Interrupted publication
+
+An interrupted task on the processing screen offers **Cancel remaining files**. This preserves completed changes and closes the remaining work. It neither rolls back nor automatically retries files: after reviewing the results, select only unfinished records for another operation.
+
+The server permits cancellation only after operation journals have been reconciled and a fresh running-worker heartbeat confirms recovery has finished. Until then, the UI asks you to wait. Cancellation also remains blocked while a restored database requires acknowledgement. Completed operations and their history are retained.
+
+For parallel-processing failures, JSON logs include up to eight nested exception types and abbreviated stacks. Exception messages, audio paths, requests and secrets are not added to the log. OpenTelemetry settings remain unchanged.
