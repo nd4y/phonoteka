@@ -86,6 +86,28 @@ def test_connected_acoustid_supersedes_historical_missing_key(client, settings, 
     assert gaps(client, identity)['album']['code'] == 'connection_now_ready'
 
 
+def test_exhausted_recognition_is_not_a_temporary_provider_pause(client,settings):
+    authenticated(client,settings);identity,sha=seed(settings)
+    analysis(settings,identity,sha,{'sources':[{'provider':'shazam','state':'recognition_attempt_budget_exhausted'}]})
+    value=gaps(client,identity)['album']
+    assert value['code']=='recognition_limit' and value['action']=='sources'
+    assert 'не сбрасывает' in value['next_step']
+    analysis(settings,identity,sha,{'sources':[{'provider':'shazam','state':'unknown_outcome'}]})
+    assert gaps(client,identity)['album']['code']=='provider_outcome_unknown'
+
+
+def test_new_connection_does_not_suggest_retrying_spent_audio_identity(client,settings,monkeypatch):
+    authenticated(client,settings);identity,sha=seed(settings)
+    monkeypatch.setattr(enrichment_gaps.acoustid,'public_connection',lambda _: {'configured':True})
+    with db.transaction(settings.db_path) as conn:
+        row=conn.execute('SELECT metadata FROM tracks WHERE id=?',(identity,)).fetchone()
+        meta=json.loads(row['metadata']);meta['audit']={'audio_identity':'b'*64}
+        conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),identity))
+        conn.execute('INSERT INTO settings VALUES(?,?)',('recognition_usage:'+'b'*64,db.encode({'calls':3})))
+    analysis(settings,identity,sha,{'sources':[{'provider':'acoustid','state':'key_required'}]})
+    assert gaps(client,identity)['album']['code']=='recognition_limit'
+
+
 def test_cover_waits_for_release_search_and_policy_denial_is_explicit(client, settings):
     authenticated(client, settings)
     identity, sha = seed(settings)

@@ -23,3 +23,5 @@ Catalog explanations use a compact SQL projection without cached artwork, song l
 Releases of matching MusicBrainz recordings appear as separate album candidates. Selecting an edition proposes its album name, MusicBrainz release ID and available date while preserving the song title and artist. When the album is missing, cover lookup runs only if all returned editions share one album name; different album names require selection. Nothing is applied automatically. The list is bounded to eight edition candidates.
 
 Fingerprint recognition preserves an existing album in the search query when both embedded title and artist exactly match the recognized identity. Conflicting or missing identity tags use the fingerprint result instead.
+
+An exhausted fingerprint-attempt allowance is distinct from a temporary provider cooldown; a new queue does not reset it. An unknown outcome of a sent request is not a confirmed no-match. Configuring a key does not offer an ineffective recognition retry when the same audio identity has already exhausted its allowance.
