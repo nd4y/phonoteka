@@ -177,15 +177,18 @@ def offsets(duration):
 
 
 def pending_acoustid(previous, input_revision, duration):
-    """Resume a newly enabled fallback after conclusive negatives of this file.
+    """Resume an unconfigured fallback after conclusive fragments of this file.
 
-    This reuses no-match evidence, not expired provider content or an unknown
-    request outcome. The remaining AcoustID send still uses the durable quota.
+    Historical recording IDs can establish that Shazam already answered, but
+    expired tags are never reused as a query or a candidate. The new AcoustID
+    send still requires the current grant and the remaining durable quota.
     """
     if not previous or previous.get('input_sha256') != input_revision or previous.get('possible_mix'):
         return None
     sources = {s.get('provider'): s.get('state') for s in previous.get('sources', [])}
-    if sources.get('shazam') != 'no_match' or sources.get('acoustid') not in {'key_required', 'disabled', 'provider_disabled'}:
+    if sources.get('shazam') not in {'no_match', 'fingerprint_match'} or sources.get('acoustid') not in {'key_required', 'disabled', 'provider_disabled'}:
+        return None
+    if any(c.get('provider') == 'shazam' and c.get('tags') for c in previous.get('candidates', [])):
         return None
     expected = offsets(duration)
     segments = previous.get('recognition_segments') or []
@@ -193,12 +196,30 @@ def pending_acoustid(previous, input_revision, duration):
         return None
     for segment, offset in zip(segments, expected):
         actual = segment.get('offset')
-        if (segment.get('state') != 'no_match' or segment.get('candidate') or segment.get('provider_recording_id')
+        if (segment.get('state') not in {'match', 'no_match'} or segment.get('candidate')
                 or segment.get('extractor_profile') != POLICY
                 or not isinstance(segment.get('sample_sha256'), str) or not re.fullmatch('[a-f0-9]{64}', segment['sample_sha256'])
                 or type(actual) not in (int, float) or not math.isfinite(actual) or abs(actual-offset) > .05):
             return None
-    return {'segments': [dict(segment) for segment in segments], **segment_verdict(segments), 'reused_for_acoustid': True}
+        if segment['state'] == 'match':
+            identity = segment.get('provider_recording_id')
+            if segment.get('provider') != 'shazam' or not isinstance(identity, str) or not identity.strip():
+                return None
+        elif segment.get('provider_recording_id'):
+            return None
+    matched = any(segment['state'] == 'match' for segment in segments)
+    if matched != (sources['shazam'] == 'fingerprint_match'):
+        return None
+    # Rebuild only the existing identity verdict. No expired title, artist,
+    # release, URL, image or lyrics is revived by this continuation.
+    verdict = segment_verdict([{**segment, **({'candidate': {
+        'provider': segment['provider'], 'provider_recording_id': segment['provider_recording_id'],
+        'isrc': segment.get('isrc')}} if segment['state'] == 'match' else {})} for segment in segments])
+    if verdict['possible_mix'] or (matched and previous.get('recording_confirmation') != verdict['state']):
+        return None
+    kept = ('state', 'offset', 'sample_sha256', 'extractor_profile', 'provider', 'provider_recording_id', 'isrc')
+    return {'segments': [{key: value for key, value in segment.items() if key in kept} for segment in segments],
+            **verdict, 'reused_for_acoustid': True, 'historical_match': matched}
 
 
 def segment_verdict(segments):

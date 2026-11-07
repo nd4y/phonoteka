@@ -4,6 +4,8 @@ Legacy key-required or disabled markers describe configuration, not recognition 
 
 AcoustID supplements Shazam recognition. When there is no unambiguous match and the recording is not marked as a mix, a Recognize job computes Chromaprint and looks up linked MusicBrainz recordings. Multiple matches remain review candidates. Recording versions are not considered verified and tags are never applied automatically.
 
+When an earlier search could not use AcoustID because it was unconfigured, a new Recognize job can continue with the remaining allowance. Conclusive fragment evidence must belong to the exact current file and extractor profile. Negative fragments or consistent historical recording IDs are retained without resending them to Shazam. Historical tags are never revived for a metadata query. Conflicting IDs, missing evidence and unknown request outcomes do not qualify. An exhausted allowance remains exhausted.
+
 ## UI setup
 
 1. Register an application in [Your Applications](https://acoustid.org/new-application) and obtain an Application API key. The User API key is for submitting fingerprints and is not used here.

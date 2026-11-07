@@ -67,7 +67,7 @@ export function EnrichmentGaps({
                 {gap.provider && <span>{gap.provider}</span>}
                 {gap.checked_at && (
                   <span>
-                    {gap.analysis_current ? "Поиск" : "Прежний поиск"}:{" "}
+                    {gap.analysis_current ? "Анализ обновлён" : "Прежний анализ"}:{" "}
                     {new Date(gap.checked_at).toLocaleString("ru-RU")}
                   </span>
                 )}

@@ -1,9 +1,9 @@
 # Why a field is missing
 
-The catalog shows a brief reason below the track name. Open the track to see “What remains to fill”: a separate explanation for each missing title, artist, album, cover and synchronized lyric field. Each row includes a next step, provider and last search time when known.
+The catalog shows a brief reason below the track name. Open the track to see “What remains to fill”: a separate explanation for each missing title, artist, album, cover and synchronized lyric field. Each row includes a next step, provider and analysis update time when known. This timestamp is not the time of each individual provider request.
 
 - An unattempted or stale search offers a search against the current file revision.
-- No separate cover-search result does not mean artwork is unavailable online. Check the album and release candidates first.
+- An unattempted separate cover search does not mean artwork is unavailable online. Check the album and release candidates first.
 - Candidates require review; a saved proposal still needs writing to the file. A draft for one field does not explain other missing fields.
 - Temporary provider errors or throttling mean the search is incomplete. Retries respect provider cooldowns; IP rotation and quota resets are not used.
 - Expired results need refreshing, whereas denied storage or embedding requires checking the provider usage settings. AcoustID that is configured now is not shown as missing a key solely because of an earlier search.
@@ -27,3 +27,5 @@ Fingerprint recognition preserves an existing album in the search query when bot
 An exhausted fingerprint-attempt allowance is distinct from a temporary provider cooldown; a new queue does not reset it. An unknown outcome of a sent request is not a confirmed no-match. Configuring a key does not offer an ineffective recognition retry when the same audio identity has already exhausted its allowance.
 
 If an earlier Shazam search conclusively found no match in every required fragment while AcoustID was unavailable because its connection was disabled or lacked a key, recognition can continue directly with the newly configured AcoustID. The file revision, fragment offsets, extractor profile and sample digests must still match the recorded evidence. Positive, incomplete, conflicting and unknown results are never treated as negatives. The new lookup retains cancellation, provider caching and the same durable attempt allowance; it does not reset or grant calls.
+
+Consistent historical recording IDs can also qualify when their matching verdict is preserved and the old provider tags are no longer available. They remain historical positive evidence. Only the fresh AcoustID result can supply a new fingerprint-based metadata query; expired titles, artists or releases are not restored.
