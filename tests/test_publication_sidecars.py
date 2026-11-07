@@ -86,6 +86,32 @@ def test_opt_in_plan_owner_auth_and_worker_publishes_all_objects(settings):
         assert not db.fetchall(cfg.db_path, "SELECT id FROM history WHERE kind='apply'")
 
 
+def test_catalog_export_keeps_sidecars_with_renamed_tracks_and_shared_provenance(settings):
+    cfg=owner(settings)
+    with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
+        headers=authenticated(client,cfg)
+        first,_=generated(cfg,client,headers,'Old/one.flac')
+        second,_=generated(cfg,client,headers,'Old/two.flac')
+        plan=sidecars.create_plan(cfg,[first,second],cover=True,lrc=True)
+        sidecars.commit(cfg,plan['id'])
+        original={p:media.sha256_file(cfg.publication_root/'Ready'/p) for p in ('Old/one.flac','Old/two.flac','Old/one.lrc','Old/two.lrc','Old/cover.jpg')}
+        result=exports.generate(cfg,layout='artist_album')
+        doc=exports.manifest(cfg,result['export_id'])
+        assert doc['audio_files']==2 and doc['sidecar_files']==4
+        audio=[e for e in doc['files'] if e['kind']=='audio']
+        by_path={e['path']:e for e in doc['files']}
+        for entry in audio:
+            path=Path(entry['path'])
+            assert path.with_suffix('.lrc').as_posix() in by_path
+            cover=by_path[path.with_suffix('.cover.jpg').as_posix()]
+            assert set(cover['owners'])=={first,second}
+            assert cover['usage_provenance']
+        for entry in doc['files']:
+            assert media.sha256_file(cfg.state_dir/'exports'/doc['id']/'files'/entry['path'])==entry['sha256']
+            assert entry['source_path'] in original
+        assert {p:media.sha256_file(cfg.publication_root/'Ready'/p) for p in original}==original
+
+
 def test_classification_change_invalidates_already_queued_sidecar_plan(settings):
     cfg=owner(settings)
     with TestClient(create_app(cfg),base_url=cfg.app_url) as client:

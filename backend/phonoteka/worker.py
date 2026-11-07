@@ -1005,7 +1005,7 @@ class Worker:
                     with db.transaction(self.settings.db_path) as conn:
                         conn.execute("UPDATE jobs SET payload=json_set(payload,'$.export_progress',json(?)),updated_at=? WHERE id=?",
                                      (db.encode(update),db.utcnow(),job['id']))
-                result=await self.io(exports.generate,self.settings,authorized,progress)
+                result=await self.io(exports.generate,self.settings,authorized,progress,layout=json.loads(job['payload']).get('params',{}).get('layout','source'))
                 self.item_result(job['id'],'export','succeeded',result);self.finish(job['id'],'cancelled_partial' if self.cancelled(job['id']) else 'succeeded')
             except Exception as exc:
                 failure=self.failure(exc)

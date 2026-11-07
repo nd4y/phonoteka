@@ -615,8 +615,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return public_job(settings, existing)
         if body.kind in {"apply", "rollback", "publish", "rollback_ready", "publish_sidecars", "extract_cue", "normalize_audio"} and not settings.writable:
             raise security.error(409, "read_only", "Запись отключена до проверки конфигурации хранилища")
-        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder"}:
+        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
+        if 'layout' in body.params and (body.kind!='export_ready' or not isinstance(body.params['layout'],str) or body.params['layout'] not in {'source','artist_album'}):
+            raise security.error(422,'invalid_export_layout','Структура экспорта: source или artist_album')
         folder = body.params.get("folder", "")
         if "folder" in body.params:
             if body.kind not in {"scan", "recognize", "analyze"} or (body.kind != "scan" and body.params.get("scope") != "pending"):

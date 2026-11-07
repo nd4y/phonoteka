@@ -70,3 +70,42 @@ def test_no_export_or_device_claim_without_evidence(settings):
         tid,sha,target=published(settings);identity=exports.generate(settings)['export_id']
         response=client.post('/api/deliveries',json={'export_id':identity,'device':'phone','poweramp_checked':True},headers=headers)
         assert response.status_code==422
+
+
+def test_catalog_export_job_copies_organized_paths_and_preserves_ready(settings):
+    import io
+    import zipfile
+    from urllib.parse import quote
+    with TestClient(create_app(settings),base_url=settings.app_url) as client:
+        headers=authenticated(client,settings);tid,sha,target=published(settings)
+        before=target.read_bytes()
+        row=db.fetchone(settings.db_path,'SELECT metadata FROM tracks WHERE id=?',(tid,))
+        meta=json.loads(row['metadata']);meta['tags'].update(title=['Étoile'],artist=['Artist'],album=['Album'],tracknumber=['3/10'])
+        with db.transaction(settings.db_path) as conn:
+            conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),tid))
+        queued=job(client,headers,'export_ready',params={'layout':'artist_album'});drain(settings)
+        assert client.get('/api/jobs/'+queued['id']).json()['state']=='succeeded'
+        doc=client.get('/api/exports/latest').json()['export']
+        assert doc['layout']=='artist_album' and doc['layout_version']==1
+        item=doc['files'][0]
+        assert item['path']=='Artist/Album/03 - Étoile.mp3'
+        assert item['source_path']=='Артист/#песня.mp3' and item['sha256']==sha
+        assert target.read_bytes()==before
+        snapshot=settings.state_dir/'exports'/doc['id']/'files'/item['path']
+        assert snapshot.read_bytes()==before and snapshot.stat().st_ino!=target.stat().st_ino
+        download=client.get(f"/api/exports/{doc['id']}/files/"+quote(item['path'],safe='/'))
+        assert download.status_code==200 and download.content==before
+        archive=client.get(f"/api/exports/{doc['id']}/collection.zip")
+        with zipfile.ZipFile(io.BytesIO(archive.content)) as zipped:
+            assert zipped.read('files/'+item['path'])==before
+            assert './files/'+item['path'] in zipped.read('playlist.m3u8').decode()
+        assert client.post('/api/deliveries',headers=headers,json={'export_id':doc['id'],'device':'fixture','checksums':{item['path']:sha}}).status_code==201
+
+
+@pytest.mark.parametrize('kind,layout',[('export_ready','../bad'),('export_ready',[]),('scan','artist_album')])
+def test_invalid_or_wrong_job_export_layout_is_rejected(settings,kind,layout):
+    with TestClient(create_app(settings),base_url=settings.app_url) as client:
+        headers=authenticated(client,settings)
+        response=client.post('/api/jobs',headers={**headers,'Idempotency-Key':'invalid-layout'},json={'kind':kind,'params':{'layout':layout}})
+        assert response.status_code==422
+        assert not db.fetchall(settings.db_path,'SELECT id FROM jobs')

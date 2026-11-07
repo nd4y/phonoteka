@@ -10,7 +10,7 @@ import uuid
 
 from fastapi import Request
 from pydantic import BaseModel,ConfigDict,Field
-from . import db,media,security,provider_policy,export_leases,publication_paths,publication_sidecars
+from . import db,media,security,provider_policy,export_leases,publication_paths,publication_sidecars,catalog_layout
 from .providers import scalar
 
 
@@ -27,8 +27,10 @@ def manifest(settings,identity):
     return document
 
 
-def generate(settings,authorize=lambda:None,progress=None):
+def generate(settings,authorize=lambda:None,progress=None,*,layout='source'):
     from . import comparison
+    if layout not in {'source','artist_album'}:
+        raise media.MediaError('invalid_export_layout','Unknown export layout')
     entries=[];seen=publication_paths.Index();aliases={}
     for row in db.fetchall(settings.db_path,"SELECT id,relative_path,sha256,metadata FROM tracks WHERE is_current=1 AND json_extract(metadata,'$.publication.sha256') IS NOT NULL ORDER BY relative_path"):
         authorize();meta=json.loads(row['metadata']);pub=meta['publication']
@@ -43,7 +45,7 @@ def generate(settings,authorize=lambda:None,progress=None):
         path=media._validate(settings.publication_root/'Ready'/relative,settings.roots)
         media._expect(path,pub['sha256'])
         entries.append({'track_id':row['id'],'kind':'audio','owners':[row['id']],'path':relative,'sha256':pub['sha256'],'size':path.stat().st_size,'duration':meta.get('duration',0),
-                        'title':scalar(meta.get('tags',{}),'title'),'artist':scalar(meta.get('tags',{}),'artist'),
+                        **{key:scalar(meta.get('tags',{}),key) for key in ('title','artist','album','albumartist','tracknumber','discnumber')},
                         'youtube':meta.get('youtube',{}),'usage_provenance':meta.get('usage_provenance',{}),
                         'publication_profile':pub.get('profile','legacy_unknown'), 'lyrics_review_version':pub.get('review_version'),
                         'lyrics_gate':pub.get('lyrics_gate'), 'publication_exceptions':pub.get('exceptions',[]),
@@ -52,11 +54,28 @@ def generate(settings,authorize=lambda:None,progress=None):
     if any(chosen not in {entry['track_id'] for entry in entries} for chosen in aliases.values()):
         raise media.MediaError('preferred_not_published','Сначала опубликуйте выбранную предпочтительную копию')
     audio_entries=list(entries)
+    ready_audio_entries=[dict(entry) for entry in audio_entries]
     sidecars=publication_sidecars.export_objects(settings,audio_entries)
+    ready_sidecars=list(sidecars)
     for entry in sidecars:publication_paths.add(seen,entry['path'])
+    if layout == 'artist_album':
+        paths=catalog_layout.audio_paths(audio_entries)
+        for entry in audio_entries:
+            entry['source_path']=entry['path']
+            entry['path']=paths[entry['track_id']]
+        relocated=[]
+        for entry in sidecars:
+            for owner in sorted(set(entry['owners']) & paths.keys()):
+                audio=Path(paths[owner])
+                suffix=Path(entry['path']).suffix
+                relative=str(audio.with_suffix(suffix if entry['kind']=='lrc' else '.cover'+suffix)).replace('\\','/')
+                relocated.append({**entry,'path':relative,'source_path':entry['path']})
+        sidecars=relocated
+        seen=publication_paths.Index()
+        for entry in audio_entries+sidecars:publication_paths.add(seen,entry['path'])
     entries.extend(sidecars)
     identity=str(uuid.uuid4());base=settings.state_dir/'exports';media._make_directory(base)
-    document={'id':identity,'created_at':db.utcnow(),'files':entries,'audio_files':len(audio_entries),'sidecar_files':len(sidecars),'multi_file_atomic':False,'total_bytes':sum(x['size'] for x in entries),'verified_on':'server_ready','delivery_verified':False,'snapshot_available':True,'resolved_track_ids':aliases}
+    document={'id':identity,'created_at':db.utcnow(),'files':entries,'audio_files':len(audio_entries),'sidecar_files':len(sidecars),'multi_file_atomic':False,'total_bytes':sum(x['size'] for x in entries),'verified_on':'server_ready','delivery_verified':False,'snapshot_available':True,'resolved_track_ids':aliases,'layout':layout,'layout_version':1}
     playlist=['#EXTM3U']
     for entry in audio_entries:
         label=(entry['artist']+' - '+entry['title']).replace('\n',' ').replace('\r',' ')
@@ -68,7 +87,7 @@ def generate(settings,authorize=lambda:None,progress=None):
         if progress:progress(0,len(entries))
         for copied, entry in enumerate(entries,1):
             authorize()
-            source=media._validate(settings.publication_root/'Ready'/entry['path'],settings.roots)
+            source=media._validate(settings.publication_root/'Ready'/entry.get('source_path',entry['path']),settings.roots)
             media._expect(source,entry['sha256'])
             target=stage/'files'/entry['path']
             media._make_directory(target.parent)
@@ -91,9 +110,9 @@ def generate(settings,authorize=lambda:None,progress=None):
                 if not current or current['sha256']!=entry['sha256']:raise media.MediaError('conflict','Коллекция изменилась во время экспорта')
                 provider_policy.require_track(settings,current,'export')
                 comparison.assert_publish_allowed(settings,entry['track_id'])
-            if publication_sidecars.export_objects(settings,audio_entries)!=sidecars:
+            if publication_sidecars.export_objects(settings,ready_audio_entries)!=ready_sidecars:
                 raise media.MediaError('sidecar_registry_conflict','Состав sidecar изменился во время создания снимка')
-            for entry in sidecars:
+            for entry in ready_sidecars:
                 media._expect(media._validate(settings.publication_root/'Ready'/entry['path'],settings.roots),entry['sha256'])
             for original,chosen in aliases.items():
                 if comparison.publication_choice(settings,original)!=chosen:
