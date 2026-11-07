@@ -957,7 +957,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get('/api/reports/export/{kind}')
     def export_report(request:Request,kind:Literal['json','csv']):
         security.require_session(request,settings)
-        return Response(reports.export(settings,kind),media_type='application/json' if kind=='json' else 'text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="phonoteka-report.{kind}"','Cache-Control':'private, no-store'})
+        stream=reports.export_file(settings,kind)
+        return reports.ExportResponse(stream,media_type='application/json' if kind=='json' else 'text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="phonoteka-report.{kind}"','Cache-Control':'private, no-store'})
 
     @app.get('/api/providers')
     def provider_status(request: Request):
