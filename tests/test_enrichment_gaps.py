@@ -3,6 +3,7 @@ import time
 import tracemalloc
 
 from phonoteka import db, enrichment_gaps
+from phonoteka.providers import album_candidates
 from test_backend import authenticated, client, seed, settings
 
 
@@ -16,6 +17,20 @@ def gaps(client, identity):
     response = client.get('/api/tracks/' + identity)
     assert response.status_code == 200, response.text
     return {r['field']: r for r in response.json()['enrichment_gaps']}
+
+
+def test_album_release_is_visible_and_selectable_without_changing_title(client, settings):
+    headers=authenticated(client,settings);identity,sha=seed(settings)
+    candidates=album_candidates([{'releases':[{'id':'00000000-0000-0000-0000-000000000001','title':'Album','date':'2001'}]}],'')
+    analysis(settings,identity,sha,{'sources':[{'provider':'musicbrainz','state':'candidates'}],'candidates':candidates})
+    value=gaps(client,identity)['album']
+    assert value['code']=='candidates_require_review' and value['candidate_count']==1
+    response=client.post('/api/tracks/'+identity+'/analysis/select',headers={**headers,'If-Match':sha},json={'candidate_ids':[candidates[0]['id']]})
+    assert response.status_code==201,response.text
+    payload=json.loads(db.fetchone(settings.db_path,'SELECT payload FROM proposals WHERE id=?',(response.json()['id'],))['payload'])
+    assert payload['tags']['album']=='Album' and 'title' not in payload['tags'] and 'artist' not in payload['tags']
+    assert payload['field_sources']['album']['provider']=='musicbrainz'
+    assert client.get('/api/tracks/'+identity).json()['tags']['title']=='Example'
 
 
 def test_reasons_are_current_and_field_specific(client, settings):
@@ -69,6 +84,28 @@ def test_connected_acoustid_supersedes_historical_missing_key(client, settings, 
     identity, sha = seed(settings)
     analysis(settings, identity, sha, {'sources': [{'provider':'acoustid','state':'key_required'}]})
     assert gaps(client, identity)['album']['code'] == 'connection_now_ready'
+
+
+def test_exhausted_recognition_is_not_a_temporary_provider_pause(client,settings):
+    authenticated(client,settings);identity,sha=seed(settings)
+    analysis(settings,identity,sha,{'sources':[{'provider':'shazam','state':'recognition_attempt_budget_exhausted'}]})
+    value=gaps(client,identity)['album']
+    assert value['code']=='recognition_limit' and value['action']=='sources'
+    assert 'не сбрасывает' in value['next_step']
+    analysis(settings,identity,sha,{'sources':[{'provider':'shazam','state':'unknown_outcome'}]})
+    assert gaps(client,identity)['album']['code']=='provider_outcome_unknown'
+
+
+def test_new_connection_does_not_suggest_retrying_spent_audio_identity(client,settings,monkeypatch):
+    authenticated(client,settings);identity,sha=seed(settings)
+    monkeypatch.setattr(enrichment_gaps.acoustid,'public_connection',lambda _: {'configured':True})
+    with db.transaction(settings.db_path) as conn:
+        row=conn.execute('SELECT metadata FROM tracks WHERE id=?',(identity,)).fetchone()
+        meta=json.loads(row['metadata']);meta['audit']={'audio_identity':'b'*64}
+        conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),identity))
+        conn.execute('INSERT INTO settings VALUES(?,?)',('recognition_usage:'+'b'*64,db.encode({'calls':3})))
+    analysis(settings,identity,sha,{'sources':[{'provider':'acoustid','state':'key_required'}]})
+    assert gaps(client,identity)['album']['code']=='recognition_limit'
 
 
 def test_cover_waits_for_release_search_and_policy_denial_is_explicit(client, settings):

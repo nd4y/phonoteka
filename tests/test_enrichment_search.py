@@ -1,6 +1,7 @@
 import asyncio
 import httpx
-from phonoteka.providers import Providers, ProviderError
+import pytest
+from phonoteka.providers import Providers, ProviderError, album_candidates
 from test_providers import settings
 
 
@@ -55,6 +56,50 @@ def test_alternative_editions_have_bounded_reviewable_cover_search(tmp_path):
             source=next(s for s in result['sources'] if s['provider']=='coverartarchive')
             assert source['matching_releases']==5 and source['attempted_releases']==3
             assert all(c['match']['state']=='needs_review' for c in result['candidates'] if c['kind']=='cover')
+            assert not result['automatic_apply']
+        finally:await provider.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('embedded_title,embedded_artist,expected_album',[
+    ('Song','Singer','Owned album'),('Different','Singer','Fingerprint edition'),('Song','','Fingerprint edition')])
+def test_known_album_is_kept_only_when_embedded_identity_matches(tmp_path,embedded_title,embedded_artist,expected_album):
+    async def run():
+        provider=Providers(settings(tmp_path));queries=[]
+        async def empty(query,duration):queries.append(dict(query));return []
+        provider.musicbrainz=empty;provider.lyrics=empty
+        try:
+            result=await provider.analyze({'sha256':'a'*64,'tags':{'title':embedded_title,'artist':embedded_artist,'album':'Owned album'},'duration':100},
+                'song.mp3',identified={'tags':{'title':'Song','artist':'Singer','album':'Fingerprint edition'}})
+            assert result['query']['album']==expected_album
+            assert all(q['album']==expected_album and q['title']=='Song' for q in queries)
+        finally:await provider.close()
+    asyncio.run(run())
+
+
+def test_album_candidates_are_bounded_and_do_not_replace_song_identity():
+    releases=[{'id':f'00000000-0000-0000-0000-{i:012d}','title':'Album','date':'2001','status':'Official'} for i in range(12)]
+    values=album_candidates([{'releases':releases+releases+[{'id':'../unsafe','title':'Album'}]}],'Album')
+    assert len(values)==8 and len({v['id'] for v in values})==8
+    assert all(v['kind']=='release' and set(v['tags'])=={'album','musicbrainz_albumid','date'} and v['match']['state']=='needs_review' for v in values)
+    assert album_candidates([{'releases':releases}],'Other album')==[]
+
+
+@pytest.mark.parametrize('ambiguous',[False,True])
+def test_missing_album_can_search_cover_only_for_one_unambiguous_album_name(tmp_path,ambiguous):
+    async def run():
+        provider=Providers(settings(tmp_path));calls=[]
+        async def musicbrainz(query,duration):
+            releases=[{'id':f'00000000-0000-0000-0000-{i:012d}','title':'Album'} for i in range(9)]
+            if ambiguous:releases[-1]['title']='Other album'
+            return [{'id':'mb:recording','kind':'metadata','provider':'musicbrainz','match':{'state':'matching_metadata'},'releases':releases}]
+        async def lyrics(query,duration):return []
+        async def cover(identity):calls.append(identity);return None
+        provider.musicbrainz=musicbrainz;provider.lyrics=lyrics;provider.cover=cover
+        try:
+            result=await provider.analyze({'sha256':'a'*64,'tags':{'title':'Song','artist':'Singer'},'duration':100},'song.mp3')
+            assert len(calls)==(0 if ambiguous else 3)
+            assert len([c for c in result['candidates'] if c['kind']=='release'])==8
             assert not result['automatic_apply']
         finally:await provider.close()
     asyncio.run(run())

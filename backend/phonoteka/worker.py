@@ -783,20 +783,25 @@ class Worker:
             # The packet identity survives tag-only changes; no second packet
             # probe is needed after the full audit.
             audio_identity=audit['audio_identity']
+            from . import acoustid
+            configured=await self.io(acoustid.public_connection,self.settings)
+            previous=await self.io(db.fetchone,self.settings.db_path,'SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256']))
+            if configured['configured'] and previous and not recording_review.possible_mix(meta,item['sha256']):
+                segment_result=recognition.pending_acoustid(json.loads(previous['payload']),item['sha256'],float(meta.get('duration',0)))
             await self.io(self.item_action,job,item,'fingerprint_sample')
             async def sample_audio(offset):
                 await self.io(self.item_action,job,item,'fingerprint_sample')
                 value=await self.io(recognition.sample,path,self.settings.roots,float(meta.get('duration',0)),offset)
                 await self.io(self.item_action,job,item,'fingerprint_lookup')
                 return value
-            segment_result=await recognition.identify_segments(self.providers,sample_audio,float(meta.get('duration',0)),authorized,
-                input_revision=item['sha256'],audio_identity=audio_identity,batch_id=job['id'])
+            if segment_result is None:
+                segment_result=await recognition.identify_segments(self.providers,sample_audio,float(meta.get('duration',0)),authorized,
+                    input_revision=item['sha256'],audio_identity=audio_identity,batch_id=job['id'])
             matches=[entry['candidate'] for entry in segment_result['segments'] if entry.get('candidate')]
             identified=matches[0] if matches and not segment_result['possible_mix'] else None
             failures=[entry['state'] for entry in segment_result['segments'] if entry['state'] not in {'match','no_match'}]
             recognition_source={'provider':'shazam','state':failures[0] if failures else 'needs_review' if segment_result['possible_mix'] else 'fingerprint_match' if identified else 'no_match'}
-            from . import acoustid
-            configured=await self.io(acoustid.public_connection,self.settings)
+            if segment_result.get('reused_for_acoustid'):recognition_source['reused_for_acoustid']=True
             if (configured['configured'] and not identified and not segment_result['possible_mix']
                     and not recording_review.possible_mix(meta,item['sha256'])
                     and not any(state in {'unknown_outcome','recognition_attempt_budget_exhausted','recognition_identity_required','budget_exhausted'} for state in failures)):

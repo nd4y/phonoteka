@@ -27,6 +27,29 @@ const render = (value: Track) =>
     />,
   );
 describe("source search presentation", () => {
+  it("names a selectable album edition separately from the song", () => {
+    const html = render({
+      ...track,
+      analysis: {
+        input_sha256: track.sha256,
+        query_source: "embedded",
+        state: "candidates",
+        sources: [],
+        candidates: [
+          {
+            id: "release",
+            provider: "musicbrainz",
+            kind: "release",
+            title: "Album",
+            tags: { album: "Album" },
+            match: { state: "needs_review", reasons: ["confirm_release"] },
+          },
+        ],
+      },
+    });
+    expect(html).toContain("Альбом: Album");
+    expect(html).toContain("Проверьте релиз");
+  });
   it("does not create an automatically open disclosure for the first search, preserving one-step Back", () => {
     const html = render(track);
     expect(html).toContain('<section class="workflow-job-details source-search-actions">');

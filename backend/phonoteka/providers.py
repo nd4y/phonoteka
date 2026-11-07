@@ -80,6 +80,26 @@ def assess(query, title, artist, expected_duration, duration):
     return {'state':'matching_metadata' if not reasons else 'needs_review','reasons':reasons,'duration_delta':delta,'title_similarity':round(SequenceMatcher(None,normalized(query['title']),normalized(title)).ratio(),3)}
 
 
+def album_candidates(recordings, album):
+    """Expose recording releases as selectable album fields, never a track title."""
+    releases={}
+    for recording in recordings:
+        for release in recording.get('releases',[]):
+            identity=release.get('id','');title=release.get('title','').strip()
+            if not re.fullmatch(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}',identity) or not title:continue
+            if album and normalized(title)!=normalized(album):continue
+            releases.setdefault(identity,release)
+    choices=[]
+    for identity,release in sorted(releases.items(),key=lambda item:(item[1].get('status')!='Official',item[1].get('date') or '9999',item[0]))[:8]:
+        tags={'album':release['title'],'musicbrainz_albumid':identity}
+        if re.fullmatch(r'\d{4}(?:-\d{2}){0,2}',release.get('date','')):tags['date']=release['date']
+        choices.append({'id':'mb-release:'+identity,'provider':'musicbrainz','kind':'release',
+            'title':release['title'],'tags':tags,'release_id':identity,
+            'source_url':'https://musicbrainz.org/release/'+identity,'identification':'text_search',
+            'match':{'state':'needs_review','reasons':['confirm_release']}})
+    return choices
+
+
 class ProviderError(Exception):
     def __init__(self, code, provider, message):
         super().__init__(message);self.code=code;self.provider=provider
@@ -320,7 +340,11 @@ class Providers:
     async def _analyze(self, meta, relative, identified=None, authorize=lambda:None):
         query,provenance=query_tags(meta,relative)
         if identified:
-            query={k:scalar(identified['tags'],k) for k in ('title','artist','album')}
+            identified_query={k:scalar(identified['tags'],k) for k in ('title','artist','album')}
+            embedded=meta.get('tags',{})
+            if scalar(embedded,'album') and all(scalar(embedded,k) and normalized(scalar(embedded,k))==normalized(identified_query[k]) for k in ('title','artist')):
+                identified_query['album']=scalar(embedded,'album')
+            query=identified_query
             provenance='audio_fingerprint'
         result={'input_sha256':meta['sha256'],'policy':POLICY_VERSION,'query':query,'query_source':provenance,'candidates':[],'sources':[],'state':'needs_review','automatic_apply':False}
         if meta.get('input_error'):
@@ -340,7 +364,14 @@ class Providers:
                     await asyncio.to_thread(self.unavailable,provider)
                 result['sources'].append({'provider':provider,'state':exc.code,'message':str(exc)})
         matching=[c for c in result['candidates'] if c['kind']=='metadata' and c['match']['state']=='matching_metadata']
+        albums=album_candidates(matching,query['album'])
+        result['candidates'].extend(albums)
+        for source in result['sources']:
+            if source['provider']=='musicbrainz':source['album_candidates']=len(albums)
         releases=sorted({v['id'] for c in matching for v in c.get('releases',[]) if query['album'] and normalized(v['title'])==normalized(query['album'])})
+        all_album_titles={normalized(v.get('title','')) for c in matching for v in c.get('releases',[]) if v.get('title')}
+        if not query['album'] and len(all_album_titles)==1:
+            releases=sorted({c['release_id'] for c in albums})
         embedded_release=scalar(meta.get('tags',{}),'musicbrainz_albumid')
         if re.fullmatch('[0-9a-fA-F-]{36}',embedded_release):
             releases=[embedded_release]+[identity for identity in releases if identity!=embedded_release]

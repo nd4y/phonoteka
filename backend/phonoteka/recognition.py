@@ -176,6 +176,31 @@ def offsets(duration):
     return [first, second] if abs(second - first) >= 5 else [first]
 
 
+def pending_acoustid(previous, input_revision, duration):
+    """Resume a newly enabled fallback after conclusive negatives of this file.
+
+    This reuses no-match evidence, not expired provider content or an unknown
+    request outcome. The remaining AcoustID send still uses the durable quota.
+    """
+    if not previous or previous.get('input_sha256') != input_revision or previous.get('possible_mix'):
+        return None
+    sources = {s.get('provider'): s.get('state') for s in previous.get('sources', [])}
+    if sources.get('shazam') != 'no_match' or sources.get('acoustid') not in {'key_required', 'disabled', 'provider_disabled'}:
+        return None
+    expected = offsets(duration)
+    segments = previous.get('recognition_segments') or []
+    if len(segments) != len(expected) or any(value is None for value in expected):
+        return None
+    for segment, offset in zip(segments, expected):
+        actual = segment.get('offset')
+        if (segment.get('state') != 'no_match' or segment.get('candidate') or segment.get('provider_recording_id')
+                or segment.get('extractor_profile') != POLICY
+                or not isinstance(segment.get('sample_sha256'), str) or not re.fullmatch('[a-f0-9]{64}', segment['sample_sha256'])
+                or type(actual) not in (int, float) or not math.isfinite(actual) or abs(actual-offset) > .05):
+            return None
+    return {'segments': [dict(segment) for segment in segments], **segment_verdict(segments), 'reused_for_acoustid': True}
+
+
 def segment_verdict(segments):
     matches = [item['candidate'] for item in segments if item.get('state') == 'match']
     identities = {(item.get('provider'), item.get('provider_recording_id') or item.get('id')) for item in matches

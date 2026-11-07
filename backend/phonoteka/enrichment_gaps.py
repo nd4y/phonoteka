@@ -5,14 +5,14 @@ transcripts must not be copied into this read model or accumulated for a page.
 """
 import json
 
-from . import acoustid, media, provider_policy, recording_review
+from . import acoustid, media, provider_attempts, provider_policy, recording_review
 from .providers import scalar
 
 
 FIELDS = ('title', 'artist', 'album', 'cover', 'synced_lyrics')
 RETRY_STATES = {
     'provider_cooldown', 'provider_unavailable', 'rate_limited', 'budget_exhausted',
-    'recognition_attempt_budget_exhausted', 'timeout', 'network_error', 'deadline_exceeded', 'partial',
+    'timeout', 'network_error', 'deadline_exceeded', 'partial',
 }
 CONFIG_STATES = {'key_required', 'provider_unauthorized', 'disabled', 'provider_disabled'}
 
@@ -69,6 +69,14 @@ def describe(conn, settings, row, *, analysis=None, proposal=None, connection=No
     result = []
     for field in missing:
         def add(code, message, action, next_step, provider=None, count=None):
+            identity = (meta.get('audit') or {}).get('audio_identity')
+            if action == 'recognize' and isinstance(identity, str):
+                saved = conn.execute('SELECT value FROM settings WHERE key=?',
+                                     (provider_attempts.RECOGNITION_PREFIX + identity,)).fetchone()
+                if saved and json.loads(saved['value']).get('calls', 0) >= provider_attempts.RECOGNITION_CALL_LIMIT:
+                    code, message, action, next_step = (
+                        'recognition_limit', 'Достигнут предел проверок этой аудиозаписи по отпечатку.', 'sources',
+                        'Новая очередь не сбрасывает этот предел. Проверьте сохранённые варианты и уточните данные записи.')
             result.append({'field': field, 'code': code, 'message': message, 'action': action,
                            'next_step': next_step, 'provider': provider,
                            'checked_at': checked_at, 'analysis_current': current,
@@ -106,8 +114,8 @@ def describe(conn, settings, row, *, analysis=None, proposal=None, connection=No
                 'Результат поиска относится к прежней версии файла.' if analysis else 'Поиск для этой записи ещё не выполнялся.',
                 'search', 'Запустите поиск для текущей версии файла.')
             continue
-        relevant = [c for c in candidates if
-                    c.get('kind') == ('cover' if field == 'cover' else 'lyrics' if field == 'synced_lyrics' else 'metadata')]
+        relevant_kinds = {'cover'} if field == 'cover' else {'lyrics'} if field == 'synced_lyrics' else {'metadata', 'release'}
+        relevant = [c for c in candidates if c.get('kind') in relevant_kinds]
         usable = [c for c in relevant if not c.get('transient') and
                   (not c.get('usage') or (provider_policy._allowed(conn, c['usage'], 'cache') and
                                          provider_policy._allowed(conn, c['usage'], 'embed')))]
@@ -122,12 +130,23 @@ def describe(conn, settings, row, *, analysis=None, proposal=None, connection=No
             kinds = 'cover' if field == 'cover' else 'lyrics' if field == 'synced_lyrics' else 'metadata'
             can_refresh = any(provider_policy.rule(conn, c.get('provider'), kinds).get('allow_cache') and
                               provider_policy.rule(conn, c.get('provider'), kinds).get('allow_embed') for c in relevant)
+            fingerprint_only = all(c.get('provider') in {'shazam', 'acoustid'} for c in relevant)
             add('results_expired' if can_refresh else 'source_policy_restricted',
                 'Сохранённые результаты больше нельзя применить; нужен новый поиск.' if can_refresh else 'Настройки источника запрещают сохранение или запись этих данных.',
-                'search' if can_refresh else 'settings',
+                ('recognize' if fingerprint_only else 'search') if can_refresh else 'settings',
                 'Обновите результаты поиска.' if can_refresh else 'Проверьте разрешённые операции источника в настройках.')
             continue
         providers = ('coverartarchive',) if field == 'cover' else ('lrclib',) if field == 'synced_lyrics' else ('musicbrainz', 'acoustid', 'shazam')
+        exhausted = next((p for p in providers if sources.get(p) == 'recognition_attempt_budget_exhausted'), None)
+        if exhausted:
+            add('recognition_limit', 'Достигнут предел проверок этой аудиозаписи по отпечатку.', 'sources',
+                'Новая очередь не сбрасывает этот предел. Проверьте сохранённые варианты и уточните данные записи.', exhausted)
+            continue
+        unknown = next((p for p in providers if sources.get(p) == 'unknown_outcome'), None)
+        if unknown:
+            add('provider_outcome_unknown', 'Источник не подтвердил результат отправленного запроса.', 'sources',
+                'Проверьте сохранившиеся результаты; этот ответ не означает, что запись не найдена.', unknown)
+            continue
         failed = next((p for p in providers if sources.get(p) in RETRY_STATES), None)
         if failed:
             add('provider_retry', 'Поиск не завершён: источник временно недоступен или запрос отложен.', 'search', 'Повторите поиск после окончания паузы источника.', failed)
