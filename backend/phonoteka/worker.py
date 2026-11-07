@@ -1009,9 +1009,18 @@ class Worker:
                         return
                     last_update = now
                     update = {'copied':copied, 'total':total, 'eta_seconds':round((now-started)*(total-copied)/copied) if copied else None}
-                    with db.transaction(self.settings.db_path) as conn:
-                        conn.execute("UPDATE jobs SET payload=json_set(payload,'$.export_progress',json(?)),updated_at=? WHERE id=?",
-                                     (db.encode(update),db.utcnow(),job['id']))
+                    try:
+                        with db.transaction(self.settings.db_path) as conn:
+                            conn.execute("UPDATE jobs SET payload=json_set(payload,'$.export_progress',json(?)),updated_at=? WHERE id=?",
+                                         (db.encode(update),db.utcnow(),job['id']))
+                    except sqlite3.OperationalError as exc:
+                        if not sqlite_busy(exc):
+                            raise
+                        # This is only an advisory counter. The transaction has
+                        # rolled back; a later sample can publish the new count.
+                        # File checks, authorization and snapshot commit still
+                        # fail closed and must never be skipped on contention.
+                        log('worker_database_busy', logging.WARNING, operation='export_progress')
                 result=await self.io(exports.generate,self.settings,authorized,progress,layout=json.loads(job['payload']).get('params',{}).get('layout','source'))
                 self.item_result(job['id'],'export','succeeded',result);self.finish(job['id'],'cancelled_partial' if self.cancelled(job['id']) else 'succeeded')
             except Exception as exc:
