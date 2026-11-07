@@ -75,6 +75,20 @@ class JsonFormatter(logging.Formatter):
             data['error_type'] = record.exc_info[0].__name__
             data['stack'] = [{'module':Path(f.filename).name,'function':f.name,'line':f.lineno}
                              for f in traceback.extract_tb(record.exc_info[2])[-12:]]
+            exception = record.exc_info[1]
+            if isinstance(exception, BaseExceptionGroup):
+                # TaskGroup otherwise hides the failing operation behind its
+                # wrapper. Keep bounded types/frames, never exception messages.
+                pending = list(exception.exceptions[:8])
+                causes = []
+                while pending and len(causes) < 8:
+                    cause = pending.pop(0)
+                    causes.append({'error_type': type(cause).__name__, 'stack': [
+                        {'module': Path(f.filename).name, 'function': f.name, 'line': f.lineno}
+                        for f in traceback.extract_tb(cause.__traceback__)[-8:]]})
+                    if isinstance(cause, BaseExceptionGroup):
+                        pending.extend(cause.exceptions[:8-len(pending)])
+                data['error_causes'] = causes
         return json.dumps(data, ensure_ascii=False, allow_nan=False)
 
 
