@@ -39,9 +39,31 @@ def project(conn, ids):
             'instrumental',COALESCE(json_extract(c.value,'$.instrumental_claim'),0)
         )) FROM json_each(a.payload,'$.candidates') c) AS candidates
         FROM analyses a WHERE a.track_id IN (%s)''' % ','.join('?' for _ in ids)
-    return {r['track_id']: {**dict(r), 'sources': json.loads(r['sources'] or '[]'),
-                          'candidates': json.loads(r['candidates'] or '[]')}
-            for r in conn.execute(query, ids)}
+    result = {r['track_id']: {**dict(r), 'sources': json.loads(r['sources'] or '[]'),
+                            'candidates': json.loads(r['candidates'] or '[]')}
+              for r in conn.execute(query, ids)}
+    # A failed search leaves the previous analysis intact. Its old source flags
+    # must not claim that a newer lookup never ran. Read only opaque job facts;
+    # never project the frozen payload, error text or provider response bodies.
+    attempts = '''SELECT ji.item_key AS track_id,j.id,j.kind,j.created_at,j.updated_at
+        FROM jobs j JOIN job_items ji ON ji.job_id=j.id
+        JOIN tracks t ON t.id=ji.item_key AND t.is_current=1
+        WHERE j.kind IN ('analyze','recognize') AND ji.state='failed'
+          AND ji.item_key IN (%s)
+          AND EXISTS (SELECT 1 FROM json_each(j.payload,'$.items') frozen
+              WHERE json_extract(frozen.value,'$.track_id')=t.id
+                AND json_extract(frozen.value,'$.sha256')=t.sha256)
+        ORDER BY j.created_at DESC,j.id DESC''' % ','.join('?' for _ in ids)
+    for attempt in conn.execute(attempts, ids):
+        value = result.setdefault(attempt['track_id'], {
+            'input_sha256': None, 'updated_at': None, 'sources': [], 'candidates': []})
+        # updated_at belongs to the entire batch: another item may advance it
+        # after this track has already received a successful replacement analysis.
+        if value.get('last_failed_search') or (value['updated_at'] and
+                                             value['updated_at'] >= attempt['created_at']):
+            continue
+        value['last_failed_search'] = dict(attempt)
+    return result
 
 
 def missing_fields(meta):
@@ -105,6 +127,18 @@ def describe(conn, settings, row, *, analysis=None, proposal=None, connection=No
                 draft_value = False
         if draft_value:
             add('proposal_ready', 'Есть сохранённый вариант, ещё не записанный в файл.', 'review', 'Проверьте предложение и запишите изменения.')
+            continue
+        failed_search = analysis.get('last_failed_search') if analysis else None
+        if failed_search:
+            recognize = failed_search['kind'] == 'recognize'
+            retained = 'Прежние результаты поиска сохранены. ' if analysis.get('updated_at') else ''
+            add('search_failed', 'Последняя попытка распознавания завершилась ошибкой.' if recognize else
+                'Последняя попытка поиска завершилась ошибкой.',
+                'sources' if recognize else 'search',
+                retained + ('Проверьте ошибку в обработке перед повторным распознаванием.' if recognize else
+                            'Проверьте ошибку в обработке и повторите поиск.'))
+            result[-1]['checked_at'] = failed_search['updated_at']
+            result[-1]['failed_job_id'] = failed_search['id']
             continue
         if field == 'synced_lyrics' and meta.get('lyrics') and not analysis:
             add('plain_lyrics_only', 'В файле есть текст без таймкодов.', 'lyrics', 'Проверьте текст и запустите выравнивание с аудио.')

@@ -30,6 +30,17 @@ describe("visible reasons for missing fields", () => {
   it("does not call absent diagnostic evidence complete", () => {
     expect(renderToStaticMarkup(<GapSummary />)).toBe("");
   });
+  it("labels a failed job timestamp without claiming the analysis was refreshed", () => {
+    const html = renderToStaticMarkup(
+      <EnrichmentGaps
+        gaps={[{ ...gap, code: "search_failed", analysis_current: true }]}
+        disabled={false}
+        onAction={() => {}}
+      />,
+    );
+    expect(html).toContain("Задача обновлена");
+    expect(html).not.toContain("Анализ обновлён");
+  });
   it("shows partial ASR coverage without claiming filled lyrics", () => {
     const html = renderToStaticMarkup(
       <EnrichmentGaps
