@@ -3,6 +3,8 @@ from dataclasses import replace
 import io
 import json
 import logging
+import sqlite3
+import sys
 import urllib.error
 import urllib.request
 import httpx
@@ -20,6 +22,18 @@ from phonoteka.worker import Worker
 from test_backend import settings, authenticated, seed, job
 
 TOKEN='test-metrics-token-distinct-from-owner-password'
+
+
+def test_sqlite_log_keeps_numeric_error_code_without_query_text():
+    try:
+        with sqlite3.connect(':memory:') as connection:
+            connection.execute('SELECT * FROM private_table_name')
+    except sqlite3.OperationalError:
+        record = logging.LogRecord('phonoteka', logging.ERROR, '', 0,
+                                   'private operation details', (), sys.exc_info())
+    rendered = JsonFormatter('worker').format(record)
+    assert json.loads(rendered)['sqlite_errorcode'] == sqlite3.SQLITE_ERROR
+    assert 'private_table_name' not in rendered and 'private operation details' not in rendered
 
 
 def configured(settings):

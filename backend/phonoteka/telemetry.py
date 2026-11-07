@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 from pathlib import Path
 import sys
 import time
@@ -76,6 +77,10 @@ class JsonFormatter(logging.Formatter):
             data['stack'] = [{'module':Path(f.filename).name,'function':f.name,'line':f.lineno}
                              for f in traceback.extract_tb(record.exc_info[2])[-12:]]
             exception = record.exc_info[1]
+            if isinstance(exception, sqlite3.Error):
+                code = getattr(exception, 'sqlite_errorcode', None)
+                if type(code) is int:
+                    data['sqlite_errorcode'] = code
             if isinstance(exception, BaseExceptionGroup):
                 # TaskGroup otherwise hides the failing operation behind its
                 # wrapper. Keep bounded types/frames, never exception messages.
