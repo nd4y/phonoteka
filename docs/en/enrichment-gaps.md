@@ -12,6 +12,8 @@ The catalog shows a brief reason below the track name. Open the track to see “
 
 Actions are disabled while the editor has unsaved changes. Field coverage does not establish correct identification, timing against vocals or compatibility with a particular player.
 
+When an ASR result is retained, the missing-lyrics explanation includes the fraction of lines aligned in that attempt. A partial result is not a complete LRC; even 100% coverage requires listening against vocals. This is neither queue progress nor confirmation that an earlier reference text is still current.
+
 ## Search coverage
 
 When LRCLIB's exact result contains only plain text, the search also checks other variants. If that extra request fails, the plain result is preserved and the search remains incomplete. Cover lookup checks up to three matching album editions, or an explicit MusicBrainz release ID embedded in the file. Artwork remains subject to review; multiple editions no longer suppress the entire lookup.

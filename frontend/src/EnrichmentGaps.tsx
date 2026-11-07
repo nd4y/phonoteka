@@ -54,6 +54,15 @@ export function EnrichmentGaps({
             <div className="enrichment-gap-body">
               <p>{gap.message}</p>
               <p className="muted small">{gap.next_step}</p>
+              {gap.last_alignment_coverage !== undefined && (
+                <p className="muted small">
+                  Предыдущее выравнивание ASR: {Math.round(gap.last_alignment_coverage * 100)}%
+                  строк.
+                  {gap.last_alignment_coverage < 1
+                    ? " Для остальных строк надёжные таймкоды не получены."
+                    : " Времена ещё требуют проверки по вокалу."}
+                </p>
+              )}
               <span className="enrichment-gap-evidence">
                 {gap.provider && <span>{gap.provider}</span>}
                 {gap.checked_at && (

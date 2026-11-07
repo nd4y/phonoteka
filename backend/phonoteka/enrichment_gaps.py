@@ -22,6 +22,7 @@ def project(conn, ids):
         return {}
     query = '''SELECT a.track_id,a.input_sha256,a.updated_at,
         json_extract(a.payload,'$.sources') AS sources,
+        json_extract(a.payload,'$.alignment.coverage') AS alignment_coverage,
         (SELECT json_group_array(json_object(
             'provider',json_extract(c.value,'$.provider'),
             'kind',json_extract(c.value,'$.kind'),
@@ -72,6 +73,9 @@ def describe(conn, settings, row, *, analysis=None, proposal=None, connection=No
                            'next_step': next_step, 'provider': provider,
                            'checked_at': checked_at, 'analysis_current': current,
                            'candidate_count': count})
+            coverage = analysis.get('alignment_coverage') if analysis else None
+            if field == 'synced_lyrics' and type(coverage) in (int, float) and 0 <= coverage <= 1:
+                result[-1]['last_alignment_coverage'] = coverage
 
         if row['status'] == 'missing':
             add('file_missing', 'Файл недоступен в подключённой папке.', 'sources', 'Проверьте папку и повторите сканирование.')

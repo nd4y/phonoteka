@@ -94,6 +94,17 @@ def test_candidate_expiry_visible_without_returning_lyrics(client, settings):
     assert gaps(client, identity)['synced_lyrics']['code'] == 'results_expired'
 
 
+def test_partial_asr_evidence_is_not_reported_as_complete_lyrics(client, settings):
+    authenticated(client, settings)
+    identity, sha = seed(settings)
+    analysis(settings, identity, sha, {'alignment':{'coverage':0.25,'complete':False,'lines':[]},
+        'sources':[{'provider':'lrclib','state':'no_match'}]})
+    values = gaps(client, identity)
+    assert values['synced_lyrics']['last_alignment_coverage']==0.25
+    assert values['synced_lyrics']['code']=='no_result_for_query'
+    assert 'last_alignment_coverage' not in values['cover']
+
+
 def test_catalog_projection_does_not_load_cover_or_transcript_payloads(client, settings):
     authenticated(client, settings)
     identity, sha = seed(settings)

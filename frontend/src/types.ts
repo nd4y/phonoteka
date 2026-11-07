@@ -86,6 +86,7 @@ export type EnrichmentGap = {
   checked_at?: string | null;
   analysis_current: boolean;
   candidate_count?: number | null;
+  last_alignment_coverage?: number;
 };
 export type TrackPage = { items: Track[]; total: number; page: number; page_size: number };
 export type Summary = {
