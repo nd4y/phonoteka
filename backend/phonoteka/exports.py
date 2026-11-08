@@ -6,6 +6,7 @@ import zipfile
 import os
 from pathlib import Path
 import tempfile
+import threading
 import uuid
 
 from fastapi import Request
@@ -27,23 +28,73 @@ def _check_manifest_size(document):
             raise media.MediaError('export_manifest_too_large','Манифест экспорта превышает безопасный размер')
 
 
-def manifest(settings,identity):
+def _manifest_path(settings,identity):
     try:identity=str(uuid.UUID(identity))
     except ValueError:raise security.error(404,'export_missing','Экспорт не найден')
     path=settings.state_dir/'exports'/identity/'manifest.json'
     try:media._no_links(path)
     except media.MediaError:raise security.error(404,'export_missing','Экспорт не найден')
     if not path.is_file():raise security.error(404,'export_missing','Экспорт не найден')
-    with media._file(path) as stream:
-        if os.fstat(stream.fileno()).st_size > MAX_MANIFEST_BYTES:
-            raise security.error(409,'export_manifest_too_large','Манифест экспорта превышает безопасный размер')
-        raw = stream.read(MAX_MANIFEST_BYTES + 1)
+    return identity,path
+
+
+def _read_manifest(stream,identity):
+    if os.fstat(stream.fileno()).st_size > MAX_MANIFEST_BYTES:
+        raise security.error(409,'export_manifest_too_large','Манифест экспорта превышает безопасный размер')
+    raw = stream.read(MAX_MANIFEST_BYTES + 1)
     if len(raw) > MAX_MANIFEST_BYTES:
         raise security.error(409,'export_manifest_too_large','Манифест экспорта превышает безопасный размер')
     document = json.loads(raw)
     if document.get('id') != identity:
         raise security.error(409, 'export_conflict', 'Идентификатор снимка изменился')
     return document
+
+
+def manifest(settings,identity):
+    identity,path=_manifest_path(settings,identity)
+    with media._file(path) as stream:
+        return _read_manifest(stream,identity)
+
+
+class FileIndex:
+    """One stat-bound snapshot index, excluding unrelated display evidence.
+
+    Concurrent audio requests must not parse/retain the whole manifest each.
+    A cache hit still opens the safe manifest, checks its size, and later runs
+    current provider policy and the complete audio hash check. The index is
+    private to this app and is never returned to clients as a manifest.
+    """
+    def __init__(self):
+        self.lock=threading.Lock()
+        self.key=None
+        self.entries={}
+        self.available=False
+
+    @staticmethod
+    def stamp(stream):
+        st=os.fstat(stream.fileno())
+        if st.st_size > MAX_MANIFEST_BYTES:
+            raise security.error(409,'export_manifest_too_large','Манифест экспорта превышает безопасный размер')
+        return st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns
+
+    def get(self,settings,identity,relative):
+        identity,path=_manifest_path(settings,identity)
+        with self.lock,media._file(path) as stream:
+            key=(str(path),self.stamp(stream))
+            if key!=self.key:
+                # Release the old index before parsing a different generation.
+                self.key=None;self.entries={};self.available=False
+                document=_read_manifest(stream,identity)
+                entries={}
+                for entry in document['files']:
+                    name=entry['path']
+                    if not isinstance(name,str) or name in entries:
+                        raise security.error(409,'export_conflict','Повторяющийся или неверный путь в манифесте')
+                    entries[name]={'sha256':entry['sha256'],'usage_provenance':entry.get('usage_provenance',{})}
+                if self.stamp(stream)!=key[1]:
+                    raise security.error(409,'export_conflict','Манифест изменился во время чтения')
+                self.entries=entries;self.available=bool(document.get('snapshot_available'));self.key=key
+            return identity,self.available,self.entries.get(relative)
 
 
 def generate(settings,authorize=lambda:None,progress=None,*,layout='source'):
@@ -191,7 +242,27 @@ class ReceiptInput(BaseModel):
     lease_id:str|None=Field(default=None,min_length=36,max_length=36)
 
 
+def _latest_response(document):
+    """Serialize before headers without FastAPI copying the full manifest.
+
+    Export manifests include provenance and can approach 32 MiB. Returning a
+    dict invokes jsonable_encoder and then allocates complete Unicode/UTF-8
+    bodies, in addition to manifests held by simultaneous audio downloads.
+    Keep the exact JSON contract and reuse the disconnect-safe file response.
+    """
+    from .reports import ExportResponse
+    stream=tempfile.TemporaryFile(mode='w+',encoding='utf-8',newline='')
+    try:
+        json.dump(document,stream,ensure_ascii=False,allow_nan=False,separators=(',',':'))
+        stream.flush();stream.seek(0)
+        return ExportResponse(stream,media_type='application/json')
+    except BaseException:
+        stream.close()
+        raise
+
+
 def install(app,settings):
+    file_index=FileIndex()
     @app.get('/api/exports/latest')
     def latest(request:Request):
         security.require_session(request,settings)
@@ -202,7 +273,7 @@ def install(app,settings):
         receipts=db.fetchall(settings.db_path,'SELECT id,payload,created_at FROM delivery_receipts WHERE export_id=? ORDER BY created_at DESC',(identity,))
         current={r['id']:r['sha256'] for r in db.fetchall(settings.db_path,'SELECT id,sha256 FROM tracks WHERE is_current=1')}
         stale=sum(current.get(x['track_id'])!=x['sha256'] for x in doc['files'] if x.get('kind','audio')=='audio')
-        return {'export':doc,'ready_count':count,'stale_files':stale,'receipts':[{'id':r['id'],'created_at':r['created_at'],**json.loads(r['payload'])} for r in receipts]}
+        return _latest_response({'export':doc,'ready_count':count,'stale_files':stale,'receipts':[{'id':r['id'],'created_at':r['created_at'],**json.loads(r['payload'])} for r in receipts]})
 
     @app.get('/api/exports/{identity}/{kind}')
     def download(request:Request,identity:str,kind:str):
@@ -231,18 +302,18 @@ def install(app,settings):
     @app.get('/api/exports/{identity}/files/{relative:path}')
     def download_audio(request:Request,identity:str,relative:str):
         active=security.require_session(request,settings)
-        doc=manifest(settings,identity)
-        entry=next((x for x in doc['files'] if x['path']==relative),None)
-        if not doc.get('snapshot_available') or not entry:
-            raise security.error(404,'export_missing','Файл снимка не найден')
-        try:provider_policy.require_export_entry(settings,entry)
+        try:
+            identity,available,entry=file_index.get(settings,identity,relative)
+            if not available or not entry:
+                raise security.error(404,'export_missing','Файл снимка не найден')
+            provider_policy.require_export_entry(settings,entry)
+            if Path(relative).is_absolute() or '..' in Path(relative).parts or '\\' in relative:
+                raise security.error(404,'export_missing','Файл снимка не найден')
+            path=settings.state_dir/'exports'/identity/'files'/relative
+            media._no_links(path);media._expect(path,entry['sha256'])
         except media.MediaError as exc:raise security.error(409,exc.code,exc.message) from exc
-        if Path(relative).is_absolute() or '..' in Path(relative).parts or '\\' in relative:
-            raise security.error(404,'export_missing','Файл снимка не найден')
-        path=settings.state_dir/'exports'/doc['id']/'files'/relative
-        media._no_links(path);media._expect(path,entry['sha256'])
         return export_leases.LeasedFileResponse(path,filename=Path(relative).name,media_type='application/octet-stream',headers={'Cache-Control':'no-store'},
-            settings=settings,export_id=doc['id'],lease_actor=export_leases.actor(active))
+            settings=settings,export_id=identity,lease_actor=export_leases.actor(active))
 
     @app.post('/api/deliveries',status_code=201)
     def receipt(request:Request,body:ReceiptInput):
