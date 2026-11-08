@@ -1576,6 +1576,7 @@ export default function App() {
                     ["no_match", "Поиск без совпадений"],
                     ["preparation", "Последняя подготовленная папка"],
                     ["missing_lyrics", "Без текста"],
+                    ["music_gaps", "Пробелы в музыке"],
                     ["audit_errors", "Ошибки"],
                   ].map(([key, label]) => (
                     <button

@@ -159,8 +159,16 @@ export type Session = {
   activity_interval_seconds?: number;
 };
 
+export type CandidateRelease = {
+  id: string;
+  title?: string;
+  date?: string;
+  country?: string;
+};
 export type Candidate = {
   release?: Record<string, unknown>;
+  releases?: CandidateRelease[];
+  release_id?: string;
   id: string;
   provider: string;
   kind: string;

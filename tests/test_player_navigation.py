@@ -44,3 +44,39 @@ def test_neighbors_skip_cue_missing_and_invalid_but_keep_catalog_position(client
     assert client.get(f'/api/tracks/{a}/neighbors').json()['next_id'] == z
     last = client.get(f'/api/tracks/{z}/neighbors').json()
     assert last['position'] == 2 and last['catalog_position'] == 5 and last['previous_id'] == a
+
+
+def test_music_gap_filters_exclude_composites_and_spoken_genres_before_pagination(client, settings):
+    first, _ = seed(settings, 'set/01.mp3', lrc='[00:01.00]line')
+    mix, mix_revision = seed(settings, 'set/02.mp3')
+    speech, _ = seed(settings, 'set/03.mp3')
+    image, _ = seed(settings, 'set/04.mp3')
+    last, revision = seed(settings, 'set/05.mp3', art=True)
+    complete, _ = seed(settings, 'set/06.mp3', art=True, lrc='[00:01.00]line')
+    seed(settings, 'another/07.mp3')
+    with db.transaction(settings.db_path) as conn:
+        updates = {
+            first: {'tags': {'title': ['Song'], 'artist': ['Artist'], 'album': ['Album']}},
+            mix: {'recording_classification': {'kind': 'possible_mix', 'input_sha256': mix_revision}},
+            speech: {'tags': {'genre': ['Other', ' Подкаст ']}},
+            image: {'cue_album_image': True},
+            last: {'possible_mix': True, 'recording_classification': {
+                'kind': 'single_recording', 'origin': 'owner', 'input_sha256': revision}},
+            complete: {'tags': {'title': ['Song'], 'artist': ['Artist'], 'album': ['Album']}},
+        }
+        for track_id, update in updates.items():
+            row = conn.execute('SELECT metadata FROM tracks WHERE id=?', (track_id,)).fetchone()
+            conn.execute('UPDATE tracks SET metadata=? WHERE id=?',
+                         (db.encode({**json.loads(row['metadata']), **update}), track_id))
+    authenticated(client, settings)
+    params = {'search': 'set/', 'filter': 'music_gaps', 'page_size': 1}
+    for page, expected in [(1, first), (2, last)]:
+        result = client.get('/api/tracks', params={**params, 'page': page}).json()
+        assert result['total'] == 2 and [track['id'] for track in result['items']] == [expected]
+    neighbors = client.get(f'/api/tracks/{first}/neighbors', params=params).json()
+    assert neighbors['total'] == 2 and neighbors['next_id'] == last
+    for name, expected in [('music_missing_art', first), ('music_missing_tags', last),
+                           ('music_missing_lyrics', last)]:
+        result = client.get('/api/tracks', params={**params, 'filter': name}).json()
+        assert result['total'] == 1 and [track['id'] for track in result['items']] == [expected]
+    assert client.get('/api/tracks', params={**params, 'filter': 'all'}).json()['total'] == 6

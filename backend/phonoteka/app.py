@@ -22,7 +22,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
 from . import __version__, db, security, cue, reports, intake, youtube, job_activity, field_policy, media, provider_policy, comparison, lyrics_review
-from . import lyrics_document, review_queue
+from . import enrichment_gaps, lyrics_document, review_queue
 from . import media_slots
 from . import artwork
 from .lyrics_document import DocumentEdit as LyricsDocumentEdit
@@ -380,6 +380,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
         filters.update({name: f"phonoteka_audit_filter(t.metadata,t.sha256,t.status,'{name}')=1"
                         for name in audit_status.FILTERS})
+        if filter in enrichment_gaps.MUSIC_GAP_FILTERS:
+            conn.create_function('phonoteka_music_gap', 3, enrichment_gaps.matches_music_gap, deterministic=True)
+            filters[filter] = 'phonoteka_music_gap(t.metadata,t.sha256,?)=1'
+            args.append(filter)
         if filter in review_queue.FILTERS:
             review_ids = review_queue.selection(review_queue.project(conn, settings), filter)
             filters[filter] = 't.id IN (SELECT value FROM json_each(?))'
@@ -406,7 +410,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ids=[row['id'] for row in rows]
             proposals={row['track_id']:row for row in conn.execute(
                 "SELECT p.* FROM proposals p WHERE p.track_id IN (%s) AND p.id=(SELECT latest.id FROM proposals latest WHERE latest.track_id=p.track_id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)" % ','.join('?' for _ in ids),ids)} if ids else {}
-            from . import enrichment_gaps
             gaps = enrichment_gaps.for_page(conn, settings, rows, proposals)
             review = review_queue.project(conn, settings, ids)
         return {"items": [public_track(settings, row, proposal=proposals.get(row['id']),load_proposal=False,gaps=gaps[row['id']],review=review.get(row['id'])) for row in rows], "total": total, "page": page, "page_size": page_size}
