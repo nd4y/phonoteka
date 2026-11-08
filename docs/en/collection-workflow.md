@@ -47,3 +47,11 @@ Strict verification checks both FFmpeg's exit code and error-level diagnostics. 
 A current full-audit decoding failure for a single MP3 stream offers a readable copy. The conversion retains decoded audio as FLAC or PCM WAV, compares decoded PCM SHA-256 and fully audits the output. It preserves the source and records the recovery origin. Missing or damaged original samples are not restored; listening remains necessary. Unreadable headers and stale audit revisions do not qualify.
 
 ASR coverage and timing comparisons count lyric content only. Blank LRC markers retain their original times in diagnostics but receive no invented anchors. A complete candidate includes the content rows only and is offered only when every such row aligns. Partial results retain original times separately and produce no complete LRC. Human listening and Poweramp acceptance remain separate.
+
+## Choosing source data
+
+Choose one candidate only in the groups you need: song tags, album/release, lyrics, artwork, or loudness. Compare album, artist, and duration with your recording. A fingerprint identifies the song but still requires version review. Lyrics show timing availability, line count, and their opening lines; identical content is labelled. Plain lyrics require alignment. Leave unnecessary groups unselected.
+
+Select **Compare changes** to see the actual current-file versus proposed values after source priorities, including tags supplied by a lyrics provider. Locked and omitted fields are explicit. Comparison does not modify the file, previous proposal, lyrics document, or alignment. **Save as proposal** is a separate action that replaces the previous proposal in full without writing audio. Then open Tags and artwork or Lyrics to review and write the proposal. Changed search results, priorities, locks, or draft state require another comparison before saving.
+
+Detailed fields and usage terms expand on demand. Embed/export restrictions remain visible and server provenance and permission checks remain enforced. `POST /api/tracks/{id}/analysis/preview` accepts the same `candidate_ids` and `If-Match` as selection. The UI submits its returned `preview_revision` when saving. Existing API clients can still create proposals directly.

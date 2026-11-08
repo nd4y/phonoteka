@@ -1,9 +1,6 @@
-import { useState } from "react";
-import { Search, RefreshCw, Check, CircleAlert } from "lucide-react";
-import { api, messageFor } from "./api";
-import type { Track, Candidate } from "./types";
-import { ProviderCandidateUsage } from "./ProviderPolicyPanel";
-import type { PolicyCandidate } from "./ProviderPolicyPanel";
+import { Search, RefreshCw, CircleAlert } from "lucide-react";
+import type { Track } from "./types";
+import { SourceCandidatePicker } from "./SourceCandidatePicker";
 import { AutomaticQualityPanel } from "./AutomaticQualityPanel";
 import { alignmentStatus, instrumentalTextConflict } from "./alignmentStatus";
 const states: Record<string, string> = {
@@ -19,21 +16,6 @@ const states: Record<string, string> = {
   budget_exhausted: "Достигнут лимит",
   rate_limited: "Ограничение частоты",
   invalid_audio: "Ошибка аудио",
-};
-const reasons: Record<string, string> = {
-  album_differs: "Название альбома или исполнитель отличается",
-  confirm_album_group: "Проверьте состав измеренной группы альбома",
-  replaygain_preview: "Громкость измерена; применение запишет только теги",
-  recording_version_unverified: "Отпечаток совпал; проверьте версию и релиз",
-  human_timing_review_required: "Нужна проверка времен по вокалу",
-  title_differs: "Отличается название",
-  artist_differs: "Отличается исполнитель",
-  duration_differs: "Отличается длительность",
-  duration_unknown: "Длительность неизвестна",
-  lyrics_out_of_range: "Таймкоды вне длительности",
-  invalid_lyrics: "Ошибки LRC",
-  confirm_release: "Проверьте релиз",
-  confirm_album_cover: "Проверьте принадлежность обложки альбому",
 };
 const text = (value: unknown) => (Array.isArray(value) ? value.join(", ") : String(value || ""));
 export function AnalysisPanel({
@@ -55,42 +37,10 @@ export function AnalysisPanel({
   onJob: (kind: string) => Promise<void>;
   onRefresh: () => void;
 }) {
-  const [chosen, setChosen] = useState<string[]>([]),
-    [error, setError] = useState(""),
-    [saving, setSaving] = useState(false);
   const analysis = track.analysis;
   const hasHints = !!text(track.tags?.title).trim() && !!text(track.tags?.artist).trim();
   const SearchContainer = analysis?.candidates.length ? "details" : "section";
   const timingStatus = alignmentStatus(analysis);
-  function toggle(candidate: Candidate) {
-    setChosen((old) =>
-      old.includes(candidate.id)
-        ? old.filter((x) => x !== candidate.id)
-        : [
-            ...old.filter(
-              (id) => analysis?.candidates.find((x) => x.id === id)?.kind !== candidate.kind,
-            ),
-            candidate.id,
-          ],
-    );
-  }
-  async function select() {
-    setSaving(true);
-    setError("");
-    try {
-      await api(`/tracks/${encodeURIComponent(track.id)}/analysis/select`, {
-        method: "POST",
-        headers: { "If-Match": `"${track.sha256}"` },
-        body: JSON.stringify({ candidate_ids: chosen }),
-      });
-      setChosen([]);
-      onRefresh();
-    } catch (e) {
-      setError(messageFor(e));
-    } finally {
-      setSaving(false);
-    }
-  }
   return (
     <section className="panel analysis-panel">
       <div className="panel-heading">
@@ -198,11 +148,6 @@ export function AnalysisPanel({
           {track.input_error.message}
         </p>
       )}
-      {error && (
-        <p role="alert" className="warning-text">
-          {error}
-        </p>
-      )}
       {analysis?.asr && (
         <details className="asr-result">
           <summary>
@@ -269,98 +214,14 @@ export function AnalysisPanel({
               Поиск текста и релиза выполнен по результату распознавания аудио.
             </p>
           )}
-          <div className="analysis-candidates">
-            {analysis.candidates.map((candidate) => (
-              <article
-                key={candidate.id}
-                className={`analysis-candidate ${chosen.includes(candidate.id) ? "selected" : ""}`}
-              >
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={chosen.includes(candidate.id)}
-                    disabled={analysis.stale || changed || !track.can_write}
-                    onChange={() => toggle(candidate)}
-                  />
-                  <strong>
-                    {candidate.kind === "cover"
-                      ? "Обложка"
-                      : candidate.kind === "release"
-                        ? `Альбом: ${text(candidate.tags?.album) || candidate.title || "издание"}`
-                        : text(candidate.tags?.title) || candidate.title || "Вариант"}
-                  </strong>
-                  <span className="muted small">
-                    {text(candidate.tags?.artist) || candidate.artist || candidate.provider}
-                  </span>
-                </label>
-                <div className="small">
-                  {candidate.match.reasons.length
-                    ? candidate.match.reasons.map((x) => reasons[x] || x).join(" · ")
-                    : "Название, исполнитель и длительность совпадают"}
-                  {candidate.match.duration_delta != null &&
-                    ` · Δ ${candidate.match.duration_delta.toFixed(1)} с`}
-                </div>
-                <ProviderCandidateUsage
-                  trackId={track.id}
-                  candidate={candidate as PolicyCandidate}
-                />
-                {candidate.cover && (
-                  <img
-                    className="candidate-cover"
-                    src={candidate.cover}
-                    alt="Предлагаемая обложка"
-                    loading="lazy"
-                  />
-                )}
-                {(candidate.lrc || candidate.plain_lyrics) && (
-                  <details>
-                    <summary>
-                      {candidate.lrc
-                        ? "Текст с таймкодами источника"
-                        : "Обычный текст без таймкодов"}
-                    </summary>
-                    <pre>{candidate.lrc || candidate.plain_lyrics}</pre>
-                    <p className="muted small">Совпадение с вокалом еще не проверено.</p>
-                  </details>
-                )}
-                {candidate.instrumental_claim && (
-                  <p className="small">
-                    Источник пометил запись как инструментальную; требуется проверка.
-                  </p>
-                )}
-                {candidate.release && (
-                  <details>
-                    <summary>Данные издания и треклист</summary>
-                    <pre>{JSON.stringify(candidate.release, null, 2)}</pre>
-                  </details>
-                )}
-                {candidate.source_url && (
-                  <a href={candidate.source_url} target="_blank" rel="noreferrer">
-                    Источник: {candidate.provider}
-                  </a>
-                )}
-                {candidate.source_path && (
-                  <span className="small break-word">{candidate.source_path}</span>
-                )}
-              </article>
-            ))}
-          </div>
           {!!analysis.candidates.length && (
-            <div className="button-row">
-              <button
-                className="button primary"
-                disabled={!chosen.length || saving || changed || analysis.stale || !track.can_write}
-                onClick={() => void select()}
-              >
-                <Check size={17} />
-                Проверить выбранные изменения
-              </button>
-              <span className="muted small">
-                Заменит прежнее предложение. Аудиофайл пока не изменяется.
-              </span>
-            </div>
+            <SourceCandidatePicker
+              key={`${track.id}:${track.sha256}:${analysis.updated_at || ""}`}
+              track={track}
+              changed={changed}
+              onRefresh={onRefresh}
+            />
           )}
-          {changed && <p className="warning-text">Сначала сохраните черновик редактора.</p>}
         </>
       )}
       <details className="workflow-job-details">

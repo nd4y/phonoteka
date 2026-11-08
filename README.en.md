@@ -53,3 +53,5 @@ Set PROVIDER_DAILY_LIMIT=0 to disable Phonoteka's local daily request quota whil
 Large snapshots use the same 32 MiB manifest limit for reading and pre-copy validation. Existing snapshots above the former 10 MiB limit become accessible without re-exporting their audio. [Size limit and verification](docs/en/export-manifest-size.md).
 
 Collection reports and Ready snapshot responses are completed in temporary storage and downloaded in chunks, avoiding duplicate full JSON bodies in memory. Individual audio downloads share one validated snapshot index while rechecking current source permissions and file hashes. [Memory limits, cleanup and verification](docs/en/report-delivery.md).
+
+Sources groups candidates by song tags, releases, lyrics, and artwork. Compare changes shows the resolved result per field without saving; a separate action saves the reviewed selection as a proposal. [Choosing source data](docs/en/collection-workflow.md#choosing-source-data).
