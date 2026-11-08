@@ -4,6 +4,7 @@ import { api, messageFor } from "./api";
 import type { Track, Candidate } from "./types";
 import { ProviderCandidateUsage, type PolicyCandidate } from "./ProviderPolicyPanel";
 import { fieldLabels } from "./TrackPolicyPanel";
+import { useBackLayer } from "./useAppHistory";
 import {
   candidateText as text,
   candidateDuration,
@@ -36,6 +37,13 @@ type PreviewField = {
   changed: boolean;
   source: { provider?: string; candidate_id?: string };
 };
+function revealHeading(heading: HTMLHeadingElement | null) {
+  heading?.focus({ preventScroll: true });
+  heading?.scrollIntoView({
+    block: "start",
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+  });
+}
 export type SelectionPreview = {
   preview_revision: string;
   fields: PreviewField[];
@@ -58,7 +66,7 @@ function PreviewValue({ field, value }: { field: string; value: unknown }) {
 export function SourceSelectionComparison({ preview }: { preview: SelectionPreview }) {
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
-    heading.current?.focus();
+    revealHeading(heading.current);
   }, []);
   return (
     <section className="source-comparison" aria-label="Сравнение выбранных данных">
@@ -228,7 +236,7 @@ function CandidateOption({
         </p>
       )}
       <details className="source-option-details">
-        <summary>Какие данные предлагает {provider}</summary>
+        <summary>Подробности и источник</summary>
         <dl className="source-option-facts">
           {Object.entries(candidate.tags || {}).map(([field, value]) => (
             <div key={field}>
@@ -244,6 +252,9 @@ function CandidateOption({
           </a>
         )}
         {candidate.source_path && <p className="small break-word">{candidate.source_path}</p>}
+        {!usageCandidate.transient_only && usageCandidate.usage && (
+          <ProviderCandidateUsage trackId={trackId} candidate={usageCandidate} />
+        )}
       </details>
       {usageCandidate.transient_only ? (
         <ProviderCandidateUsage trackId={trackId} candidate={usageCandidate} />
@@ -254,12 +265,6 @@ function CandidateOption({
           )}
           {usageCandidate.usage?.allow_export === false && (
             <p className="warning-text small">Экспорт этих данных ограничен источником.</p>
-          )}
-          {usageCandidate.usage && (
-            <details className="source-option-details">
-              <summary>Условия использования данных</summary>
-              <ProviderCandidateUsage trackId={trackId} candidate={usageCandidate} />
-            </details>
           )}
         </>
       )}
@@ -281,6 +286,14 @@ export function SourceCandidatePicker({
   const [pending, setPending] = useState<"preview" | "save" | null>(null);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const returnToChoices = () => {
+    setPreview(null);
+    revealHeading(heading.current);
+  };
+  useBackLayer(!!preview, () => {
+    if (!pending) returnToChoices();
+  });
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -331,7 +344,9 @@ export function SourceCandidatePicker({
   return (
     <div className="source-picker">
       <div className="source-picker-intro">
-        <h3>Выберите, что добавить</h3>
+        <h3 ref={heading} tabIndex={-1}>
+          Выберите, что добавить
+        </h3>
         <p>
           Можно выбрать по одному варианту в нужных разделах. Затем сравните изменения перед
           сохранением.
@@ -417,11 +432,7 @@ export function SourceCandidatePicker({
               <Check size={17} />
               {pending === "save" ? "Сохраняем..." : "Сохранить как предложение"}
             </button>
-            <button
-              className="button secondary"
-              disabled={!!pending}
-              onClick={() => setPreview(null)}
-            >
+            <button className="button secondary" disabled={!!pending} onClick={returnToChoices}>
               Вернуться к выбору
             </button>
           </div>
