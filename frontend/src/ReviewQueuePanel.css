@@ -1,5 +1,9 @@
 .review-queue-panel {
   margin-bottom: 20px;
+  padding: 24px;
+}
+.review-queue-panel > .panel-heading {
+  padding: 0;
 }
 .review-queue-panel h2,
 .review-queue-panel h3 {
@@ -52,6 +56,13 @@
   color: var(--on-surface-variant, #cfc4b9);
 }
 @media (max-width: 760px) {
+  .review-queue-panel {
+    padding: 16px;
+  }
+  .review-queue-panel > .panel-heading {
+    flex-direction: column;
+    align-items: flex-start;
+  }
   .review-categories {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
