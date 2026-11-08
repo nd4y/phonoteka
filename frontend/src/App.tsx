@@ -1495,7 +1495,7 @@ export default function App() {
                 busy={busy}
                 onNavigate={(next) =>
                   next === "review"
-                    ? browseCollection("all", "review")
+                    ? browseCollection("review")
                     : next === "ready"
                       ? browseCollection("published", "ready")
                       : navigate(next)
@@ -1988,7 +1988,7 @@ export default function App() {
                   canAnalyze={summary?.capabilities.metadata_search}
                   jobs={jobs}
                   onAction={(action) => {
-                    if (action === "review") browseCollection("review", "review");
+                    if (action === "review") browseCollection("review");
                     else if (action === "errors") browseCollection("audit_errors");
                     else if (action === "no_match") browseCollection("no_match");
                     else if (action === "plan") showPlan();
