@@ -1,6 +1,6 @@
 # phonoteka
 
-**Needs review** groups tracks by the next action: prepare data, choose a candidate, listen, or fix a file. **Prepare available** queues bounded recording rechecks and lyric alignment drafts; disputed results remain pending. The summary, category counters and list use the same rules. [Review workflow](docs/en/review-preparation.md).
+**Needs review** groups tracks by the next action: prepare data, choose a candidate, listen, or fix a file. Open the queue from the Overview, guide or collection menu. **Prepare available** queues bounded recording rechecks and lyric alignment drafts; disputed results remain pending. The summary, category counters and list use the same rules. [Review workflow](docs/en/review-preparation.md).
 
 Temporary SQLite contention while updating the export counter no longer aborts a verified snapshot. File checks and the final commit remain mandatory. [Export progress and contention](docs/en/export-contention.md).
 

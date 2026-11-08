@@ -1,6 +1,6 @@
 # Review queue preparation
 
-Open **Collection → Needs review**. Categories are exclusive: file problems take priority, then composite recordings, then proposals. Counts cover the entire collection; search further narrows the list. These are tracks requiring a decision, not collection completion percentages.
+Open **Collection → Needs review**. **Open review queue** on the Overview and the guide's general review action open this same preparation panel. Select a track to enter its editor; the separate last-prepared-folder action retains its own filter. Categories are exclusive: file problems take priority, then composite recordings, then proposals. Counts cover the entire collection; search further narrows the list. These are tracks requiring a decision, not collection completion percentages.
 
 1. **Preparation** - additional evidence can be prepared or a task is running. **Prepare available** queues at most 200 tracks of each kind per launch. Alignment uses the configured ASR; predominantly Russian reference words receive a `ru` hint. This does not install or validate a new ASR model.
 2. **Choose a candidate** - compare the proposal with the file. Unchanged and stale proposals remain in history but do not alone create review work.
