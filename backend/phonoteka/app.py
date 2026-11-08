@@ -979,8 +979,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if provider['id']=='acoustid' and not acoustid.public_connection(settings)['key_set']:provider['state']='key_required'
         return {'external_metadata':settings.external_metadata,'external_fingerprints':settings.external_fingerprints,'daily_limit':settings.provider_daily_limit,'daily_limit_enabled':settings.provider_daily_limit>0,'providers':providers}
 
-    @app.post('/api/tracks/{track_id}/analysis/select',status_code=201)
-    async def select_analysis(request: Request, track_id: str):
+    async def source_selection(request: Request, track_id: str, preview: bool):
+        from . import selection_preview
         security.require_session(request, settings, True)
         try: body = await request.json()
         except ValueError: raise security.error(422,'invalid_selection','Ожидается JSON')
@@ -1001,16 +1001,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             chosen=[x for x in candidates if x['id'] in ids]
             if len(chosen)!=len(set(ids)): raise security.error(422,'candidate_missing','Кандидат устарел')
             if len({x['kind'] for x in chosen})!=len(chosen): raise security.error(422,'candidate_conflict','Выберите один вариант каждого типа')
+            before_token=selection_preview.revision(conn,row,analysis,chosen)
+            if preview: conn.execute('SAVEPOINT source_comparison')
             try:
                 payload=field_policy.selected_payload(settings,conn,row,chosen,analysis['updated_at'])
                 payload=provider_policy.require_payload(conn,row,payload,'cache')
+                token=field_policy.value_hash({'state':before_token,'payload':payload})
+                if preview:
+                    return selection_preview.compare(settings,conn,row,payload,token)
+                if 'preview_revision' in body and body['preview_revision'] != token:
+                    raise security.error(412,'selection_preview_stale','Данные или черновик изменились. Сравните варианты ещё раз')
                 payload=lyrics_document.propose(conn,row,payload)
             except media.MediaError as exc:
                 raise security.error(409,exc.code,exc.message) from exc
+            finally:
+                if preview:
+                    conn.execute('ROLLBACK TO source_comparison')
+                    conn.execute('RELEASE source_comparison')
             identity=str(uuid.uuid4());now=db.utcnow()
             conn.execute('INSERT INTO proposals VALUES(?,?,?,?,?)',(identity,track_id,row['sha256'],db.encode(payload),now))
             db.event(conn,'proposal_created',{'track_id':track_id,'proposal_id':identity})
         return {'id':identity,'track_id':track_id,'input_sha256':row['sha256']}
+
+    @app.post('/api/tracks/{track_id}/analysis/preview')
+    async def preview_analysis(request: Request, track_id: str):
+        return await source_selection(request,track_id,True)
+
+    @app.post('/api/tracks/{track_id}/analysis/select',status_code=201)
+    async def select_analysis(request: Request, track_id: str):
+        return await source_selection(request,track_id,False)
 
     @app.get("/api/events")
     async def events(request: Request):

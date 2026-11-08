@@ -77,6 +77,6 @@ describe("source search presentation", () => {
     });
     expect(html).toContain('<details class="workflow-job-details source-search-actions">');
     expect(html).not.toContain('open=""');
-    expect(html).toContain("Проверить выбранные изменения");
+    expect(html).toContain("Сравнить изменения");
   });
 });
