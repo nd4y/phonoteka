@@ -22,7 +22,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
 from . import __version__, db, security, cue, reports, intake, youtube, job_activity, field_policy, media, provider_policy, comparison, lyrics_review
-from . import lyrics_document
+from . import lyrics_document, review_queue
 from . import media_slots
 from . import artwork
 from .lyrics_document import DocumentEdit as LyricsDocumentEdit
@@ -94,7 +94,7 @@ def _public_proposal(row):
     return {"id": row["id"], "track_id": row["track_id"], "input_sha256": row["input_sha256"], "created_at": row["created_at"], **payload}
 
 
-def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, load_proposal=True, gaps=None):
+def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, load_proposal=True, gaps=None, review=None):
     from . import derivatives, enrichment_gaps
     meta = json.loads(row["metadata"])
     if load_proposal:
@@ -118,6 +118,10 @@ def public_track(settings: Settings, row: dict, detail=False, *, proposal=None, 
         with db.connect(settings.db_path) as conn:
             gaps = enrichment_gaps.for_page(conn, settings, [row], {row['id']: proposal})[row['id']]
     result['enrichment_gaps'] = gaps
+    if review is None:
+        with db.connect(settings.db_path) as conn:
+            review = review_queue.project(conn, settings, [row['id']]).get(row['id'])
+    result['review'] = review
     if detail:
         result['lyrics_document'] = lyrics_document.public_document(settings, row)
         result['artwork_transform'] = meta.get('artwork_transform')
@@ -347,7 +351,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         active = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs WHERE state IN ('queued','running','paused','waiting_authorization','waiting','waiting_provider','deferred','interrupted')")["n"]
         heartbeat = json.loads(db.setting(settings.db_path, "worker_heartbeat", "{}"))
         recovery=db.setting(settings.db_path,'recovery_required','false')=='true';writable=settings.writable and not recovery
+        with db.connect(settings.db_path) as conn:
+            review_counts = review_queue.counts(review_queue.project(conn, settings))
+        count['needs_review'] = review_counts['total']
         return {**count, "formats": formats, "active_jobs": active, "read_only": not writable,'recovery_required':recovery,
+                'review_counts': review_counts,
                 "worker": {**heartbeat, "online": time.time()-heartbeat.get("at", 0) < 30 and heartbeat.get("state") != "stopped"},
                 "capabilities": {"edit": True, "apply": writable, "publish": writable, "audit": True, "youtube": settings.youtube_enabled and not recovery, "metadata_search": settings.external_metadata and not recovery, "recognition": settings.external_fingerprints and not recovery, "cue_export": writable, "replaygain": not recovery, "asr": bool(settings.inference_url) and not recovery},
                 "roots": {"work": str(settings.work_root)}, "version": __version__}
@@ -372,6 +380,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
         filters.update({name: f"phonoteka_audit_filter(t.metadata,t.sha256,t.status,'{name}')=1"
                         for name in audit_status.FILTERS})
+        if filter in review_queue.FILTERS:
+            review_ids = review_queue.selection(review_queue.project(conn, settings), filter)
+            filters[filter] = 't.id IN (SELECT value FROM json_each(?))'
+            args.append(json.dumps(review_ids))
         if filter not in filters:
             raise security.error(422, "invalid_filter", "Неизвестный фильтр")
         clauses.append(filters[filter])
@@ -396,7 +408,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "SELECT p.* FROM proposals p WHERE p.track_id IN (%s) AND p.id=(SELECT latest.id FROM proposals latest WHERE latest.track_id=p.track_id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)" % ','.join('?' for _ in ids),ids)} if ids else {}
             from . import enrichment_gaps
             gaps = enrichment_gaps.for_page(conn, settings, rows, proposals)
-        return {"items": [public_track(settings, row, proposal=proposals.get(row['id']),load_proposal=False,gaps=gaps[row['id']]) for row in rows], "total": total, "page": page, "page_size": page_size}
+            review = review_queue.project(conn, settings, ids)
+        return {"items": [public_track(settings, row, proposal=proposals.get(row['id']),load_proposal=False,gaps=gaps[row['id']],review=review.get(row['id'])) for row in rows], "total": total, "page": page, "page_size": page_size}
+
+    @app.get('/api/review/plan')
+    def review_plan(request: Request):
+        security.require_session(request, settings)
+        with db.connect(settings.db_path) as conn:
+            conn.execute('BEGIN')
+            return review_queue.plan(conn, settings)
 
     @app.get("/api/tracks/{track_id}/neighbors")
     def track_neighbors(request: Request, track_id: str, search: str = Query("", max_length=200), filter: str = Query("all")):
@@ -620,10 +640,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     raise security.error(409, 'idempotency_conflict', 'Этот ключ уже использован для другого запроса')
                 existing = dict(conn.execute('SELECT * FROM jobs WHERE id=?', (previous['job_id'],)).fetchone())
                 return public_job(settings, existing)
+        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout", "review_tokens"}:
+            raise security.error(422, "invalid_params", "Неизвестный параметр задания")
+        if 'review_tokens' in body.params:
+            tokens = body.params['review_tokens']
+            if (body.kind not in {'recognize', 'align'} or set(body.params) != {'review_tokens'}
+                    or not isinstance(tokens, dict) or not 1 <= len(tokens) <= 200
+                    or set(tokens) != set(body.track_ids) or len(body.track_ids) != len(tokens)
+                    or any(not isinstance(v, str) or not re.fullmatch('[a-f0-9]{64}', v) for v in tokens.values())):
+                raise security.error(422, 'invalid_review_plan', 'Выберите актуальный план подготовки до 200 записей')
         if body.kind in {"apply", "rollback", "publish", "rollback_ready", "publish_sidecars", "extract_cue", "normalize_audio"} and not settings.writable:
             raise security.error(409, "read_only", "Запись отключена до проверки конфигурации хранилища")
-        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout"}:
-            raise security.error(422, "invalid_params", "Неизвестный параметр задания")
         if 'layout' in body.params and (body.kind!='export_ready' or not isinstance(body.params['layout'],str) or body.params['layout'] not in {'source','artist_album'}):
             raise security.error(422,'invalid_export_layout','Структура экспорта: source или artist_album')
         folder = body.params.get("folder", "")
@@ -734,6 +761,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     conn.execute("INSERT INTO idempotency VALUES(?,?,?,?,?)", (scope,key,request_hash,existing["id"],now))
                     return public_job(settings, dict(existing))
             items = []
+            review_tokens = body.params.get('review_tokens')
+            review = review_queue.project(conn, settings, ids) if review_tokens else {}
+            if review_tokens:
+                known = [conn.execute('SELECT value FROM settings WHERE key=?',
+                         (review_queue.receipt_key(body.kind, token),)).fetchone() for token in review_tokens.values()]
+                if any(known):
+                    job_ids = {json.loads(r['value'])['job_id'] for r in known if r}
+                    if all(known) and len(job_ids) == 1:
+                        existing = conn.execute('SELECT * FROM jobs WHERE id=?', (next(iter(job_ids)),)).fetchone()
+                        if existing and existing['auth_epoch'] == active['auth_epoch']:
+                            return public_job(settings, dict(existing))
+                    raise security.error(409, 'review_already_prepared', 'Часть плана уже запущена. Обновите очередь проверки.')
             for track_id in ids:
                 track = conn.execute("SELECT * FROM tracks WHERE id=? AND is_current=1", (track_id,)).fetchone()
                 if not track:
@@ -751,6 +790,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 elif meta.get('format') == 'cue' or (meta.get('cue_album_image') and body.kind not in {'audit','analyze','transcribe','align','youtube'}):
                     raise security.error(409, 'cue_read_only', 'CUE и альбомные образы не изменяются заданиями записи')
                 item = {"track_id": track_id, "sha256": track["sha256"], "relative_path": track["relative_path"]}
+                if review_tokens:
+                    action = review.get(track_id, {}).get('action') or {}
+                    if action.get('kind') != body.kind or action.get('token') != review_tokens[track_id]:
+                        raise security.error(409, 'review_plan_stale', 'Данные или решение изменились. Обновите план подготовки.')
+                    item['review_preparation'] = {'token': action['token'], 'classification': meta.get('recording_classification')}
                 if body.kind == 'publish':
                     item['publication_review'] = lyrics_review.freeze_publication(settings, track, conn=conn)
                     item['publication_target'] = publication.freeze_target(track)
@@ -783,6 +827,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     reference_payload=provider_policy.alignment_payload(conn,track,text,reference_proposal)
                     reference_payload=provider_policy.api_payload(conn,track,reference_payload,'derived_analysis')
                     item['reference_sources']=reference_payload.get('field_sources',{})
+                    if review_tokens:
+                        item['language_hint'] = review_queue.language_hint(item['reference_text'])
                 if body.kind == "apply":
                     if body.params.get("proposal_id"):
                         prop = conn.execute("SELECT * FROM proposals WHERE id=? AND track_id=?", (body.params["proposal_id"],track_id)).fetchone()
@@ -826,6 +872,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 payload['auth_scopes']=sorted(active['scopes'])
             conn.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch) VALUES(?,?,'queued','pending',?,?,?,?,?)", (identity,body.kind,db.encode(payload),len(items),now,now,active["auth_epoch"]))
             conn.execute("INSERT INTO idempotency VALUES(?,?,?,?,?)", (scope,key,request_hash,identity,now))
+            if review_tokens:
+                for token in review_tokens.values():
+                    conn.execute('INSERT INTO settings VALUES(?,?)',
+                                 (review_queue.receipt_key(body.kind, token), db.encode({'job_id': identity})))
             db.event(conn, "job_created", {"job_id": identity, "kind": body.kind})
             row = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (identity,)).fetchone())
         return public_job(settings, row)

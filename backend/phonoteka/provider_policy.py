@@ -219,8 +219,8 @@ def decorate_manual(conn, row, payload):
     payload['sources']=[{key:value for key,value in source.items() if key not in CONTENT_FIELDS} for source in payload.get('sources',[]) if isinstance(source,dict)]
     fields = payload.setdefault("field_sources", {})
     meta = loads(row["metadata"])
-    previous = conn.execute("SELECT payload FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", (row["id"],)).fetchone()
-    known = loads(previous["payload"]).get("field_sources", {}) if previous else {}
+    previous = conn.execute("SELECT json_extract(payload,'$.field_sources') AS field_sources FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", (row["id"],)).fetchone()
+    known = loads(previous["field_sources"]) if previous else {}
     known = {**meta.get("usage_provenance", {}), **known}
     embedded = field_values({"tags": meta.get("tags", {}), "lrc": meta.get("lrc", "")})
     for name, value in field_values(payload).items():

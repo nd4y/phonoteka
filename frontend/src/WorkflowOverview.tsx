@@ -159,10 +159,10 @@ export function WorkflowOverview({
           <div className="workflow-attention">
             <button onClick={() => onAction("review")}>
               <CheckCheck size={22} />
-              <strong>{n(counts.current_proposals)}</strong>
+              <strong>{n(counts.review_required)}</strong>
               <span>
-                Сохраненные предложения
-                <small>Открыть всю очередь проверки, включая ошибки</small>
+                Нужно проверить
+                <small>Подготовка, выбор, прослушивание и проблемы файлов</small>
               </span>
             </button>
             <button onClick={() => onAction("no_match")}>

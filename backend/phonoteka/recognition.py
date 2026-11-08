@@ -237,7 +237,7 @@ def segment_verdict(segments):
 
 
 async def identify_segments(providers, sample_audio, duration, authorize, *, input_revision,
-                            audio_identity, batch_id):
+                            audio_identity, batch_id, review_recheck=False):
     """No hidden retry: all fragments share the existing durable call budget.
 
     sample_audio is the Worker's bounded I/O lane. recognize retains its exact
@@ -245,7 +245,10 @@ async def identify_segments(providers, sample_audio, duration, authorize, *, inp
     """
     segments = []
     with provider_attempts.recognition_scope(audio_identity, batch_id):
-        for requested in offsets(duration):
+        positions = offsets(duration)
+        if review_recheck and math.isfinite(duration) and duration >= 30:
+            positions = list(dict.fromkeys([*positions, min(duration - 12, duration * .9)]))
+        for requested in positions:
             authorize()
             audio, offset = await sample_audio(requested)
             authorize()

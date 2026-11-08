@@ -47,6 +47,10 @@ export function TrackFilters({
             <option value="all">Все записи</option>
             <option value="cue">Альбомы CUE</option>
             <option value="review">Нужно проверить</option>
+            <option value="review_prepare">Проверка: подготовка</option>
+            <option value="review_choose">Проверка: выбрать вариант</option>
+            <option value="review_listen">Проверка: прослушать</option>
+            <option value="review_file">Проверка: проблема файла</option>
             <option value="audit_errors">Аудио: ошибки</option>
             <option value="audit_warnings">Аудио: предупреждения</option>
             <option value="audit_unchecked">Аудио: не проверено</option>

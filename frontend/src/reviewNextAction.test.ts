@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { reviewNextAction } from "./reviewNextAction";
 
 describe("review next step", () => {
+  it("prepares drafts and resolves blocking recording decisions before any write", () => {
+    const base = { changed: false, savedProposal: true, invalidLyrics: false };
+    expect(reviewNextAction({ ...base, preparation: true })).toBe("prepare");
+    expect(reviewNextAction({ ...base, possibleMix: true })).toBe("recording");
+    expect(reviewNextAction({ ...base, fileProblem: true })).toBe("file");
+    expect(reviewNextAction({ ...base, changed: true, preparation: true })).toBe("save");
+  });
   it("offers a separate readable copy before writing a file with a decoder failure", () => {
     expect(
       reviewNextAction({

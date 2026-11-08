@@ -1,5 +1,6 @@
 import { requestId } from "./api";
 import { reviewNextAction } from "./reviewNextAction";
+import { ReviewQueuePanel, reviewLabels } from "./ReviewQueuePanel";
 import { EnrichmentGaps, GapSummary } from "./EnrichmentGaps";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
@@ -1083,9 +1084,7 @@ export default function App() {
           nextId = pending.nextId;
           nextPage = pending.nextPage;
         } else pendingReviewWrites.current.set(key, { job, nextId, nextPage });
-        setNotice(
-          "Записываем выбранные данные. Следующая карточка откроется после успешного завершения.",
-        );
+        setNotice("");
         const result = await awaitReviewWrite(
           job,
           (id) => api<Job>(`/jobs/${encodeURIComponent(id)}`),
@@ -1588,6 +1587,21 @@ export default function App() {
                     </button>
                   ))}
                 </div>
+                {filter.startsWith("review") && (
+                  <ReviewQueuePanel
+                    filter={filter}
+                    refreshKey={activeJobs.map((job) => `${job.id}:${job.state}`).join("|")}
+                    onFilter={changeFilter}
+                    onRefresh={() => {
+                      void loadTracks();
+                      void loadStatus();
+                    }}
+                    onOpen={(id) => {
+                      void openTrack({ id }, "review");
+                    }}
+                    onJobs={() => navigate("jobs")}
+                  />
+                )}
                 <section className="panel collection-panel">
                   <div className="panel-heading">
                     <div>
@@ -1664,10 +1678,19 @@ export default function App() {
                           <span className="queue-meta">
                             {track.format.toUpperCase()}
                             {recordingLabel(track) && ` · ${recordingLabel(track)}`}
-                            {track.proposal?.input_sha256 === track.sha256 ? " · Предложение" : ""}
+                            {(
+                              track.review
+                                ? track.review.proposal_state === "pending"
+                                : track.proposal?.input_sha256 === track.sha256
+                            )
+                              ? " · Предложение"
+                              : ""}
+                            {track.review?.category && ` · ${reviewLabels[track.review.category]}`}
                           </span>
                         </span>
-                        {track.proposal && (
+                        {(track.review
+                          ? track.review.proposal_state === "pending"
+                          : track.proposal?.input_sha256 === track.sha256) && (
                           <span className="proposal-dot" aria-label="Есть предложение" />
                         )}
                       </button>
@@ -2153,8 +2176,19 @@ function TrackList({
                 <span className="track-mobile-meta">
                   {track.format.toUpperCase()} · {durationOf(track.duration)}
                   {recordingLabel(track) && ` · ${recordingLabel(track)}`}
-                  {track.proposal?.input_sha256 === track.sha256 ? " · Предложение" : ""}
+                  {(
+                    track.review
+                      ? track.review.proposal_state === "pending"
+                      : track.proposal?.input_sha256 === track.sha256
+                  )
+                    ? " · Предложение"
+                    : ""}
                 </span>
+                {track.review?.category && (
+                  <span className="review-reason">
+                    {reviewLabels[track.review.category]}: {track.review.message}
+                  </span>
+                )}
                 <GapSummary gaps={track.enrichment_gaps} />
               </span>
             </span>
@@ -2289,7 +2323,13 @@ function TrackEditor({
   onSave,
   onJob,
 }: EditorProps) {
-  const activeProposal = track.proposal?.input_sha256 === track.sha256 ? track.proposal : null;
+  const activeProposal = (
+    track.review
+      ? track.review.proposal_state === "pending"
+      : track.proposal?.input_sha256 === track.sha256
+  )
+    ? track.proposal
+    : null;
   const lyricDocument = track.lyrics_document;
   const [baseline] = useState(() =>
     editorBaseline(
@@ -2464,9 +2504,13 @@ function TrackEditor({
     savedProposal: !!activeProposal,
     invalidLyrics: hasUntimed || !!lyricsInvalid,
     canRecover: track.can_recover,
+    preparation: !!track.review?.action,
+    possibleMix: !!track.possible_mix,
+    fileProblem: track.review?.category === "file",
   });
-  const nextHint =
-    nextAction === "save"
+  const nextHint = ["prepare", "recording", "file"].includes(nextAction)
+    ? track.review?.message || "Проверьте причину блокировки записи."
+    : nextAction === "save"
       ? "Сохраните черновик, затем проверьте его перед записью. Аудиофайл пока не изменится."
       : nextAction === "recover"
         ? "Декодер обнаружил ошибку. Создайте отдельную читаемую копию. Исходный файл сохранится, утраченные участки звука не восстанавливаются."
@@ -2548,6 +2592,16 @@ function TrackEditor({
                   }
                   onClick={() => {
                     if (nextAction === "save") void save();
+                    else if (nextAction === "prepare" && track.review?.action)
+                      void onJob(track.review.action.kind, {
+                        review_tokens: { [track.id]: track.review.action.token },
+                      });
+                    else if (nextAction === "recording") {
+                      const heading = document.getElementById(`recording-type-${track.id}`);
+                      const details = heading?.closest("details");
+                      if (details) details.open = true;
+                      heading?.scrollIntoView({ block: "center", behavior: "auto" });
+                    } else if (nextAction === "file") setSourcesOpen(true);
                     else if (nextAction === "write") void onApplyNext();
                     else if (nextAction === "recover") void onJob("normalize_audio");
                     else if (nextAction === "lyrics") {
@@ -2577,19 +2631,25 @@ function TrackEditor({
                       ) : (
                         <Search size={18} />
                       )}
-                      {nextAction === "save"
-                        ? "Сохранить черновик"
-                        : nextAction === "write"
-                          ? moving
-                            ? "Записываем..."
-                            : "Записать и дальше"
-                          : nextAction === "recover"
-                            ? "Создать читаемую копию"
-                            : nextAction === "lyrics"
-                              ? "Проверить текст"
-                              : track.analysis?.candidates?.length
-                                ? "Выбрать данные"
-                                : "Найти данные"}
+                      {nextAction === "prepare"
+                        ? "Подготовить автоматически"
+                        : nextAction === "recording"
+                          ? "Проверить состав записи"
+                          : nextAction === "file"
+                            ? "Проверить файл"
+                            : nextAction === "save"
+                              ? "Сохранить черновик"
+                              : nextAction === "write"
+                                ? moving
+                                  ? "Записываем..."
+                                  : "Записать и дальше"
+                                : nextAction === "recover"
+                                  ? "Создать читаемую копию"
+                                  : nextAction === "lyrics"
+                                    ? "Проверить текст"
+                                    : track.analysis?.candidates?.length
+                                      ? "Выбрать данные"
+                                      : "Найти данные"}
                     </>
                   )}
                 </button>
