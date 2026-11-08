@@ -8,6 +8,13 @@ import {
 import type { Job } from "./types";
 
 describe("collection workflow", () => {
+  it("uses the actionable review population rather than stored empty proposals", () => {
+    const counts = { files: 8, audio_files: 8, published_current: 8, current_proposals: 5 };
+    expect(nextCollectionAction({ ...counts, review_required: 0 }, [])).toBe("ready");
+    expect(nextCollectionAction({ ...counts, current_proposals: 0, review_required: 2 }, [])).toBe(
+      "review",
+    );
+  });
   it("does not treat missing, empty, or inconsistent snapshots as complete", () => {
     expect(publicationProgress({}).percent).toBeNull();
     expect(publicationProgress({ audio_files: 0, published_current: 0 }).percent).toBeNull();

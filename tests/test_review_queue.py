@@ -48,6 +48,7 @@ def test_same_review_population_for_summary_filter_and_plan(client, settings):
     summary = client.get('/api/summary').json(); plan = client.get('/api/review/plan').json()
     page = client.get('/api/tracks?filter=review').json()
     assert summary['needs_review'] == plan['counts']['total'] == page['total'] == 3
+    assert client.get('/api/reports/collection').json()['counts']['review_required'] == page['total']
     assert {x['id'] for x in page['items']} == {plain, mixed, error}
     for category in review_queue.CATEGORIES:
         assert client.get('/api/tracks?filter=review_'+category).json()['total'] == plan['counts'][category]

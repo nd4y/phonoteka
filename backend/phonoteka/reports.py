@@ -27,9 +27,12 @@ def summary(settings, conn=None):
             return summary(settings,active)
     exact=defaultdict(list);audio=defaultdict(list);albums=defaultdict(list);candidates=defaultdict(list);by_id={}
     source_outputs=catalog_sources.completed_sources(conn)
+    from . import review_queue
+    review = review_queue.counts(review_queue.project(conn, settings))
     counts={'youtube_recorded':0,'youtube_confirmed':0,'youtube_candidates':0,'youtube_conflicts':0,'files':0,'cue_sheets':0,'input_errors':0,'writable_profiles':0,'with_lyrics':0,'with_cover':0,'analyzed':0,'with_candidates':0,'no_match':0,'asr_drafts':0,'fingerprint_matches':0,'fingerprint_no_match':0,'fingerprint_unavailable':0}
     counts.update(dict.fromkeys(('audio_files','with_core_tags','audit_clean','audit_warnings','audit_errors','audit_unchecked',
         'published_current','current_proposals','stale_analysis','eligible_files','metadata_pending','recognition_pending','source_audio_files'),0))
+    counts['review_required'] = review['total']
     # Match the editor: only the newest proposal is visible, and its input must
     # still be current. A source candidate is not a saved proposal.
     proposals={r['track_id']:r for r in conn.execute('''SELECT track_id,input_sha256 FROM (
