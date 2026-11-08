@@ -99,7 +99,7 @@
 }
 .source-option-facts > div {
   display: grid;
-  grid-template-columns: minmax(75px, 1fr) minmax(0, 3fr);
+  grid-template-columns: minmax(100px, 1fr) minmax(0, 3fr);
   gap: 12px;
 }
 .source-option-facts dt {
