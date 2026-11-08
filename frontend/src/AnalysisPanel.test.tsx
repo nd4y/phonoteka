@@ -27,6 +27,31 @@ const render = (value: Track) =>
     />,
   );
 describe("source search presentation", () => {
+  it("focuses attention on unresolved timing without accepting the remaining lines", () => {
+    const html = render({
+      ...track,
+      analysis: {
+        input_sha256: track.sha256,
+        query_source: "embedded",
+        state: "candidates",
+        candidates: [],
+        sources: [],
+        alignment: {
+          state: "partially_aligned",
+          coverage: 0.5,
+          complete: false,
+          lines: [
+            { text: "Unresolved line", start_ms: null, original_ms: null, state: "unaligned" },
+            { text: "Anchored line", start_ms: 1200, original_ms: null, state: "anchored" },
+          ],
+        },
+      },
+    });
+    expect(html).toContain("Unresolved line");
+    expect(html).not.toContain("Anchored line");
+    expect(html).toContain("Остальные совпадения также требуют проверки на слух");
+    expect(html).toContain("Показать все строки");
+  });
   it("names a selectable album edition separately from the song", () => {
     const html = render({
       ...track,

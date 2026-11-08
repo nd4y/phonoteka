@@ -23,7 +23,7 @@ async def process(worker, job, item):
                 raise media.MediaError('lyrics_document_stale','Слова изменились после постановки alignment в очередь')
             provider_policy.require_payload(conn,row,{'lrc':item.get('reference_text',''),'field_sources':item.get('reference_sources',{})},'derived_analysis')
     token=(await worker.io(settings.inference_secret_file.read_text)).strip()
-    body={'relative_path':item['relative_path'],'sha256':item['sha256'],'language':params.get('language') or None,'generation':item.get('generation',params.get('generation',0)),'reference_text':item.get('reference_text') if job['kind']=='align' else None}
+    body={'relative_path':item['relative_path'],'sha256':item['sha256'],'language':params.get('language') or item.get('language_hint') or None,'generation':item.get('generation',params.get('generation',0)),'reference_text':item.get('reference_text') if job['kind']=='align' else None}
     worker.authorize_grant(job)
     headers={'Authorization':'Bearer '+token, **tracing.carrier(), 'x-phonoteka-job-id':job['id'], 'x-phonoteka-item-id':item['track_id']}
     async with httpx.AsyncClient(base_url=settings.inference_url,timeout=15,headers=headers) as client:

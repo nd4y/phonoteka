@@ -1,4 +1,5 @@
 import { Search, RefreshCw, CircleAlert } from "lucide-react";
+import { useState } from "react";
 import type { Track } from "./types";
 import { SourceCandidatePicker } from "./SourceCandidatePicker";
 import { AutomaticQualityPanel } from "./AutomaticQualityPanel";
@@ -38,6 +39,11 @@ export function AnalysisPanel({
   onRefresh: () => void;
 }) {
   const analysis = track.analysis;
+  const [allAlignmentLines, setAllAlignmentLines] = useState(false);
+  const alignmentLines = analysis?.alignment?.lines || [];
+  const uncertainLines = alignmentLines.filter(
+    (line) => line.start_ms == null || !!line.low_probability_words,
+  );
   const hasHints = !!text(track.tags?.title).trim() && !!text(track.tags?.artist).trim();
   const SearchContainer = analysis?.candidates.length ? "details" : "section";
   const timingStatus = alignmentStatus(analysis);
@@ -171,7 +177,19 @@ export function AnalysisPanel({
       {analysis?.alignment && (
         <details className="asr-result">
           <summary>Сопоставлено строк: {Math.round(analysis.alignment.coverage * 100)}%</summary>
-          {analysis.alignment.lines.map((line, index) => (
+          <p className="muted small">
+            Особого внимания требуют {uncertainLines.length} из {alignmentLines.length} строк.
+            Остальные совпадения также требуют проверки на слух.
+          </p>
+          <label className="small">
+            <input
+              type="checkbox"
+              checked={allAlignmentLines}
+              onChange={(event) => setAllAlignmentLines(event.target.checked)}
+            />{" "}
+            Показать все строки
+          </label>
+          {(allAlignmentLines ? alignmentLines : uncertainLines).map((line, index) => (
             <p key={index} className="small">
               <strong>
                 {line.start_ms == null

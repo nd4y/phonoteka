@@ -32,13 +32,21 @@ export type AuditStatus = "error" | "warning" | "passed" | "unchecked" | "not_ap
 export type RecordingKind = "single_recording" | "possible_mix";
 export type RecordingClassification = {
   kind: RecordingKind;
-  origin: "owner" | "segment_conflict";
+  origin: "owner" | "segment_conflict" | "segment_recheck";
   input_sha256: string;
   version: number;
   reason: string;
   at?: string;
 };
 export type Track = {
+  review?: {
+    category: import("./ReviewQueuePanel").ReviewCategory | null;
+    reason?: string;
+    message: string;
+    proposal_state: "none" | "stale" | "no_changes" | "pending";
+    action?: { kind: "recognize" | "align"; token: string } | null;
+    preparation_job?: { id: string; state: string } | null;
+  };
   enrichment_gaps?: EnrichmentGap[];
   possible_mix?: boolean;
   record_type?: "possible_mix" | "single_recording" | "audio" | "cue_sheet" | "cue_album_image";

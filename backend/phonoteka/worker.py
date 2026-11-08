@@ -739,6 +739,9 @@ class Worker:
         path = self.settings.work_root/item['relative_path']
         await self.io(media._expect, path, item['sha256'])
         meta = json.loads(row['metadata'])
+        recheck = bool(item.get('review_preparation') and fingerprint)
+        if recheck and meta.get('recording_classification') != item['review_preparation'].get('classification'):
+            raise media.MediaError('conflict', 'Recording classification changed before recheck')
         if 'duration' in meta and not float(meta['duration'])>0:
             probe=await self.io(media.probe_audio,path);meta['duration']=probe['duration'];meta['duration_source']='ffprobe_fallback'
         if self.providers is None: self.providers = Providers(self.settings,metrics=self.metrics)
@@ -796,7 +799,8 @@ class Worker:
                 return value
             if segment_result is None:
                 segment_result=await recognition.identify_segments(self.providers,sample_audio,float(meta.get('duration',0)),authorized,
-                    input_revision=item['sha256'],audio_identity=audio_identity,batch_id=job['id'])
+                    input_revision=item['sha256'],audio_identity=audio_identity,batch_id=job['id'],
+                    **({'review_recheck': True} if recheck else {}))
             matches=[entry['candidate'] for entry in segment_result['segments'] if entry.get('candidate')]
             identified=matches[0] if matches and not segment_result['possible_mix'] else None
             failures=[entry['state'] for entry in segment_result['segments'] if entry['state'] not in {'match','no_match'}]
@@ -827,7 +831,8 @@ class Worker:
                 identified=next((c for c in old_candidates if c.get('provider')=='shazam' and c.get('tags')),None)
                 acoustic=[c for c in old_candidates if c.get('provider')=='acoustid' and c.get('tags')]
                 if identified is None and len(acoustic)==1:identified=acoustic[0]
-        if (segment_result and segment_result['possible_mix']) or recording_review.possible_mix(meta,item['sha256']):
+        checked_meta = recording_review.resolve_recheck(meta, item['sha256'], segment_result, float(meta.get('duration', 0))) if recheck and segment_result else meta
+        if (segment_result and segment_result['possible_mix']) or recording_review.possible_mix(checked_meta,item['sha256']):
             # Never use the first song of a compilation as a whole-file query.
             result={'input_sha256':item['sha256'],'query_source':'conflicting_audio_segments','candidates':[],
                     'sources':[],'automatic_apply':False,'state':'needs_review'}
@@ -877,9 +882,15 @@ class Worker:
                     for key in ('recognition_segments','recording_confirmation','possible_mix'):
                         if key in old:result[key]=old[key]
             if segment_result:
-                fresh_meta=recording_review.annotate(json.loads(current['metadata']),item['sha256'],segment_result['possible_mix'])
+                fresh_meta=json.loads(current['metadata'])
+                if recheck:
+                    if fresh_meta.get('recording_classification') != item['review_preparation'].get('classification'):
+                        raise media.MediaError('conflict', 'Recording classification changed during recheck')
+                    fresh_meta=recording_review.resolve_recheck(fresh_meta,item['sha256'],segment_result,float(meta.get('duration',0)))
+                fresh_meta=recording_review.annotate(fresh_meta,item['sha256'],segment_result['possible_mix'])
+                prior_status = 'indexed' if recheck and not fresh_meta['possible_mix'] and current['status']=='needs_review' else current['status']
                 conn.execute('UPDATE tracks SET metadata=?,status=?,updated_at=? WHERE id=?',
-                    (db.encode(fresh_meta),recording_review.catalog_status(current['status'],fresh_meta['possible_mix']),db.utcnow(),item['track_id']))
+                    (db.encode(fresh_meta),recording_review.catalog_status(prior_status,fresh_meta['possible_mix']),db.utcnow(),item['track_id']))
             result=provider_policy.prepare_analysis(conn,result)
             conn.execute('INSERT OR REPLACE INTO analyses VALUES(?,?,?,?)',(item['track_id'],item['sha256'],db.encode(result),db.utcnow()))
             db.event(conn,'analysis_completed',{'track_id':item['track_id'],'state':result['state']})

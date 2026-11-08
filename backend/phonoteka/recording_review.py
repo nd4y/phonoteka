@@ -1,6 +1,7 @@
 """A composite recording is an explicit catalog fact, never an automatic split."""
 import json
 import uuid
+import math
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,8 +36,36 @@ def annotate(metadata, revision, conflict):
     metadata['record_type'] = ('cue_sheet' if metadata.get('format') == 'cue' else
         'cue_album_image' if metadata.get('cue_album_image') else
         'possible_mix' if metadata['possible_mix'] else
-        'single_recording' if decision(metadata,revision).get('origin') == 'owner' else 'audio')
+        'single_recording' if decision(metadata,revision).get('origin') in {'owner', 'segment_recheck'} else 'audio')
     return metadata
+
+
+def resolve_recheck(metadata, revision, verdict, duration):
+    """Only a bounded, unanimous independent-fragment recheck resolves a machine flag.
+
+    No owner decision, tags, lyrics, release selection or publication is accepted.
+    No-match, errors, partial quota, long recordings and differing ISRC stay open.
+    """
+    current = decision(metadata, revision)
+    if current.get('origin') == 'owner' or not possible_mix(metadata, revision): return metadata
+    segments = verdict.get('segments', [])
+    if (not isinstance(duration, (int, float)) or not math.isfinite(duration) or not 30 <= duration <= 600
+            or verdict.get('state') != 'agreement' or len(segments) != 3
+            or any(s.get('state') != 'match' or not s.get('candidate') for s in segments)):
+        return metadata
+    offsets = [s.get('offset') for s in segments]
+    if any(not isinstance(x, (int, float)) or not math.isfinite(x) for x in offsets): return metadata
+    if len(set(offsets)) != 3 or max(offsets) - min(offsets) < duration * .5: return metadata
+    if len({s.get('sample_sha256') for s in segments}) != 3 or any(not s.get('sample_sha256') for s in segments): return metadata
+    candidates = [s['candidate'] for s in segments]
+    isrcs = {c.get('isrc') for c in candidates}
+    ids = {(c.get('provider'), c.get('provider_recording_id')) for c in candidates}
+    if len(isrcs) != 1 or not all(c.get('isrc') for c in candidates) or len(ids) != 1 or not all(c.get('provider_recording_id') for c in candidates): return metadata
+    value = {**metadata, 'possible_mix': False, 'recording_classification': {
+        'kind': 'single_recording', 'origin': 'segment_recheck', 'input_sha256': revision,
+        'version': current.get('version', 0) + 1, 'reason': 'three_separated_fragments_agree', 'at': db.utcnow()}}
+    value['record_type'] = 'single_recording'
+    return value
 
 
 class ClassificationInput(BaseModel):
