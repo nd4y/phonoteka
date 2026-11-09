@@ -1,4 +1,5 @@
 import { Search, SlidersHorizontal, X } from "lucide-react";
+import { musicGapFilters } from "./musicGapFilters";
 
 type TrackFiltersProps = {
   search: string;
@@ -60,6 +61,13 @@ export function TrackFilters({
             <option value="no_match">Поиск без совпадений</option>
             <option value="preparation">Последняя подготовленная папка</option>
             <option value="published">Опубликованы</option>
+            <optgroup label="Пробелы в отдельных музыкальных записях">
+              {Object.entries(musicGapFilters).map(([key, label]) => (
+                <option key={key} value={key}>
+                  {label}
+                </option>
+              ))}
+            </optgroup>
           </select>
         </label>
       )}

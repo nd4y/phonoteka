@@ -10,6 +10,16 @@ from .providers import scalar
 
 
 FIELDS = ('title', 'artist', 'album', 'cover', 'synced_lyrics')
+MUSIC_GAP_FILTERS = {
+    'music_gaps': FIELDS,
+    'music_missing_tags': FIELDS[:3],
+    'music_missing_art': ('cover',),
+    'music_missing_lyrics': ('synced_lyrics',),
+}
+SPOKEN_GENRES = {
+    'audiobook', 'podcast', 'speech', 'spoken word',
+    'аудиокнига', 'подкаст', 'разговорная запись',
+}
 RETRY_STATES = {
     'provider_cooldown', 'provider_unavailable', 'rate_limited', 'budget_exhausted',
     'timeout', 'network_error', 'deadline_exceeded', 'partial',
@@ -73,6 +83,18 @@ def missing_fields(meta):
     return [field for field in FIELDS if not (
         meta.get('has_art') if field == 'cover' else
         meta.get('lrc') if field == 'synced_lyrics' else scalar(tags, field).strip())]
+
+
+def matches_music_gap(metadata, revision, filter_name):
+    meta = json.loads(metadata)
+    gaps = missing_fields(meta)
+    if not any(field in gaps for field in MUSIC_GAP_FILTERS[filter_name]):
+        return False
+    if recording_review.possible_mix(meta, revision):
+        return False
+    genre = meta.get('tags', {}).get('genre')
+    genres = genre if isinstance(genre, list) else [genre]
+    return not any(str(value).strip().casefold() in SPOKEN_GENRES for value in genres)
 
 
 def describe(conn, settings, row, *, analysis=None, proposal=None, connection=None):

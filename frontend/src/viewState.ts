@@ -1,5 +1,6 @@
 import { guideSteps } from "./guideState";
 import type { GuideStep } from "./guideState";
+import { musicGapFilters } from "./musicGapFilters";
 export type Page =
   "library" | "review" | "lyrics" | "jobs" | "ready" | "settings" | "reports" | "guide" | "help";
 export type ViewState = {
@@ -40,6 +41,7 @@ const filters = [
   "audit_warnings",
   "audit_unchecked",
   "audit_passed",
+  ...Object.keys(musicGapFilters),
 ];
 export const viewKey = "phonoteka-view-v1";
 export const emptyView: ViewState = {

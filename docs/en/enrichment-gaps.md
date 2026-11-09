@@ -15,6 +15,12 @@ Actions are disabled while the editor has unsaved changes. Field coverage does n
 
 When an ASR result is retained, the missing-lyrics explanation includes the fraction of lines aligned in that attempt. A partial result is not a complete LRC; even 100% coverage requires listening against vocals. This is neither queue progress nor confirmation that an earlier reference text is still current.
 
+## Finding gaps in music
+
+Choose **Music gaps** in the collection or select a specific field in the **Gaps in individual music recordings** group. These filters skip possible mixes, CUE sheets and album images, and entries explicitly tagged as speech, audiobooks or podcasts. Entries with no genre remain visible for review. The filters only change the view and playback order.
+
+Cover Art Archive choices show the MusicBrainz edition information when available, or the release ID. A match with the file's embedded release ID is shown separately. Choosing and saving a cover still requires review.
+
 ## Search coverage
 
 When LRCLIB's exact result contains only plain text, the search also checks other variants. If that extra request fails, the plain result is preserved and the search remains incomplete. Cover lookup checks up to three matching album editions, or an explicit MusicBrainz release ID embedded in the file. Artwork remains subject to review; multiple editions no longer suppress the entire lookup.

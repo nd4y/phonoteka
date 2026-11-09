@@ -53,6 +53,43 @@ const track: Track = {
 };
 
 describe("source selection decisions", () => {
+  it("identifies cover editions using public release details and the embedded release ID", () => {
+    const cover = {
+      id: "cover",
+      kind: "cover",
+      provider: "coverartarchive",
+      release_id: "edition-one",
+      match: { state: "needs_review", reasons: ["confirm_release"] },
+    };
+    const html = renderToStaticMarkup(
+      <SourceCandidatePicker
+        track={{
+          ...track,
+          tags: { ...track.tags, musicbrainz_albumid: "EDITION-ONE" },
+          analysis: {
+            ...track.analysis!,
+            candidates: [
+              {
+                ...candidates[0],
+                releases: [
+                  { id: "edition-one", title: "Studio deluxe", date: "2024-10-01", country: "GB" },
+                ],
+              },
+              cover,
+              { ...cover, id: "another-cover", release_id: "edition-two" },
+            ],
+          },
+        }}
+        changed={false}
+        onRefresh={() => {}}
+      />,
+    );
+    expect(html).toContain("Studio deluxe");
+    expect(html).toContain("2024-10-01 · GB");
+    expect(html).toContain("ID издания совпадает с тегом файла.");
+    expect(html).toContain("edition-two");
+    expect(html).toContain("Проверьте релиз");
+  });
   it("separates purposes without hiding competing versions or implying plain text has timing", () => {
     expect(groupCandidates(candidates).map((g) => [g.kind, g.candidates.length])).toEqual([
       ["metadata", 2],
