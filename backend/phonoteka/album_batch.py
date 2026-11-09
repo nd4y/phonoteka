@@ -218,6 +218,9 @@ def build(settings, conn, body):
                 after = field_policy.normalized_value(field, value)
                 if before != after:
                     plan['changes'].append({'field': field, 'before': before, 'after': after})
+            if plan['changes']:
+                changed_fields = {change['field'] for change in plan['changes']}
+                plan['carried_fields'] = sorted(field_policy.payload_values(payload).keys() - changed_fields)
             payload['album_batch_context'] = {'release_review_id': body.release_review_id, 'release_review_version': body.release_review_version, 'skipped_fields': plan['skipped_fields']}
             for source in provider_policy.references(payload):
                 if source.get('provider'):
