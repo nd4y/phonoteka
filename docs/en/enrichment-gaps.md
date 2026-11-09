@@ -15,9 +15,13 @@ Actions are disabled while the editor has unsaved changes. Field coverage does n
 
 When an ASR result is retained, the missing-lyrics explanation includes the fraction of lines aligned in that attempt. A partial result is not a complete LRC; even 100% coverage requires listening against vocals. This is neither queue progress nor confirmation that an earlier reference text is still current.
 
+When a source policy blocks saving manual changes, choose **Restore saved values and open sources**. This discards unsaved changes. Select an available source and compare the fields before saving.
+
 ## Finding gaps in music
 
 Choose **Music gaps** in the collection or select a specific field in the **Gaps in individual music recordings** group. These filters skip possible mixes, CUE sheets and album images, and entries explicitly tagged as speech, audiobooks or podcasts. Entries with no genre remain visible for review. The filters only change the view and playback order.
+
+The detailed report has separate entry points for core tags, artwork and timed lyrics. They open gaps in individual recordings. The cards count the entire audio catalog, so the number of results after opening a filter can differ.
 
 Cover Art Archive choices show the MusicBrainz edition information when available, or the release ID. A match with the file's embedded release ID is shown separately. Choosing and saving a cover still requires review.
 

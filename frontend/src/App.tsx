@@ -1572,10 +1572,10 @@ export default function App() {
                   {[
                     ["all", "Все записи"],
                     ["review", "Нужно проверить"],
-                    ["missing_art", "Без обложки"],
+                    ["missing_art", "Все без обложки"],
                     ["no_match", "Поиск без совпадений"],
                     ["preparation", "Последняя подготовленная папка"],
-                    ["missing_lyrics", "Без текста"],
+                    ["missing_lyrics", "Все без текста"],
                     ["music_gaps", "Пробелы в музыке"],
                     ["audit_errors", "Ошибки"],
                   ].map(([key, label]) => (
@@ -2345,6 +2345,8 @@ function TrackEditor({
   const [cover, setCover] = useState("");
   const [saving, setSaving] = useState(false);
   const [localError, setLocalError] = useState("");
+  const [draftPolicyDenied, setDraftPolicyDenied] = useState(false);
+  const restoreDraftButton = useRef<HTMLButtonElement>(null);
   const [slotSelection, setSlotSelection] = useState<SlotSelection | undefined>(
     baseline.slotSelection,
   );
@@ -2368,6 +2370,9 @@ function TrackEditor({
   useEffect(() => {
     onDirty(changed || classificationDirty);
   }, [changed, classificationDirty, onDirty]);
+  useEffect(() => {
+    if (draftPolicyDenied) restoreDraftButton.current?.focus();
+  }, [draftPolicyDenied]);
   const writable = track.can_write && !summary?.read_only;
   let hasUntimed = false;
   let lyricsInvalid = "";
@@ -2381,6 +2386,7 @@ function TrackEditor({
   async function save() {
     setSaving(true);
     setLocalError("");
+    setDraftPolicyDenied(false);
     try {
       const tags = changedTags(track.tags, draft, activeProposal?.tags);
       const body: Record<string, unknown> = { tags };
@@ -2406,10 +2412,28 @@ function TrackEditor({
       await onSave(body);
       onDirty(false);
     } catch (err) {
-      setLocalError(messageFor(err));
+      const denied = err instanceof ApiError && err.code === "provider_policy_denied";
+      setDraftPolicyDenied(denied);
+      setLocalError(
+        denied
+          ? "Источник ограничивает сохранение этих данных. Верните сохранённые значения и выберите доступный вариант во вкладке «Источники»."
+          : messageFor(err),
+      );
     } finally {
       setSaving(false);
     }
+  }
+  function restoreDraftAndShowSources() {
+    setDraft(baseline.tags);
+    setLrc(baseline.lrc);
+    setLyricRows(baseline.lines);
+    setLyricMetadata(baseline.metadata);
+    setCover(baseline.cover);
+    setSlotSelection(baseline.slotSelection);
+    setArtworkReceipt(baseline.artworkReceipt);
+    setLocalError("");
+    setDraftPolicyDenied(false);
+    setSourcesOpen(true);
   }
   async function changeLyricLock(line: LyricLine, kind: "words" | "timing") {
     if (!lyricDocument || changed) return;
@@ -2657,6 +2681,19 @@ function TrackEditor({
               </div>
             </div>
           </div>
+          {draftPolicyDenied && changed && (
+            <>
+              <ErrorBox message={localError} />
+              <button
+                ref={restoreDraftButton}
+                className="button secondary"
+                disabled={busy || saving || moving}
+                onClick={restoreDraftAndShowSources}
+              >
+                Вернуть сохранённые значения и открыть источники
+              </button>
+            </>
+          )}
           {sourcesOpen && (
             <p className="review-guidance">
               Выберите подходящие теги, обложку и текст, затем проверьте изменения перед записью.
@@ -2774,7 +2811,7 @@ function TrackEditor({
               />
             </div>
           )}
-          {localError && <ErrorBox message={localError} />}
+          {localError && !draftPolicyDenied && <ErrorBox message={localError} />}
           {track.proposal && !activeProposal && (
             <div className="notice info">
               <RefreshCw size={19} />
