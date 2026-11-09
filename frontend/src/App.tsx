@@ -14,7 +14,6 @@ import {
   BookOpen,
   Check,
   CheckCheck,
-  ChevronLeft,
   ChevronRight,
   CircleAlert,
   CircleHelp,
@@ -101,6 +100,7 @@ import type { SlotSelection } from "./MediaSlotsPanel";
 import ArtworkImport from "./ArtworkImport";
 import type { ArtworkReceipt } from "./ArtworkImport";
 import { reconcileImportedLines } from "./lyrics-document";
+import { Pagination } from "./Pagination";
 import type { Job, Session, Summary, Tags, Track, TrackPage, CueTrack } from "./types";
 
 type Playback = {
@@ -2235,51 +2235,6 @@ function StatusMark({ ok, label }: { ok: boolean; label: string }) {
     </span>
   );
 }
-function Pagination({
-  tracks,
-  page,
-  onPage,
-  loading,
-  compact = false,
-}: {
-  tracks: TrackPage | null;
-  page: number;
-  onPage: (page: number) => void;
-  loading: boolean;
-  compact?: boolean;
-}) {
-  const pages = tracks ? Math.max(1, Math.ceil(tracks.total / tracks.page_size)) : 1;
-  return (
-    <div className={`pagination ${compact ? "compact" : ""}`}>
-      <span className="muted small">
-        {compact
-          ? `${page} / ${pages}`
-          : tracks
-            ? `Показано ${tracks.items.length ? (page - 1) * tracks.page_size + 1 : 0}-${Math.min(page * tracks.page_size, tracks.total)} из ${countOf(tracks.total)}`
-            : "Загрузка каталога"}
-      </span>
-      <div>
-        <button
-          className="icon-button"
-          disabled={loading || page <= 1}
-          onClick={() => onPage(page - 1)}
-          aria-label="Предыдущая страница"
-        >
-          <ChevronLeft size={18} />
-        </button>
-        <button
-          className="icon-button"
-          disabled={loading || page >= pages}
-          onClick={() => onPage(page + 1)}
-          aria-label="Следующая страница"
-        >
-          <ChevronRight size={18} />
-        </button>
-      </div>
-    </div>
-  );
-}
-
 type EditorProps = {
   onPlay: () => void;
   onSkip: () => void;

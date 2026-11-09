@@ -2,6 +2,8 @@
 
 The catalog shows a brief reason below the track name. Open the track to see “What remains to fill”: a separate explanation for each missing title, artist, album, cover and synchronized lyric field. Each row includes a next step, provider and analysis update time when known. This timestamp is not the time of each individual provider request.
 
+The page indicator shows a loading state and disables pagination until the requested page arrives.
+
 - An unattempted or stale search offers a search against the current file revision.
 - An unattempted separate cover search does not mean artwork is unavailable online. Check the album and release candidates first.
 - Candidates require review; a saved proposal still needs writing to the file. A draft for one field does not explain other missing fields.
