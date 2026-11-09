@@ -103,6 +103,7 @@ export function AlbumBatchPanel({
           ) === index,
       ) || [];
   const chosenSource = choices.find((item) => `${item.track_id}|${item.candidate_id}` === source);
+  const includedCount = context?.items.filter((item) => !exceptions[item.id]?.exclude).length ?? 0;
   const dirty =
     !!context &&
     !saved &&
@@ -194,6 +195,20 @@ export function AlbumBatchPanel({
   }
   function exception(id: string, change: Partial<Exception>) {
     setExceptions((current) => ({ ...current, [id]: { ...current[id], ...change } }));
+    invalidate();
+  }
+  function setAllExcluded(exclude: boolean) {
+    if (!context) return;
+    setExceptions((current) =>
+      Object.fromEntries(
+        context.items.flatMap<[string, Exception]>(({ id }) => {
+          const entry = { ...current[id] };
+          if (exclude) entry.exclude = true;
+          else delete entry.exclude;
+          return Object.keys(entry).length ? [[id, entry]] : [];
+        }),
+      ),
+    );
     invalidate();
   }
   function body() {
@@ -428,6 +443,25 @@ export function AlbumBatchPanel({
           </div>
           <details>
             <summary>Индивидуальные исключения</summary>
+            <p className="muted small" role="status">
+              В пакете: {includedCount} из {context.items.length}
+            </p>
+            <div className="button-row">
+              <button
+                className="button subtle"
+                disabled={busy || includedCount === context.items.length}
+                onClick={() => setAllExcluded(false)}
+              >
+                Включить все файлы
+              </button>
+              <button
+                className="button subtle"
+                disabled={busy || includedCount === 0}
+                onClick={() => setAllExcluded(true)}
+              >
+                Исключить все файлы
+              </button>
+            </div>
             <div className="album-batch-members">
               {context.items.map((item) => (
                 <article key={item.id}>
@@ -504,7 +538,7 @@ export function AlbumBatchPanel({
           <div className="button-row">
             <button
               className="button secondary"
-              disabled={busy || !dirty}
+              disabled={busy || !dirty || includedCount === 0}
               onClick={() => void prepare()}
             >
               {busy ? "Проверка..." : "Показать изменения для каждого файла"}
@@ -535,9 +569,11 @@ export function AlbumBatchPanel({
                   {plan.changes.map((change) => (
                     <p key={change.field} className="small break-word">
                       <strong>{fieldLabels[change.field] || change.field}:</strong>{" "}
-                      {change.field === "cover"
-                        ? "Текущая обложка будет заменена выбранной"
-                        : `${text(change.before) || "Пусто"} → ${text(change.after) || "Пусто"}`}
+                      {change.field !== "cover"
+                        ? `${text(change.before) || "Пусто"} → ${text(change.after) || "Пусто"}`
+                        : change.before
+                          ? "Текущая обложка будет заменена выбранной"
+                          : "Будет добавлена выбранная обложка"}
                     </p>
                   ))}
                   {!!plan.carried_fields?.length && (
