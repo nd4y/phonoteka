@@ -63,7 +63,17 @@ function PreviewValue({ field, value }: { field: string; value: unknown }) {
     );
   return <span>{text(value) || "Не заполнено"}</span>;
 }
-export function SourceSelectionComparison({ preview }: { preview: SelectionPreview }) {
+export function SourceSelectionComparison({
+  preview,
+  excluded,
+  disabled,
+  onToggle,
+}: {
+  preview: SelectionPreview;
+  excluded: string[];
+  disabled: boolean;
+  onToggle: (field: string) => void;
+}) {
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     revealHeading(heading.current);
@@ -74,7 +84,7 @@ export function SourceSelectionComparison({ preview }: { preview: SelectionPrevi
         Что войдёт в предложение
       </h3>
       <p className="muted small">
-        Итог с учётом приоритетов источников и закреплённых полей. Остальные поля файла сохранятся.
+        Снимите отметку с полей, которые хотите оставить как есть. Закреплённые поля сохранятся.
       </p>
       {!preview.fields.length && (
         <p className="warning-text">
@@ -84,7 +94,15 @@ export function SourceSelectionComparison({ preview }: { preview: SelectionPrevi
       {preview.fields.map((field) => (
         <article className="source-field-diff" key={field.field}>
           <div>
-            <strong>{fieldLabels[field.field] || field.field}</strong>
+            <label className="source-field-toggle">
+              <input
+                type="checkbox"
+                checked={!excluded.includes(field.field)}
+                disabled={disabled}
+                onChange={() => onToggle(field.field)}
+              />
+              <strong>{fieldLabels[field.field] || field.field}</strong>
+            </label>
             <span className="muted small">
               {sourceNames[field.source.provider || ""] || field.source.provider}
               {!field.changed && " · Уже в файле"}
@@ -97,7 +115,9 @@ export function SourceSelectionComparison({ preview }: { preview: SelectionPrevi
             </div>
             <ArrowRight size={16} aria-hidden="true" />
             <div>
-              <small>Предложено</small>
+              <small>
+                {excluded.includes(field.field) ? "Не войдёт в предложение" : "Предложено"}
+              </small>
               <PreviewValue field={field.field} value={field.after} />
             </div>
           </div>
@@ -292,6 +312,7 @@ export function SourceCandidatePicker({
 }) {
   const [chosen, setChosen] = useState<string[]>([]);
   const [preview, setPreview] = useState<SelectionPreview | null>(null);
+  const [excluded, setExcluded] = useState<string[]>([]);
   const [pending, setPending] = useState<"preview" | "save" | null>(null);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -338,7 +359,9 @@ export function SourceCandidatePicker({
           headers: { "If-Match": `"${track.sha256}"` },
           body: JSON.stringify({
             candidate_ids: chosen,
-            ...(save ? { preview_revision: preview!.preview_revision } : {}),
+            ...(save
+              ? { preview_revision: preview!.preview_revision, excluded_fields: excluded }
+              : {}),
           }),
         },
       );
@@ -348,7 +371,10 @@ export function SourceCandidatePicker({
         setPreview(null);
         setSaved(true);
         onRefresh();
-      } else setPreview(response);
+      } else {
+        setExcluded([]);
+        setPreview(response);
+      }
     } catch (err) {
       if (alive.current) {
         setError(messageFor(err));
@@ -449,11 +475,20 @@ export function SourceCandidatePicker({
       </div>
       {preview && (
         <>
-          <SourceSelectionComparison preview={preview} />
+          <SourceSelectionComparison
+            preview={preview}
+            excluded={excluded}
+            disabled={disabled}
+            onToggle={(field) =>
+              setExcluded((old) =>
+                old.includes(field) ? old.filter((value) => value !== field) : [...old, field],
+              )
+            }
+          />
           <div className="button-row">
             <button
               className="button primary"
-              disabled={disabled || !preview.fields.length}
+              disabled={disabled || excluded.length === preview.fields.length}
               onClick={() => void submit(true)}
             >
               <Check size={17} />

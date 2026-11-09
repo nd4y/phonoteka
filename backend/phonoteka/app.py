@@ -1041,6 +1041,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ids = body.get('candidate_ids')
         if not isinstance(ids,list) or not 1<=len(ids)<=8 or any(not isinstance(x,str) for x in ids):
             raise security.error(422,'invalid_selection','Выберите от одного до восьми кандидатов')
+        excluded = body.get('excluded_fields', [])
+        if (not isinstance(excluded, list) or len(excluded) > len(field_policy.FIELDS)
+                or any(not isinstance(field, str) or field not in field_policy.FIELDS for field in excluded)
+                or len(set(excluded)) != len(excluded)
+                or excluded and (preview or not isinstance(body.get('preview_revision'), str))):
+            raise security.error(422,'invalid_selection_fields','Выберите поля в актуальном сравнении')
         with db.transaction(settings.db_path) as conn:
             row = conn.execute('SELECT * FROM tracks WHERE id=? AND is_current=1',(track_id,)).fetchone()
             analysis = conn.execute('SELECT * FROM analyses WHERE track_id=?',(track_id,)).fetchone()
@@ -1055,22 +1061,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if len(chosen)!=len(set(ids)): raise security.error(422,'candidate_missing','Кандидат устарел')
             if len({x['kind'] for x in chosen})!=len(chosen): raise security.error(422,'candidate_conflict','Выберите один вариант каждого типа')
             before_token=selection_preview.revision(conn,row,analysis,chosen)
-            if preview: conn.execute('SAVEPOINT source_comparison')
+            comparison_only = preview or bool(excluded)
             try:
-                payload=field_policy.selected_payload(settings,conn,row,chosen,analysis['updated_at'])
-                payload=provider_policy.require_payload(conn,row,payload,'cache')
-                token=field_policy.value_hash({'state':before_token,'payload':payload})
-                if preview:
-                    return selection_preview.compare(settings,conn,row,payload,token)
-                if 'preview_revision' in body and body['preview_revision'] != token:
-                    raise security.error(412,'selection_preview_stale','Данные или черновик изменились. Сравните варианты ещё раз')
+                if comparison_only: conn.execute('SAVEPOINT source_comparison')
+                try:
+                    selected=field_policy.selected_payload(settings,conn,row,chosen,analysis['updated_at'])
+                    payload=provider_policy.require_payload(conn,row,selected,'cache')
+                    token=field_policy.value_hash({'state':before_token,'payload':payload})
+                    if preview:
+                        return selection_preview.compare(settings,conn,row,payload,token)
+                    if 'preview_revision' in body and body['preview_revision'] != token:
+                        raise security.error(412,'selection_preview_stale','Данные или черновик изменились. Сравните варианты ещё раз')
+                finally:
+                    if comparison_only:
+                        conn.execute('ROLLBACK TO source_comparison')
+                        conn.execute('RELEASE source_comparison')
+                if excluded:
+                    selected=field_policy.exclude_selected_fields(selected,set(excluded))
+                    payload=provider_policy.require_payload(conn,row,selected,'cache')
                 payload=lyrics_document.propose(conn,row,payload)
             except media.MediaError as exc:
-                raise security.error(409,exc.code,exc.message) from exc
-            finally:
-                if preview:
-                    conn.execute('ROLLBACK TO source_comparison')
-                    conn.execute('RELEASE source_comparison')
+                raise security.error(422 if exc.code=='invalid_selection_fields' else 409,exc.code,exc.message) from exc
             identity=str(uuid.uuid4());now=db.utcnow()
             conn.execute('INSERT INTO proposals VALUES(?,?,?,?,?)',(identity,track_id,row['sha256'],db.encode(payload),now))
             db.event(conn,'proposal_created',{'track_id':track_id,'proposal_id':identity})
