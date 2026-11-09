@@ -9,9 +9,10 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import "./CollectionOverview.css";
+import type { musicGapFilters } from "./musicGapFilters";
 
 export type CollectionFilter =
-  "all" | "missing_art" | "missing_lyrics" | "audit_errors" | "no_match" | "preparation";
+  keyof typeof musicGapFilters | "all" | "audit_errors" | "no_match" | "preparation";
 type Props = {
   counts: Readonly<Record<string, number>>;
   onBrowse?: (filter: CollectionFilter) => void;
@@ -73,20 +74,24 @@ export function CollectionOverview({ counts, onBrowse, onGuide }: Props) {
       title: "Основные теги",
       detail: "Название, исполнитель и альбом",
       icon: Tags,
+      filter: "music_missing_tags" as const,
+      action: "Открыть записи без основных тегов",
     },
     {
       key: "with_cover",
       title: "Обложки",
       detail: "Изображение внутри аудиофайла",
       icon: Image,
-      filter: "missing_art" as const,
+      filter: "music_missing_art" as const,
+      action: "Открыть записи без обложки",
     },
     {
       key: "with_lyrics",
       title: "Текст с таймкодами",
       detail: "Наличие текста, без оценки точности",
       icon: ListMusic,
-      filter: "missing_lyrics" as const,
+      filter: "music_missing_lyrics" as const,
+      action: "Открыть записи без таймкодов",
     },
   ];
   return (
@@ -145,9 +150,9 @@ export function CollectionOverview({ counts, onBrowse, onGuide }: Props) {
                 <div className="overview-empty-meter" aria-hidden="true" />
               )}
               <p className="muted small">{metric.detail}</p>
-              {metric.filter && onBrowse && value !== null && total !== null && value < total && (
-                <button className="text-button" onClick={() => onBrowse(metric.filter!)}>
-                  Показать, где не хватает
+              {onBrowse && value !== null && total !== null && value < total && (
+                <button className="text-button" onClick={() => onBrowse(metric.filter)}>
+                  {metric.action}
                 </button>
               )}
             </section>
@@ -156,7 +161,8 @@ export function CollectionOverview({ counts, onBrowse, onGuide }: Props) {
       </div>
       <p className="overview-explanation muted small">
         Наличие данных не подтверждает правильность тегов или таймкодов. Показатели могут
-        пересекаться - их не нужно складывать в общий процент готовности.
+        пересекаться. Счётчики относятся ко всем аудиофайлам, кнопки открывают пробелы в отдельных
+        музыкальных записях.
       </p>
       <div className="overview-actions">
         <section className={`overview-action ${counts.audit_errors > 0 ? "attention" : ""}`}>

@@ -56,8 +56,8 @@ export function TrackFilters({
             <option value="audit_warnings">Аудио: предупреждения</option>
             <option value="audit_unchecked">Аудио: не проверено</option>
             <option value="audit_passed">Аудио: проверено</option>
-            <option value="missing_lyrics">Без текста</option>
-            <option value="missing_art">Без обложки</option>
+            <option value="missing_lyrics">Без текста (все записи)</option>
+            <option value="missing_art">Без обложки (все записи)</option>
             <option value="no_match">Поиск без совпадений</option>
             <option value="preparation">Последняя подготовленная папка</option>
             <option value="published">Опубликованы</option>
