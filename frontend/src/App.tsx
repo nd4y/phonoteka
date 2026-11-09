@@ -1845,6 +1845,7 @@ export default function App() {
                             }}
                           />
                           <PublicationPanel
+                            key={`${selected.id}:${selected.sha256}`}
                             trackId={selected.id}
                             revision={publicationRevision}
                             onFix={(id, reason) => void fixTrack(id, reason)}
