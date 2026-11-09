@@ -20,6 +20,26 @@ describe("visible reasons for missing fields", () => {
     expect(html).toContain("Обложка: Поиск обложки ещё не выполнен.");
     expect(html).toContain("Ещё 1");
   });
+  it("shows the reason for the active cover or timed-text filter", () => {
+    const gaps: EnrichmentGap[] = [
+      { ...gap, field: "album", message: "Нужно выбрать альбом." },
+      gap,
+      { ...gap, field: "synced_lyrics", message: "Найден текст без таймкодов." },
+    ];
+    for (const filter of ["missing_art", "music_missing_art"]) {
+      const html = renderToStaticMarkup(<GapSummary gaps={gaps} filter={filter} />);
+      expect(html).toContain("Обложка: Поиск обложки ещё не выполнен.");
+      expect(html).not.toContain("Нужно выбрать альбом.");
+    }
+    for (const filter of ["missing_lyrics", "music_missing_lyrics"]) {
+      const html = renderToStaticMarkup(<GapSummary gaps={gaps} filter={filter} />);
+      expect(html).toContain("Текст с таймкодами: Найден текст без таймкодов.");
+      expect(html).not.toContain("Нужно выбрать альбом.");
+    }
+    expect(renderToStaticMarkup(<GapSummary gaps={[gaps[0]]} filter="music_missing_art" />)).toBe(
+      "",
+    );
+  });
   it("shows evidence and a next action while respecting unsaved edits", () => {
     const html = renderToStaticMarkup(<EnrichmentGaps gaps={[gap]} disabled onAction={() => {}} />);
     expect(html).toContain(gap.next_step);

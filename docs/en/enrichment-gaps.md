@@ -2,6 +2,8 @@
 
 The catalog shows a brief reason below the track name. Open the track to see “What remains to fill”: a separate explanation for each missing title, artist, album, cover and synchronized lyric field. Each row includes a next step, provider and analysis update time when known. This timestamp is not the time of each individual provider request.
 
+The page indicator shows a loading state and disables pagination until the requested page arrives.
+
 - An unattempted or stale search offers a search against the current file revision.
 - An unattempted separate cover search does not mean artwork is unavailable online. Check the album and release candidates first.
 - Candidates require review; a saved proposal still needs writing to the file. A draft for one field does not explain other missing fields.
@@ -22,6 +24,7 @@ When a source policy blocks saving manual changes, choose **Restore saved values
 Choose **Music gaps** in the collection or select a specific field in the **Gaps in individual music recordings** group. These filters skip possible mixes, CUE sheets and album images, and entries explicitly tagged as speech, audiobooks or podcasts. Entries with no genre remain visible for review. The filters only change the view and playback order.
 
 The detailed report has separate entry points for core tags, artwork and timed lyrics. They open gaps in individual recordings. The cards count the entire audio catalog, so the number of results after opening a filter can differ.
+The artwork and timed-lyrics filters show the reason for that field in each row. The track editor still lists the other gaps.
 
 Cover Art Archive choices show the MusicBrainz edition information when available, or the release ID. A match with the file's embedded release ID is shown separately. Choosing and saving a cover still requires review.
 
