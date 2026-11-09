@@ -57,7 +57,7 @@ def project(conn, settings, ids=None):
         FROM tracks t LEFT JOIN proposals p ON p.id=(SELECT id FROM proposals
             WHERE track_id=t.id ORDER BY created_at DESC,rowid DESC LIMIT 1)
         LEFT JOIN settings f ON f.key='track_field_policy:'||t.id
-        WHERE t.is_current=1''' + where, (json.dumps(ids),) if ids is not None else ()).fetchall()
+        WHERE t.is_current=1''' + where, (json.dumps(ids),) if ids is not None else ())
     receipts = {r['key']: {'id': r['id'], 'state': r['state']} for r in conn.execute('''
         SELECT s.key,j.id,j.state FROM settings s JOIN jobs j ON j.id=json_extract(s.value,'$.job_id')
         WHERE s.key LIKE 'review_prepare:%' ''')}

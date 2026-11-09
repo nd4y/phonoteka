@@ -65,6 +65,7 @@ import AudioAuditSummary from "./AudioAuditSummary";
 import PwaStatus from "./PwaStatus";
 import { createPwaReloadGuard } from "./pwaReloadGuard";
 import { acceptDetailNavigation, loadLatestResult, loadOrderedResult } from "./detailNavigation";
+import { startStatusPolling } from "./statusPolling";
 import { useOwnerActivity } from "./ownerActivity";
 import { JobsView } from "./JobsView";
 import { clearView, readView } from "./viewState";
@@ -873,14 +874,8 @@ export default function App() {
     void loadTracks();
   }, [loadTracks]);
   useEffect(() => {
-    void loadStatus();
     if (!session?.authenticated) return;
-    const timer = window.setInterval(() => {
-      if (!document.hidden) {
-        void loadStatus();
-      }
-    }, 4000);
-    return () => clearInterval(timer);
+    return startStatusPolling(loadStatus, () => !document.hidden);
   }, [loadStatus, session?.authenticated]);
   const completedJobs = jobs
     .filter((job) => !activeStates.includes(job.state))

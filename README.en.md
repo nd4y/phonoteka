@@ -11,6 +11,7 @@ The catalog and track editor explain each missing tag, cover and synchronized ly
 After configuring AcoustID, an unfinished search can continue without resending conclusively checked fragments to Shazam. Historical recording IDs are retained as evidence, while expired tags are not reused. The existing attempt allowance and current-file evidence requirements remain in force.
 
 Full reports read metadata sequentially without retaining the collection's cached artwork and drafts: [report memory](docs/en/report-memory.md).
+Review counts also read records one at a time. The interface skips an automatic status poll while its previous poll is still running.
 
 Local tag encoding repairs retain their file origin: [rules and limits](docs/en/local-tag-encoding.md).
 

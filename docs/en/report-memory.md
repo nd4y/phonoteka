@@ -14,3 +14,9 @@ metadata and 128 KiB of draft data per track. JSON and CSV exports must stay bel
 12 MiB of traced Python allocations while preserving the report rows and source
 states. This isolates report allocation growth; it is not a RAM guarantee for the
 whole service or a substitute for testing the installed collection.
+
+Review counts and categories read the saved lyrics and proposal for one track at
+a time. The regression uses 72 synthetic tracks with 96 KiB text fields and checks
+unchanged counts with peak Python allocations below 4 MiB. A tab skips automatic
+status polls while its previous poll is pending. User-triggered refreshes remain
+available.
