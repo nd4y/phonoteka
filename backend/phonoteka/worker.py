@@ -23,6 +23,7 @@ from contextvars import copy_context
 
 from . import work_folders, db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy, provider_attempts, input_readiness, automation, recording_review, processing_activity
 from .providers import Providers, ProviderError
+from .enrichment_gaps import can_search_album
 from .config import Settings
 from .telemetry import Metrics, configure_logging, context, log, opaque_id, bounded, KINDS, worker_server
 
@@ -739,6 +740,9 @@ class Worker:
         path = self.settings.work_root/item['relative_path']
         await self.io(media._expect, path, item['sha256'])
         meta = json.loads(row['metadata'])
+        album_hint = item.get('album_hint')
+        if album_hint and not can_search_album(row,meta):
+            raise media.MediaError('album_search_ineligible','Запись больше не подходит для уточнения альбома')
         recheck = bool(item.get('review_preparation') and fingerprint)
         if recheck and meta.get('recording_classification') != item['review_preparation'].get('classification'):
             raise media.MediaError('conflict', 'Recording classification changed before recheck')
@@ -838,7 +842,8 @@ class Worker:
                     'sources':[],'automatic_apply':False,'state':'needs_review'}
         elif self.settings.external_metadata:
             await self.io(self.item_action,job,item,'metadata_lookup')
-            result = await self.providers.analyze(meta, item['relative_path'],identified,authorized)
+            options = {'album_hint':album_hint} if album_hint else {}
+            result = await self.providers.analyze(meta, item['relative_path'],identified,authorized,**options)
         else:
             result={'input_sha256':item['sha256'],'query_source':'audio_fingerprint','candidates':[],'sources':[],
                     'automatic_apply':False,'state':'incomplete'}
@@ -875,10 +880,16 @@ class Worker:
                 old=json.loads(previous['payload'])
                 for key in ('asr','alignment'):
                     if key in old: result[key]=old[key]
-                result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider') in {'independent_asr','local_replaygain'})
+                if album_hint:
+                    replaced = {'musicbrainz','coverartarchive','local_cover'}
+                    result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider') not in replaced)
+                    result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider') not in replaced)
+                else:
+                    result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider') in {'independent_asr','local_replaygain'})
+                    if not fingerprint:
+                        result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider') in {'shazam','acoustid'})
+                        result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider') in {'shazam','acoustid'})
                 if not fingerprint:
-                    result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider') in {'shazam','acoustid'})
-                    result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider') in {'shazam','acoustid'})
                     for key in ('recognition_segments','recording_confirmation','possible_mix'):
                         if key in old:result[key]=old[key]
             if segment_result:
@@ -895,8 +906,10 @@ class Worker:
             conn.execute('INSERT OR REPLACE INTO analyses VALUES(?,?,?,?)',(item['track_id'],item['sha256'],db.encode(result),db.utcnow()))
             db.event(conn,'analysis_completed',{'track_id':item['track_id'],'state':result['state']})
         retry=[]
+        searched = {'shazam','acoustid'} if fingerprint else {'musicbrainz','coverartarchive'}
+        if not fingerprint and not album_hint: searched.add('lrclib')
         for source in result['sources']:
-            if source['provider'] not in ({'shazam','acoustid'} if fingerprint else {'musicbrainz','lrclib','coverartarchive'}):continue
+            if source['provider'] not in searched:continue
             if source.get('state') in {'recognition_attempt_budget_exhausted','recognition_identity_required'}:
                 raise media.MediaError(source['state'],'Бюджет распознавания этой аудиозаписи исчерпан или не подтверждена аудиоревизия; требуется ручное решение')
             if source['state'] not in {'rate_limited','provider_cooldown','provider_unavailable','budget_exhausted'}:continue

@@ -107,6 +107,41 @@ def test_auth_cookie_csrf_and_private_endpoints(client, settings):
     assert client.get("/api/tracks").status_code == 401
 
 
+def test_album_search_is_one_current_music_file_and_keeps_other_results(settings, monkeypatch):
+    from phonoteka.providers import Providers
+    cfg=replace(settings,external_metadata=True)
+    async def analyze(self,meta,relative,identified,authorize,*,album_hint):
+        assert relative=='song.mp3' and album_hint=='Album'
+        return {'input_sha256':meta['sha256'],'query_source':'album_hint','candidates':[],
+                'sources':[{'provider':'musicbrainz','state':'no_match'}],'automatic_apply':False,'state':'no_match'}
+    monkeypatch.setattr(Providers,'analyze',analyze)
+    with TestClient(create_app(cfg),base_url=cfg.app_url) as client:
+        headers=authenticated(client,cfg)
+        track,sha=seed(cfg,'song.mp3')
+        other,_=seed(cfg,'spoken.mp3')
+        lyrics_source={'provider':'lrclib','state':'rate_limited'}
+        with db.transaction(cfg.db_path) as conn:
+            conn.execute("UPDATE tracks SET metadata=json_set(metadata,'$.tags.genre',json('[\"podcast\"]')) WHERE id=?",(other,))
+            conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(track,sha,db.encode({'candidates':[],
+                'sources':[lyrics_source,{'provider':'musicbrainz','state':'candidates'}]}),db.utcnow()))
+        def submit(ids,revision,kind='analyze'):
+            return client.post('/api/jobs',json={'kind':kind,'track_ids':ids,'params':{'release_search':
+                {'album':' Album ','revision':revision}}},headers={**headers,'Idempotency-Key':str(uuid.uuid4())})
+        assert submit([track],'0'*64).status_code==412
+        assert submit([track,other],sha).status_code==422
+        assert submit([track],sha,'recognize').status_code==422
+        assert submit([other],sha).status_code==409
+        queued=submit([track],sha)
+        assert queued.status_code==202,queued.text
+        drain(cfg)
+        assert client.get('/api/jobs/'+queued.json()['id']).json()['state']=='succeeded'
+        row=db.fetchone(cfg.db_path,'SELECT payload FROM analyses WHERE track_id=?',(track,))
+        result=json.loads(row['payload'])
+        assert result['query_source']=='album_hint' and lyrics_source in result['sources']
+        assert not result['automatic_apply']
+        assert (cfg.work_root/'song.mp3').read_bytes()==b'not really audio'
+
+
 def test_fingerprint_opt_in_and_preserved_asr(settings, monkeypatch):
     from phonoteka import recognition
     synthetic(settings)

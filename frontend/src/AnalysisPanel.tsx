@@ -35,7 +35,7 @@ export function AnalysisPanel({
   asrEnabled: boolean;
   busy: boolean;
   changed: boolean;
-  onJob: (kind: string) => Promise<void>;
+  onJob: (kind: string, params?: Record<string, unknown>) => Promise<void>;
   onRefresh: () => void;
 }) {
   const analysis = track.analysis;
@@ -45,6 +45,11 @@ export function AnalysisPanel({
     (line) => line.start_ms == null || !!line.low_probability_words,
   );
   const hasHints = !!text(track.tags?.title).trim() && !!text(track.tags?.artist).trim();
+  const needsAlbumSearch =
+    hasHints &&
+    !track.possible_mix &&
+    !track.cue_album_image &&
+    (!track.has_art || !text(track.tags?.album).trim());
   const SearchContainer = analysis?.candidates.length ? "details" : "section";
   const timingStatus = alignmentStatus(analysis);
   return (
@@ -96,6 +101,43 @@ export function AnalysisPanel({
             Найти теги, обложку и текст
           </button>
         </div>
+        {enabled && needsAlbumSearch && (
+          <details className="workflow-job-details">
+            <summary>Уточнить поиск по альбому</summary>
+            <p className="muted small">
+              Если точный альбом известен, найдите его издания и обложку. Результат появится в
+              источниках для сравнения.
+            </p>
+            <form
+              key={`${track.id}:${track.sha256}`}
+              onSubmit={(event) => {
+                event.preventDefault();
+                const album = String(new FormData(event.currentTarget).get("album") || "").trim();
+                if (album && !busy && !changed && !track.input_error) {
+                  void onJob("analyze", { release_search: { album, revision: track.sha256 } });
+                }
+              }}
+            >
+              <label>
+                Название альбома
+                <input
+                  name="album"
+                  required
+                  maxLength={180}
+                  defaultValue={text(track.tags?.album)}
+                  disabled={busy || changed || !!track.input_error}
+                />
+              </label>
+              <button
+                className="button secondary"
+                disabled={busy || changed || !!track.input_error}
+              >
+                <Search size={18} />
+                Найти издания альбома
+              </button>
+            </form>
+          </details>
+        )}
         {!enabled && <span className="muted small">Поиск по каталогам выключен</span>}
       </SearchContainer>
       <details className="workflow-job-details">
@@ -231,6 +273,9 @@ export function AnalysisPanel({
             <p className="muted small">
               Поиск текста и релиза выполнен по результату распознавания аудио.
             </p>
+          )}
+          {analysis.query_source === "album_hint" && (
+            <p className="muted small">Поиск изданий выполнен по указанному альбому.</p>
           )}
           {!!analysis.candidates.length && (
             <SourceCandidatePicker

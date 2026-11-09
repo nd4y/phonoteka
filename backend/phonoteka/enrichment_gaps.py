@@ -88,13 +88,23 @@ def missing_fields(meta):
 def matches_music_gap(metadata, revision, filter_name):
     meta = json.loads(metadata)
     gaps = missing_fields(meta)
-    if not any(field in gaps for field in MUSIC_GAP_FILTERS[filter_name]):
-        return False
+    return any(field in gaps for field in MUSIC_GAP_FILTERS[filter_name]) and individual_music(meta,revision)
+
+
+def individual_music(meta, revision):
     if recording_review.possible_mix(meta, revision):
         return False
     genre = meta.get('tags', {}).get('genre')
     genres = genre if isinstance(genre, list) else [genre]
     return not any(str(value).strip().casefold() in SPOKEN_GENRES for value in genres)
+
+
+def can_search_album(row, meta):
+    tags = meta.get('tags',{})
+    return (row['status'] not in {'missing','error','conflict'} and not meta.get('input_error')
+            and bool({'album','cover'} & set(missing_fields(meta)))
+            and bool(scalar(tags,'title').strip()) and bool(scalar(tags,'artist').strip())
+            and individual_music(meta,row['sha256']))
 
 
 def describe(conn, settings, row, *, analysis=None, proposal=None, connection=None):

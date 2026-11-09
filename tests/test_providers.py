@@ -64,6 +64,39 @@ def test_query_inference_never_claims_embedded_evidence():
     assert source=='filename_hint'
 
 
+def test_targeted_album_search_checks_exact_release_and_duration(tmp_path):
+    calls=[]
+    album_id='f1234567-1234-1234-1234-123456789012'
+    nearby_id='e1234567-1234-1234-1234-123456789012'
+    def response(request):
+        calls.append(request.url.host)
+        assert request.url.params['query']=='recording:"Song" AND artist:"Singer" AND release:"Album"'
+        credit=[{'name':'Singer'}]
+        return httpx.Response(200,json={'recordings':[
+            {'id':'live','title':'Song','length':100000,'artist-credit':credit,
+             'releases':[{'id':nearby_id,'title':'Album (Live)'}]},
+            {'id':'studio','title':'Song','length':100000,'artist-credit':credit,
+             'releases':[{'id':nearby_id,'title':'Album (Live)'}]*15+[{'id':album_id,'title':'Album'}]},
+        ]})
+    async def run():
+        p=Providers(settings(tmp_path),httpx.MockTransport(response))
+        requested=[]
+        async def cover(release_id):
+            requested.append(release_id)
+        p.cover=cover
+        meta={'sha256':'a'*64,'tags':{'title':['Song'],'artist':['Singer'],'musicbrainz_albumid':[nearby_id]},'duration':100}
+        prior={'tags':{'title':'Wrong song','artist':'Another singer','album':'Other'}}
+        result=await p.analyze(meta,'song.mp3',prior,album_hint='Album')
+        assert calls==['musicbrainz.org'] and requested==[album_id]
+        assert result['query_source']=='album_hint' and not result['automatic_apply']
+        assert [c['id'] for c in result['candidates']]==['mb:studio','mb-release:'+album_id]
+        meta['duration']=130
+        result=await p.analyze(meta,'song.mp3',prior,album_hint='Album')
+        assert [c['id'] for c in result['candidates']]==['mb:studio'] and requested==[album_id]
+        await p.close()
+    asyncio.run(run())
+
+
 def test_exact_lyrics_before_broad_search_and_404_fallback(tmp_path):
     calls=[]
     def response(request):

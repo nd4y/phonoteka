@@ -4,6 +4,8 @@ The catalog shows a brief reason below the track name. Open the track to see “
 
 The page indicator shows a loading state and disables pagination until the requested page arrives.
 
+In Sources, open the album search refinement when the track title, artist and album are known and the file lacks an album or cover. The search finds MusicBrainz releases with the given album title and their covers. Earlier lyric results remain available. Review the edition and select the fields before writing.
+
 - An unattempted or stale search offers a search against the current file revision.
 - An unattempted separate cover search does not mean artwork is unavailable online. Check the album and release candidates first.
 - Candidates require review; a saved proposal still needs writing to the file. A draft for one field does not explain other missing fields.
