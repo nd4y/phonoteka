@@ -1630,6 +1630,7 @@ export default function App() {
                     tracks={tracks}
                     loading={loading}
                     selectedId={selectedId}
+                    filter={filter}
                     onSelect={(track) => void openTrack(track)}
                   />
                   <Pagination
@@ -2121,6 +2122,7 @@ function TrackList({
   tracks,
   loading,
   selectedId,
+  filter,
   onSelect,
   emptyTitle = "Пока ничего не найдено",
   emptyDescription = "Измените фильтр или запустите сканирование рабочей коллекции.",
@@ -2128,6 +2130,7 @@ function TrackList({
   tracks: TrackPage | null;
   loading: boolean;
   selectedId: string;
+  filter?: string;
   onSelect: (track: Track) => void;
   emptyTitle?: string;
   emptyDescription?: string;
@@ -2185,7 +2188,7 @@ function TrackList({
                     {reviewLabels[track.review.category]}: {track.review.message}
                   </span>
                 )}
-                <GapSummary gaps={track.enrichment_gaps} />
+                <GapSummary gaps={track.enrichment_gaps} filter={filter} />
               </span>
             </span>
             <span className="format-cell">

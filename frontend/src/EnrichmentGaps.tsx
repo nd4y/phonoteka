@@ -18,13 +18,22 @@ const actions: Record<EnrichmentGap["action"], string> = {
   recognize: "Распознать запись",
 };
 
-export function GapSummary({ gaps = [] }: { gaps?: EnrichmentGap[] }) {
-  if (!gaps.length) return null;
+const focusedFields: Partial<Record<string, EnrichmentGap["field"]>> = {
+  missing_art: "cover",
+  music_missing_art: "cover",
+  missing_lyrics: "synced_lyrics",
+  music_missing_lyrics: "synced_lyrics",
+};
+
+export function GapSummary({ gaps = [], filter }: { gaps?: EnrichmentGap[]; filter?: string }) {
+  const field = filter ? focusedFields[filter] : undefined;
+  const gap = field ? gaps.find((item) => item.field === field) : gaps[0];
+  if (!gap) return null;
   return (
     <span className="gap-summary">
       <CircleHelp size={13} aria-hidden="true" />
       <span>
-        {labels[gaps[0].field]}: {gaps[0].message}
+        {labels[gap.field]}: {gap.message}
         {gaps.length > 1 && <span className="gap-more"> Ещё {gaps.length - 1}</span>}
       </span>
     </span>
