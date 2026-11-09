@@ -58,6 +58,41 @@ def test_preview_is_read_only_and_save_matches_reviewed_fields(client, settings)
     assert duplicate.status_code == 412 and duplicate.json()['code'] == 'selection_preview_stale'
 
 
+def test_selected_fields_preserve_tags_and_lyrics_omitted_in_comparison(client, settings):
+    headers = authenticated(client, settings)
+    tid, sha = seed(settings, lrc='Existing words')
+    values = candidates()
+    values[0]['tags']['musicbrainz_trackid'] = '6ee00e0a-7a48-4ca3-845f-18d851e7bf5a'
+    analysis(settings, tid, sha, values)
+    with db.transaction(settings.db_path) as conn:
+        grant(conn)
+        grant(conn, kind='metadata')
+    path = f'/api/tracks/{tid}/analysis/'
+    auth = {**headers, 'If-Match': sha}
+    params = {'candidate_ids': [candidate['id'] for candidate in values]}
+    comparison = client.post(path + 'preview', headers=auth, json=params)
+    assert comparison.status_code == 200, comparison.text
+    before = database_state(settings)
+    full = {**params, 'preview_revision': comparison.json()['preview_revision']}
+    for body in ({**params, 'excluded_fields': ['album']},
+                 {**full, 'excluded_fields': ['album', 'album']},
+                 {**full, 'excluded_fields': ['artist']},
+                 {**full, 'excluded_fields': [f['field'] for f in comparison.json()['fields']]}):
+        rejected = client.post(path + 'select', headers=auth, json=body)
+        assert rejected.status_code == 422 and rejected.json()['code'] == 'invalid_selection_fields'
+        assert database_state(settings) == before
+    accepted = client.post(path + 'select', headers=auth,
+                           json={**full, 'excluded_fields': ['musicbrainz_trackid', 'album', 'lrc']})
+    assert accepted.status_code == 201, accepted.text
+    proposal = json.loads(db.fetchone(settings.db_path, 'SELECT payload FROM proposals WHERE id=?',
+                          (accepted.json()['id'],))['payload'])
+    assert proposal['tags'] == {'title': 'Catalog title'}
+    assert set(proposal['field_sources']) == {'title'} and [s['id'] for s in proposal['sources']] == ['mb:1']
+    assert 'lrc' not in proposal and 'lyrics_document' not in proposal
+    assert database_state(settings)['settings'] == before['settings']
+    assert (settings.work_root / 'a.mp3').read_bytes() == b'not really audio'
+
+
 def test_preview_reports_filtered_locks_and_invalid_lyrics(client, settings):
     headers = authenticated(client, settings)
     tid, sha = seed(settings)

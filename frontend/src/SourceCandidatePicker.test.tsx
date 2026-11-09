@@ -123,6 +123,9 @@ describe("source selection decisions", () => {
   it("shows actual source priority result, omitted fields and replacement of the whole prior draft", () => {
     const html = renderToStaticMarkup(
       <SourceSelectionComparison
+        excluded={["album"]}
+        disabled={false}
+        onToggle={() => {}}
         preview={{
           preview_revision: "x",
           blocked_fields: ["title"],
@@ -147,8 +150,10 @@ describe("source selection decisions", () => {
       "Закреплены и сохранятся",
       "Не войдут в предложение",
       "заменит текущее предложение целиком",
+      'type="checkbox"',
     ])
       expect(html).toContain(value);
+    expect(html).not.toContain('checked=""');
   });
   it("distinguishes mixed timing from a complete timed text", () => {
     expect(lyricsSummary("[00:01]One\nTwo")).toContain("Часть строк");

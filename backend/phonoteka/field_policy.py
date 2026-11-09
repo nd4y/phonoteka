@@ -154,9 +154,26 @@ def selected_payload(settings, conn, row, chosen, retrieved_at):
                 provenance[key] = candidate[key]
         result['field_sources'][field] = provenance
     result = validate_payload(settings, conn, row, result, 'candidate')
+    return _keep_selected_sources(result)
+
+
+def _keep_selected_sources(result):
     used_candidates = {source['candidate_id'] for source in result['field_sources'].values()}
     result['sources'] = [source for source in result['sources'] if source['id'] in used_candidates]
     return result
+
+
+def exclude_selected_fields(payload, excluded):
+    values = set(payload_values(payload))
+    if not excluded < values:
+        raise media.MediaError('invalid_selection_fields', 'Оставьте хотя бы одно поле из сравнения')
+    for field in excluded:
+        if field in {'cover', 'lrc'}:
+            payload.pop(field)
+        else:
+            payload['tags'].pop(field)
+        payload['field_sources'].pop(field, None)
+    return _keep_selected_sources(payload)
 
 
 class LocksInput(BaseModel):
