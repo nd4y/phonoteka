@@ -112,6 +112,8 @@ def test_batch_keeps_foreign_lyrics_provenance_and_can_exclude_one_track(client,
         old = str(uuid.uuid4()); conn.execute('INSERT INTO proposals VALUES(?,?,?,?,?)', (old, first, sha, db.encode(payload), db.utcnow()))
     body = body_for(client, [first, second]); body['exceptions'] = {second: {'exclude': True, 'reason': 'Different edition'}}
     plan = preview(client, headers, body); assert len(plan['plans']) == 1
+    assert [change['field'] for change in plan['plans'][0]['changes']] == ['album']
+    assert plan['plans'][0]['carried_fields'] == ['lrc', 'title']
     result = save(client, headers, body, plan['preview_token'])
     assert result.status_code == 201, result.text
     new_id = result.json()['entries'][0]['proposal_id']
