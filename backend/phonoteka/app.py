@@ -643,7 +643,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     raise security.error(409, 'idempotency_conflict', 'Этот ключ уже использован для другого запроса')
                 existing = dict(conn.execute('SELECT * FROM jobs WHERE id=?', (previous['job_id'],)).fetchone())
                 return public_job(settings, existing)
-        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout", "review_tokens"}:
+        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout", "review_tokens", "release_search"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
         if 'review_tokens' in body.params:
             tokens = body.params['review_tokens']
@@ -697,6 +697,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body.kind in {'transcribe','align'} and not settings.inference_url:
             raise security.error(409,'inference_disabled','ASR не настроен')
         ids = list(dict.fromkeys(body.track_ids))
+        release_search = body.params.get('release_search')
+        if 'release_search' in body.params:
+            if (body.kind != 'analyze' or len(body.track_ids) != 1 or set(body.params) != {'release_search'}
+                    or not isinstance(release_search,dict) or set(release_search) != {'album','revision'}
+                    or not isinstance(release_search['album'],str)
+                    or not 1 <= len(release_search['album'].strip()) <= 180
+                    or any(ord(char)<32 for char in release_search['album'])
+                    or not isinstance(release_search['revision'],str)
+                    or not re.fullmatch('[a-f0-9]{64}',release_search['revision'])):
+                raise security.error(422,'invalid_release_search','Укажите альбом для одной записи текущей версии')
         if 'release_id' in body.params and body.kind != 'release_audit':
             raise security.error(422, 'invalid_params', 'Выбор релиза относится к заданию сверки альбома')
         if body.kind == 'release_audit':
@@ -793,6 +803,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 elif meta.get('format') == 'cue' or (meta.get('cue_album_image') and body.kind not in {'audit','analyze','transcribe','align','youtube'}):
                     raise security.error(409, 'cue_read_only', 'CUE и альбомные образы не изменяются заданиями записи')
                 item = {"track_id": track_id, "sha256": track["sha256"], "relative_path": track["relative_path"]}
+                if release_search:
+                    if release_search['revision'] != track['sha256']:
+                        raise security.error(412,'revision_conflict','Файл изменился. Обновите карточку')
+                    if not enrichment_gaps.can_search_album(track,meta):
+                        raise security.error(409,'album_search_ineligible','Уточнение альбома доступно для отдельной песни с известными названием и исполнителем и пропущенным альбомом или обложкой')
+                    item['album_hint'] = release_search['album'].strip()
                 if review_tokens:
                     action = review.get(track_id, {}).get('action') or {}
                     if action.get('kind') != body.kind or action.get('token') != review_tokens[track_id]:

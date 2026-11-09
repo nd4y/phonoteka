@@ -5,6 +5,8 @@
 **Music gaps** narrows the collection to individual recordings with missing tags, cover art or timed lyrics. The detailed report opens these gaps for each field. [Find gaps in music](docs/en/enrichment-gaps.md#finding-gaps-in-music).
 The missing-cover and missing-lyrics lists display the reason for the selected field in each row.
 
+If the album is known, refine its release and cover search by title in the track sources.
+
 Temporary SQLite contention while updating the export counter no longer aborts a verified snapshot. File checks and the final commit remain mandatory. [Export progress and contention](docs/en/export-contention.md).
 
 The catalog and track editor explain each missing tag, cover and synchronized lyric field. Reasons distinguish an unattempted search, stale results, temporary provider failures and candidates awaiting review or writing. A failed new search is shown separately from its retained earlier results. Matching MusicBrainz editions are selectable album candidates. After an interrupted task is recovered, its remaining files can be cancelled while preserving completed changes. [Continue enrichment](docs/en/enrichment-gaps.md).

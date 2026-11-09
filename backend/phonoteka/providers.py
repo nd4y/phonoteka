@@ -274,16 +274,21 @@ class Providers:
                 conn.execute('DELETE FROM provider_cache WHERE key IN (SELECT key FROM provider_cache ORDER BY expires LIMIT 100)')
             conn.execute('INSERT OR REPLACE INTO provider_cache VALUES(?,?,?,?)',(key,provider,payload,time.time()+min(usage['cache_ttl'],86400 if data is None else 7*86400)))
 
-    async def musicbrainz(self, query, duration):
+    async def musicbrainz(self, query, duration, *, restrict_album=False):
         def escape(value): return re.sub(r'([+\-&|!(){}\[\]^"~*?:\\/])',r'\\\1',value[:180])
         q='recording:"'+escape(query['title'])+'"'
         if query['artist']: q+=' AND artist:"'+escape(query['artist'])+'"'
+        if restrict_album: q+=' AND release:"'+escape(query['album'])+'"'
         data=await self.get('musicbrainz','https://'+self.settings.musicbrainz_host+'/ws/2/recording',{'query':q,'fmt':'json','limit':8})
         candidates=[]
         for row in (data or {}).get('recordings',[])[:8]:
             artist=''.join(x.get('name',x.get('artist',{}).get('name',''))+x.get('joinphrase','') for x in row.get('artist-credit',[]))
             match=assess(query,row.get('title',''),artist,duration,(row.get('length') or 0)/1000)
-            releases=[{'id':v['id'],'title':v.get('title',''),'date':v.get('date',''),'country':v.get('country',''),'status':v.get('status','')} for v in row.get('releases',[]) if v.get('id')][:15]
+            releases=[{'id':v['id'],'title':v.get('title',''),'date':v.get('date',''),'country':v.get('country',''),'status':v.get('status','')} for v in row.get('releases',[]) if v.get('id')]
+            if restrict_album:
+                releases=[release for release in releases if normalized(release['title'])==normalized(query['album'])]
+                if not releases: continue
+            releases=releases[:15]
             candidates.append({'id':'mb:'+row['id'],'provider':'musicbrainz','kind':'metadata','recording_id':row['id'],'tags':{'title':row.get('title',''),'artist':artist,'musicbrainz_trackid':row['id']},'duration':(row.get('length') or 0)/1000,'match':match,'releases':releases,'source_url':'https://musicbrainz.org/recording/'+row['id'],'identification':'text_search'})
         return candidates
 
@@ -333,13 +338,16 @@ class Providers:
         mime,_,_=media._cover(base64.b64decode(raw))
         return {'id':'caa:'+release_id,'provider':'coverartarchive','kind':'cover','cover':'data:'+mime+';base64,'+raw,'release_id':release_id,'source_url':url,'match':{'state':'needs_review','reasons':['confirm_release']}}
 
-    async def analyze(self, meta, relative, identified=None, authorize=lambda:None):
+    async def analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None):
         with provider_attempts.input_revision(meta.get('sha256')):
-            return await self._analyze(meta,relative,identified,authorize)
+            return await self._analyze(meta,relative,identified,authorize,album_hint=album_hint)
 
-    async def _analyze(self, meta, relative, identified=None, authorize=lambda:None):
+    async def _analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None):
         query,provenance=query_tags(meta,relative)
-        if identified:
+        if album_hint:
+            query['album']=album_hint
+            provenance='album_hint'
+        elif identified:
             identified_query={k:scalar(identified['tags'],k) for k in ('title','artist','album')}
             embedded=meta.get('tags',{})
             if scalar(embedded,'album') and all(scalar(embedded,k) and normalized(scalar(embedded,k))==normalized(identified_query[k]) for k in ('title','artist')):
@@ -352,10 +360,12 @@ class Providers:
         if not query['title']:
             result['sources']=[{'provider':'musicbrainz','state':'insufficient_metadata'},{'provider':'lrclib','state':'insufficient_metadata'}]
             return result
-        for provider,call in [('musicbrainz',self.musicbrainz),('lrclib',self.lyrics)]:
+        searches=[('musicbrainz',self.musicbrainz,{'restrict_album':True})] if album_hint else [
+            ('musicbrainz',self.musicbrainz,{}),('lrclib',self.lyrics,{})]
+        for provider,call,options in searches:
             authorize()
             try:
-                candidates=await call(query,meta.get('duration',0))
+                candidates=await call(query,meta.get('duration',0),**options)
                 result['candidates'].extend(candidates)
                 incomplete=next((c['search_incomplete'] for c in candidates if c.get('search_incomplete')),None)
                 result['sources'].append({'provider':provider,'state':'partial' if incomplete else 'candidates' if candidates else 'no_match','count':len(candidates),**({'reason':incomplete} if incomplete else {})})
@@ -373,7 +383,7 @@ class Providers:
         if not query['album'] and len(all_album_titles)==1:
             releases=sorted({c['release_id'] for c in albums})
         embedded_release=scalar(meta.get('tags',{}),'musicbrainz_albumid')
-        if re.fullmatch('[0-9a-fA-F-]{36}',embedded_release):
+        if not album_hint and re.fullmatch('[0-9a-fA-F-]{36}',embedded_release):
             releases=[embedded_release]+[identity for identity in releases if identity!=embedded_release]
         if not meta.get('has_art') and releases:
             found=0;errors=[];attempted=0
@@ -390,7 +400,8 @@ class Providers:
             result['sources'].append({'provider':'coverartarchive','state':'candidate' if found else errors[0] if errors else 'no_match',
                 'count':found,'attempted_releases':attempted,'matching_releases':len(releases),'errors':errors})
         result['state']='candidates' if result['candidates'] else 'no_match' if all(x['state']=='no_match' for x in result['sources']) else 'incomplete' 
-        from . import catalogs
-        await catalogs.enrich(self,result,query,meta,authorize)
+        if not album_hint:
+            from . import catalogs
+            await catalogs.enrich(self,result,query,meta,authorize)
         if result['candidates']:result['state']='candidates'
         return result
