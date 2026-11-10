@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import sqlite3
 import time
 import httpx
 from . import db, media, provider_policy, lyrics_document, tracing
@@ -82,12 +83,38 @@ async def process(worker, job, item):
         else: raise media.MediaError('inference_timeout','ASR deadline reached; remote outcome must be reconciled')
     await worker.io(media._expect,settings.work_root/item['relative_path'],item['sha256'])
     if result.get('input_sha256')!=item['sha256']: raise media.MediaError('inference_contract','Wrong audio revision')
-    aligned=result.pop('alignment',None)
-    if job['kind']=='align' and not aligned: raise media.MediaError('inference_contract','Alignment result missing')
-    worker.authorize_grant(job)
-    with db.transaction(settings.db_path) as conn:
-        current=conn.execute('SELECT sha256 FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
-        if not current or current['sha256']!=item['sha256']: raise media.MediaError('conflict','File revision changed')
+    if job['kind']=='align' and not result.get('alignment'):
+        raise media.MediaError('inference_contract','Alignment result missing')
+    for delay in (0, .5, 1.5):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            # The remote computation is finished. Retry only the local write,
+            # outside the event loop shared with heartbeats and other jobs.
+            return await worker.io(store_result, worker, job, item, result, remote_id)
+        except sqlite3.OperationalError as exc:
+            if not db.sqlite_busy(exc):
+                raise
+    raise media.MediaError('asr_result_not_saved',
+                           'ASR завершился, но каталог занят. Повторите проверку той же версии файла.',
+                           retryable=True)
+
+
+def store_result(worker, job, item, result, remote_id):
+    result = dict(result)
+    # A retry must use the original engine result, even if an earlier
+    # transaction annotated occurrences before rolling back.
+    aligned = result.pop('alignment', None)
+    if aligned:
+        aligned = {**aligned, 'lines': [dict(line) for line in aligned['lines']]}
+    with db.transaction(worker.settings.db_path) as conn:
+        worker.authorize_grant(job)
+        row=conn.execute('SELECT * FROM tracks WHERE id=? AND is_current=1',(item['track_id'],)).fetchone()
+        if not row or row['sha256']!=item['sha256']: raise media.MediaError('conflict','File revision changed')
+        meta = json.loads(row['metadata'])
+        if aligned:
+            provider_policy.require_payload(conn,row,{'lrc':item.get('reference_text',''),
+                'field_sources':item.get('reference_sources',{})},'derived_analysis')
         analysis=conn.execute('SELECT payload,input_sha256 FROM analyses WHERE track_id=?',(item['track_id'],)).fetchone()
         data=json.loads(analysis['payload']) if analysis and analysis['input_sha256']==item['sha256'] else {'candidates':[],'sources':[],'query_source':'audio','state':'needs_review','input_sha256':item['sha256']}
         data['asr']={**result,'remote_job_id':remote_id,'audio_identity':(meta.get('audit') or {}).get('audio_identity')}

@@ -122,7 +122,8 @@ def test_first_publication_has_no_absent_baseline_delete_and_requires_owner(sett
 
 def test_committed_ready_journal_recovers_frozen_profile_without_rewriting_work(settings):
     settings = replace(settings, read_only=False, storage_verified=True)
-    with TestClient(create_app(settings), base_url=settings.app_url):
+    with TestClient(create_app(settings), base_url=settings.app_url) as client:
+        authenticated(client, settings)
         track, _ = seed(settings, 'recovery.mp3')
         stage_publication(settings, track)
         sha = work_version(settings, track, b'committed second Ready', 'Newest work metadata')
@@ -140,3 +141,21 @@ def test_committed_ready_journal_recovers_frozen_profile_without_rewriting_work(
         assert meta['tags']['title'] == ['Newest work metadata']
         assert meta['publication']['review_version'] == 7 and meta['publication']['profile'] == 'relaxed'
         assert meta['publication']['lyrics_gate']['exception_reason'] == 'Synthetic Ready journal fixture'
+
+        endpoint = '/api/jobs/' + queued['id']
+        operation_id = effect['operation_id']
+        native = client.get(endpoint).json()['results'][0]
+        assert native['recovered'] and native['operation_id'] == operation_id and native['sha256'] == sha
+
+        # Existing recovered jobs may have a SHA but no operation receipt.
+        with db.transaction(settings.db_path) as conn:
+            conn.execute("UPDATE job_items SET result=json_remove(result,'$.operation_id') WHERE job_id=?", (queued['id'],))
+        legacy = client.get(endpoint).json()['results'][0]
+        assert legacy['operation_id'] == operation_id and legacy['sha256'] == sha
+        stored = db.fetchone(settings.db_path, 'SELECT result FROM job_items WHERE job_id=?', (queued['id'],))
+        assert 'operation_id' not in json.loads(stored['result'])
+
+        with db.transaction(settings.db_path) as conn:
+            conn.execute("INSERT INTO history SELECT ?,track_id,job_id,kind,before_sha256,after_sha256,details,created_at "
+                         "FROM history WHERE id=?", (uuid.uuid4().hex, operation_id))
+        assert 'operation_id' not in client.get(endpoint).json()['results'][0]

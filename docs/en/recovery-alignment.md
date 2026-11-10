@@ -15,3 +15,7 @@ The cover indicator validates the front image selected for playback using the sa
 Alignment checks only the reference words and their inherited source restrictions. Expired tag or artwork proposals do not block unrelated lyrics. For permitted lyrics already embedded in a file, an HTTP cache TTL is not the lifetime of that file. Revoked permissions and inherited restrictions are still enforced at admission and execution. A pending lyrics proposal retains its cache TTL.
 
 Checks cover alignment admission/rejection, policy cleanup of queued references, the worker's repeated policy check, restart preservation, explicit resume without replaying a completed item, and retained cancellation and provider budgets. Synthetic checks do not establish musical timing accuracy.
+
+If SQLite reports a busy or locked catalog after ASR returns, the worker makes up to three attempts to store the same result. It checks authorization and the file revision each time. If it still cannot save, the job reports that explicitly. UI requests blocked by a busy catalog return a retryable message. Check whether the operation took effect before repeating it.
+
+Ready publication recovery returns the operation ID and revision SHA-256 to readers. Old recovered receipts are supplemented from history only when the job, track, operation kind and available revision evidence match a unique history row. This read does not repeat publication or edit old receipts. The Music relay still verifies its existing publication, revision and approval gates before copying.

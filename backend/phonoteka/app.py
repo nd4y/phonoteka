@@ -9,6 +9,7 @@ import json
 import mimetypes
 from pathlib import Path
 import re
+import sqlite3
 import time
 import uuid
 from typing import Literal
@@ -168,9 +169,29 @@ def public_job(settings: Settings, row: dict, detail=False, activity=None):
         items = db.fetchall(settings.db_path, """SELECT j.item_key,j.state,j.result,t.id AS track_id,t.relative_path
             FROM job_items j LEFT JOIN tracks t ON t.id=COALESCE(json_extract(j.result,'$.track_id'),j.item_key)
             WHERE j.job_id=? ORDER BY j.item_key LIMIT 10000""", (row["id"],))
-        result["results"] = [{"track_id": item["item_key"], "state": item["state"], **json.loads(item["result"]),
-                              "catalog_id": item["track_id"], "item_state": item["state"],
-                              "relative_path": item["relative_path"] or (item["item_key"] if row["kind"] == "scan" else None)} for item in items]
+        results = [{"track_id": item["item_key"], "state": item["state"], **json.loads(item["result"]),
+                    "catalog_id": item["track_id"], "item_state": item["state"],
+                    "relative_path": item["relative_path"] or (item["item_key"] if row["kind"] == "scan" else None)} for item in items]
+        if row['kind'] in {'publish', 'rollback_ready'} and any(
+            item.get('recovered') is True and not item.get('operation_id') for item in results
+        ):
+            # Old recovery receipts did not retain the committed operation ID.
+            # Restore it for readers only from a unique matching history row.
+            recovered = {entry['item_key']:entry for entry in db.fetchall(settings.db_path, """
+                SELECT j.item_key, MIN(h.id) AS operation_id, MIN(h.after_sha256) AS sha256
+                FROM job_items j JOIN history h ON h.track_id=j.item_key AND h.job_id=j.job_id
+                WHERE j.job_id=? AND h.kind=? AND j.state='succeeded'
+                  AND json_extract(j.result,'$.recovered')=1
+                  AND json_extract(j.result,'$.operation_id') IS NULL
+                  AND COALESCE(json_extract(j.result,'$.history_id'),h.id)=h.id
+                  AND COALESCE(json_extract(j.result,'$.sha256'),h.after_sha256)=h.after_sha256
+                GROUP BY j.item_key HAVING COUNT(*)=1
+                """, (row['id'],row['kind']))}
+            for item in results:
+                receipt = recovered.get(item['track_id'])
+                if receipt and item.get('recovered') is True and not item.get('operation_id'):
+                    item.update(operation_id=receipt['operation_id'],sha256=receipt['sha256'])
+        result['results'] = results
     return result
 
 
@@ -277,6 +298,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Pydantic's default validation output can include the submitted password.
         return JSONResponse({"code": "validation_error", "message": "Некорректный запрос", "retryable": False,
                              "fields": [".".join(str(part) for part in err["loc"]) for err in exc.errors()]}, status_code=422)
+
+    @app.exception_handler(sqlite3.OperationalError)
+    async def sqlite_error(request, exc):
+        if not db.sqlite_busy(exc):
+            raise exc
+        return JSONResponse({"code": "catalog_busy", "retryable": True,
+                             "message": "Каталог временно занят. Проверьте результат действия и повторите при необходимости."},
+                            status_code=503, headers={"Retry-After": "2"})
 
     @app.get("/health")
     def health():

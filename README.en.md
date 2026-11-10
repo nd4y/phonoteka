@@ -46,6 +46,10 @@ Choose the recording language in Sources before transcribing audio or aligning l
 
 After a worker crash, unfinished read jobs pause while retaining completed results and provider budgets. ASR checks the actual reference words separately from tags and artwork: [recovery and alignment](docs/en/recovery-alignment.md).
 
+If the catalog is briefly busy after ASR finishes, the worker retries storing the result without sending another request to the engine.
+
+Recovered Ready publications retain a receipt that the Music relay can verify against committed history.
+
 Recovery preserves the original audio file; invalid embedded artwork remains in that source and is explicitly recorded as omitted from the derivative.
 
 Scanning counts only validated JPEG/PNG artwork. HTML stored in an image frame and unsupported image formats produce a warning, do not increase the cover count, and do not prevent replacement lookup. Inspection preserves the original bytes.
