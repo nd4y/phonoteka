@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { etaText, isActiveJob, jobTone, mergeActivityEvents, needsJobAuthorization } from "./jobs";
+import {
+  etaText,
+  isActiveJob,
+  jobTone,
+  mergeActivityEvents,
+  needsJobAuthorization,
+  readyPublicationStatus,
+} from "./jobs";
 import type { ActivityEvent, LiveJob } from "./jobs";
 
 const job: LiveJob = {
@@ -23,6 +30,20 @@ const event = (id: number): ActivityEvent => ({
 });
 
 describe("job progress presentation", () => {
+  it("reports Ready publication success only after every planned item is saved", () => {
+    const publish = { ...job, kind: "publish", total: 2, completed: 0, state: "queued" };
+    expect(readyPublicationStatus(publish)).toMatchObject({ tone: "info" });
+    expect(readyPublicationStatus({ ...publish, state: "succeeded", completed: 2 })).toEqual({
+      tone: "success",
+      text: "В Ready сохранено 2 из 2.",
+    });
+    expect(
+      readyPublicationStatus({ ...publish, state: "succeeded", completed: 1 }),
+    ).toMatchObject({ tone: "error" });
+    expect(
+      readyPublicationStatus({ ...publish, state: "cancelled_partial", completed: 1 }),
+    ).toMatchObject({ tone: "warning" });
+  });
   it("keeps cancellation visually distinct from success and error", () => {
     expect(jobTone({ ...job, state: "succeeded" })).toBe("success");
     expect(jobTone({ ...job, state: "cancelled" })).toBe("cancelled");

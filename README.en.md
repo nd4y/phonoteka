@@ -20,6 +20,8 @@ Search for an album or artist in the detailed report to find groups beyond the i
 Release choices show the available date, country and short ID so you can distinguish editions with the same title.
 
 The Ready panel shows publication receipts for the open track revision. After switching tracks, look for that track's own receipt before moving on.
+After confirmation, the panel shows the publication job state and the number of files saved.
+Previous rows cannot be opened while a search or filter is updating. The proposal confirmation names the file path.
 
 Temporary SQLite contention while updating the export counter no longer aborts a verified snapshot. File checks and the final commit remain mandatory. [Export progress and contention](docs/en/export-contention.md).
 
