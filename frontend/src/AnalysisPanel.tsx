@@ -28,6 +28,7 @@ export function AnalysisPanel({
   changed,
   onJob,
   onRefresh,
+  onSourceSelectionActive,
 }: {
   track: Track;
   enabled: boolean;
@@ -37,6 +38,7 @@ export function AnalysisPanel({
   changed: boolean;
   onJob: (kind: string, params?: Record<string, unknown>) => Promise<void>;
   onRefresh: () => void;
+  onSourceSelectionActive?: (value: boolean) => void;
 }) {
   const analysis = track.analysis;
   const [allAlignmentLines, setAllAlignmentLines] = useState(false);
@@ -297,6 +299,7 @@ export function AnalysisPanel({
               track={track}
               changed={changed}
               onRefresh={onRefresh}
+              onSelectionActive={onSourceSelectionActive}
             />
           )}
         </>

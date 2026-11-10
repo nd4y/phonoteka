@@ -166,6 +166,7 @@ const activeStates = [
   "waiting_authorization",
   "deferred",
 ];
+const detailAnalysisKinds = new Set(["analyze", "recognize", "align", "transcribe"]);
 const fields = [
   { key: "title", title: "Название" },
   { key: "artist", title: "Исполнитель" },
@@ -460,6 +461,13 @@ export default function App() {
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailJob, setDetailJob] = useState<{
+    id: string;
+    trackId: string;
+    revision: string;
+    writeKey?: string;
+  } | null>(null);
+  const [sourceSelectionActive, setSourceSelectionActive] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -899,6 +907,85 @@ export default function App() {
   useEffect(() => {
     void loadTracks();
   }, [completedJobs, loadTracks]);
+  const trackedDetailJob = jobs.find((job) => job.id === detailJob?.id);
+  const detailJobFinished = !!trackedDetailJob && !activeStates.includes(trackedDetailJob.state);
+  const detailWriteSucceeded =
+    trackedDetailJob?.state === "succeeded" &&
+    trackedDetailJob.completed === 1 &&
+    trackedDetailJob.failed === 0;
+  useEffect(() => {
+    if (
+      !detailJobFinished ||
+      !detailJob ||
+      !selected ||
+      detailJob.trackId !== selected.id ||
+      detailJob.revision !== selected.sha256 ||
+      (page !== "review" && page !== "lyrics") ||
+      !session?.authenticated ||
+      detailLoading ||
+      busy ||
+      reviewMoving ||
+      dirty ||
+      sourceSelectionActive ||
+      policyDirty ||
+      reviewDirty
+    )
+      return;
+
+    const { id, trackId, revision, writeKey } = detailJob;
+    if (writeKey && !detailWriteSucceeded) {
+      pendingReviewWrites.current.delete(writeKey);
+      setNotice("");
+      setError("Изменения не записаны полностью. Причина доступна в обработке.");
+      setDetailJob((previous) => (previous?.id === id ? null : previous));
+      return;
+    }
+    const controller = new AbortController();
+    const detailRequest = detailSequence.current;
+    void api<Track>(`/tracks/${encodeURIComponent(trackId)}`, { signal: controller.signal })
+      .then((track) => {
+        if (
+          !controller.signal.aborted &&
+          authenticated.current &&
+          detailRequest === detailSequence.current &&
+          track.id === trackId &&
+          (writeKey || track.sha256 === revision)
+        ) {
+          setSelected((previous) =>
+            previous?.id === trackId && previous.sha256 === revision ? track : previous,
+          );
+          if (writeKey) {
+            pendingReviewWrites.current.delete(writeKey);
+            setWrittenTrack({ id: trackId, name: track.relative_path });
+            setNotice("");
+          }
+        }
+      })
+      .catch(() => {
+        if (writeKey && !controller.signal.aborted && detailRequest === detailSequence.current)
+          setNotice("Запись завершилась. Обновите карточку, чтобы увидеть текущую версию файла.");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted)
+          setDetailJob((previous) => (previous?.id === id ? null : previous));
+      });
+    return () => controller.abort();
+  }, [
+    detailJobFinished,
+    detailWriteSucceeded,
+    detailJob,
+    selected?.id,
+    selected?.sha256,
+    page,
+    session?.authenticated,
+    detailLoading,
+    busy,
+    reviewMoving,
+    dirty,
+    sourceSelectionActive,
+    policyDirty,
+    reviewDirty,
+  ]);
   const clearDirty = () =>
     !(dirty || policyDirty || reviewDirty || settingsDirty) ||
     window.confirm("Есть несохраненные изменения. Перейти и потерять этот черновик?");
@@ -1102,6 +1189,7 @@ export default function App() {
           nextId = pending.nextId;
           nextPage = pending.nextPage;
         } else pendingReviewWrites.current.set(key, { job, nextId, nextPage, coverOnly });
+        setDetailJob({ id: job.id, trackId: track.id, revision: track.sha256, writeKey: key });
         setNotice("");
         const result = await awaitReviewWrite(
           job,
@@ -1112,13 +1200,14 @@ export default function App() {
         if (result === "pending") {
           setNotice(
             coverOnly
-              ? "Запись обложки выполняется. Проверьте задачу в обработке или повторно откройте результат той же кнопкой."
-              : "Запись еще не завершена. Проверьте задачу в обработке или нажмите «Записать и дальше», чтобы проверить ее результат. Повторная задача не создается.",
+              ? "Запись обложки продолжается. Карточка обновится после завершения."
+              : "Запись продолжается. Карточка обновится после завершения. Ход задачи доступен в обработке.",
           );
           return;
         }
         if (result === "failed") {
           pendingReviewWrites.current.delete(key);
+          setDetailJob((previous) => (previous?.id === job.id ? null : previous));
           setNotice("");
           setError(
             "Изменения не записаны полностью. Карточка сохранена; причина доступна в обработке.",
@@ -1858,11 +1947,19 @@ export default function App() {
                           onJob={async (kind, params) => {
                             const job = await submitJob(kind, [selected.id], params);
                             if (job) {
+                              if (detailAnalysisKinds.has(kind)) {
+                                setDetailJob({
+                                  id: job.id,
+                                  trackId: selected.id,
+                                  revision: selected.sha256,
+                                });
+                              }
                               setNotice(
                                 `${jobNames[kind]}: задача принята. Результат появится в разделе «Обработка».`,
                               );
                             }
                           }}
+                          onSourceSelectionActive={setSourceSelectionActive}
                         />
                         <details className="panel policy-details">
                           <summary>Закрепленные поля и источники</summary>
@@ -2321,6 +2418,7 @@ type EditorProps = {
   summary: Summary | null;
   busy: boolean;
   onDirty: (value: boolean) => void;
+  onSourceSelectionActive: (value: boolean) => void;
   onTab: (page: Page, preserveScroll?: boolean) => void;
   onBack: () => void;
   onRefresh: () => void;
@@ -2343,6 +2441,7 @@ function TrackEditor({
   summary,
   busy,
   onDirty,
+  onSourceSelectionActive,
   onTab,
   onBack,
   onRefresh,
@@ -2863,6 +2962,7 @@ function TrackEditor({
                 changed={changed}
                 onJob={onJob}
                 onRefresh={onRefresh}
+                onSourceSelectionActive={onSourceSelectionActive}
               />
             </div>
           )}

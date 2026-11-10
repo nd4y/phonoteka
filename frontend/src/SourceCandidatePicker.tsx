@@ -327,10 +327,12 @@ export function SourceCandidatePicker({
   track,
   changed,
   onRefresh,
+  onSelectionActive,
 }: {
   track: Track;
   changed: boolean;
   onRefresh: () => void;
+  onSelectionActive?: (value: boolean) => void;
 }) {
   const [chosen, setChosen] = useState<string[]>([]);
   const [preview, setPreview] = useState<SelectionPreview | null>(null);
@@ -338,6 +340,11 @@ export function SourceCandidatePicker({
   const [pending, setPending] = useState<"preview" | "save" | null>(null);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const selectionActive = !!chosen.length || !!pending;
+  useEffect(() => {
+    onSelectionActive?.(selectionActive);
+  }, [onSelectionActive, selectionActive]);
+  useEffect(() => () => onSelectionActive?.(false), [onSelectionActive]);
   const heading = useRef<HTMLHeadingElement>(null);
   const returnToChoices = () => {
     setPreview(null);
