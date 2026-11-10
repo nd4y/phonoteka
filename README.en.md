@@ -4,6 +4,8 @@
 
 **Music gaps** narrows the collection to individual recordings with missing tags, cover art or timed lyrics. The detailed report opens these gaps for each field. [Find gaps in music](docs/en/enrichment-gaps.md#finding-gaps-in-music).
 
+When tracks on a page share a title and artist, the list shows each copy's relative path.
+
 Write confirmed artwork separately and keep the lyrics draft for review.
 Collection actions can retry search and recognition within the selected music category.
 
