@@ -10,6 +10,7 @@ If the album is known, refine its release and cover search by title in the track
 Album batch previews show which earlier proposal fields will remain alongside the selected edits. Check these fields in the track editor before writing the file.
 
 To work on a few files from a large album, exclude all files and include only the ones you need. Check the selected count before previewing.
+Search for an album or artist in the detailed report to find groups beyond the initial list.
 
 The Ready panel shows publication receipts for the open track revision. After switching tracks, look for that track's own receipt before moving on.
 

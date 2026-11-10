@@ -9,6 +9,8 @@ from starlette.responses import StreamingResponse
 from . import audit_status,catalog_sources,db,provider_policy
 from .providers import scalar, normalized
 
+ALBUM_REPORT_LIMIT = 500
+
 
 def rows(settings, conn=None):
     if conn is None:
@@ -20,11 +22,12 @@ def rows(settings, conn=None):
         yield row,meta
 
 
-def summary(settings, conn=None):
+def summary(settings, conn=None, *, album_query=''):
     if conn is None:
         with db.connect(settings.db_path) as active:
             active.execute('BEGIN')
-            return summary(settings,active)
+            return summary(settings,active,album_query=album_query)
+    album_terms = normalized(album_query).split()
     exact=defaultdict(list);audio=defaultdict(list);albums=defaultdict(list);candidates=defaultdict(list);by_id={}
     source_outputs=catalog_sources.completed_sources(conn)
     from . import review_queue
@@ -76,7 +79,10 @@ def summary(settings, conn=None):
         recording=scalar(tags,'musicbrainz_trackid')
         if recording:candidates[('musicbrainz_recording',recording)].append(entry)
         if album:
-            albums[(normalized(artist),normalized(album))].append({**entry,'album':album,'artist':artist,'track':scalar(tags,'tracknumber'),'disc':scalar(tags,'discnumber')})
+            album_key = (normalized(artist), normalized(album))
+            album_text = ' '.join(album_key)
+            if all(term in album_text for term in album_terms):
+                albums[album_key].append({**entry,'album':album,'artist':artist,'track':scalar(tags,'tracknumber'),'disc':scalar(tags,'discnumber')})
     counts['metadata_pending_retry']=0
     for row in conn.execute('SELECT a.track_id,a.payload FROM analyses a JOIN tracks t ON t.id=a.track_id AND t.is_current=1 AND t.sha256=a.input_sha256'):
         if row['track_id'] not in by_id:continue
@@ -105,7 +111,7 @@ def summary(settings, conn=None):
         duplicate_numbers={disc:sorted({n for n in numbers if numbers.count(n)>1}) for disc,numbers in observed.items()}
         album_report.append({'album':items[0]['album'],'artist':items[0]['artist'],'files':len(items),'missing_by_tags':missing,'duplicate_numbers':duplicate_numbers,'release_completeness':'unknown','ids':[x['id'] for x in items]})
     candidate_groups=[{'evidence':key[0],'verified_duplicate':False,'warning':'Совпадение идентификатора не подтверждает исполнение, мастеринг или издание','files':list({x['id']:x for x in values}.values())} for key,values in candidates.items() if len({x['id'] for x in values})>1]
-    return {'counts':counts,'generated_at':db.utcnow(),'exact_duplicates':[x for x in exact.values() if len(x)>1][:100],'same_audio_packets':[x for x in audio.values() if len(x)>1][:100],'recording_candidates':candidate_groups[:100],'albums':album_report[:500],'limits':{'duplicate_groups':100,'albums':500},'deletion_available':False}
+    return {'counts':counts,'generated_at':db.utcnow(),'exact_duplicates':[x for x in exact.values() if len(x)>1][:100],'same_audio_packets':[x for x in audio.values() if len(x)>1][:100],'recording_candidates':candidate_groups[:100],'albums':album_report[:ALBUM_REPORT_LIMIT],'album_matches':len(album_report),'limits':{'duplicate_groups':100,'albums':ALBUM_REPORT_LIMIT},'deletion_available':False}
 
 
 def safe_code(value):

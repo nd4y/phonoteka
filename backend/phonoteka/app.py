@@ -1019,9 +1019,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return public_job(settings, db.fetchone(settings.db_path, "SELECT * FROM jobs WHERE id=?", (job_id,)))
 
     @app.get('/api/reports/collection')
-    def collection_report(request: Request):
+    def collection_report(request: Request, album_q: str = Query('', max_length=160)):
         security.require_session(request,settings)
-        return reports.summary(settings)
+        return reports.summary(settings, album_query=album_q)
 
     @app.get('/api/reports/export/{kind}')
     def export_report(request:Request,kind:Literal['json','csv']):
