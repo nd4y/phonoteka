@@ -460,7 +460,8 @@ export default function App() {
   const [reviewDirty, setReviewDirty] = useState(false);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
+  const [openingTrackId, setOpeningTrackId] = useState("");
+  const detailLoading = Boolean(openingTrackId);
   const [detailJob, setDetailJob] = useState<{
     id: string;
     trackId: string;
@@ -526,7 +527,7 @@ export default function App() {
     detailLoading,
     () => {
       ++detailSequence.current;
-      setDetailLoading(false);
+      setOpeningTrackId("");
       setRestoringDetail(false);
     },
     10,
@@ -537,7 +538,7 @@ export default function App() {
     statusSequence.current.committed = ++statusSequence.current.issued;
     ++detailSequence.current;
     setLoading(false);
-    setDetailLoading(false);
+    setOpeningTrackId("");
     setRestoringDetail(false);
     navigationHistory.clear();
     clearView();
@@ -566,7 +567,7 @@ export default function App() {
       ["review", "lyrics"].includes(target.page);
     ++detailSequence.current;
     setRestoringDetail(false);
-    setDetailLoading(false);
+    setOpeningTrackId("");
     setError("");
     if (query !== target.query || filter !== target.filter || pageNumber !== target.pageNumber) {
       ++requestSequence.current;
@@ -586,7 +587,7 @@ export default function App() {
       setReviewDirty(false);
       setSettingsDirty(false);
       if (target.selectedId && ["review", "lyrics"].includes(target.page)) {
-        setDetailLoading(true);
+        setOpeningTrackId(target.selectedId);
         void loadLatestResult(
           detailSequence,
           () => api<Track>(`/tracks/${encodeURIComponent(target.selectedId)}`),
@@ -595,7 +596,7 @@ export default function App() {
             setSelectedId("");
             setError(messageFor(problem));
           },
-          () => setDetailLoading(false),
+          () => setOpeningTrackId(""),
         );
       }
     }
@@ -608,7 +609,7 @@ export default function App() {
     // must not replace this newer action or overwrite its history snapshot.
     if (pending) {
       acceptDetailNavigation(detailSequence, () => true);
-      setDetailLoading(false);
+      setOpeningTrackId("");
       setRestoringDetail(false);
       setSelectedId(currentId);
     }
@@ -656,7 +657,7 @@ export default function App() {
     audioReady.current = false;
     setRestoringPlayback(false);
     setRestoringDetail(false);
-    setDetailLoading(false);
+    setOpeningTrackId("");
     setPlayback(null);
     setAudioSupported(false);
     setAudioTime(0);
@@ -809,7 +810,7 @@ export default function App() {
     if (!session?.authenticated || !restoringDetail) return;
     let disposed = false;
     const current = ++detailSequence.current;
-    setDetailLoading(true);
+    setOpeningTrackId(initialView.selectedId);
     void api<Track>(`/tracks/${encodeURIComponent(initialView.selectedId)}`)
       .then((track) => {
         if (disposed || current !== detailSequence.current || !authenticated.current) return;
@@ -824,7 +825,7 @@ export default function App() {
       .finally(() => {
         if (!disposed && current === detailSequence.current && authenticated.current) {
           setRestoringDetail(false);
-          setDetailLoading(false);
+          setOpeningTrackId("");
         }
       });
     return () => {
@@ -1011,7 +1012,7 @@ export default function App() {
       queueScroll: 0,
     };
     navigationHistory.push(target);
-    setDetailLoading(false);
+    setOpeningTrackId("");
     setRestoringDetail(false);
     if (next !== "settings") setSettingsDirty(false);
     setPage(next);
@@ -1059,7 +1060,7 @@ export default function App() {
     if (!options.confirmed && !clearDirty()) return false;
     navigationHistory.endGroup();
     setRestoringDetail(false);
-    setDetailLoading(true);
+    setOpeningTrackId(track.id);
     setError("");
     return loadLatestResult(
       detailSequence,
@@ -1107,7 +1108,7 @@ export default function App() {
         }
       },
       (err) => setError(messageFor(err)),
-      () => setDetailLoading(false),
+      () => setOpeningTrackId(""),
     );
   }
   async function movePlayback(direction: -1 | 1, continuePlaying: boolean) {
@@ -1289,7 +1290,7 @@ export default function App() {
   async function logout(all = false) {
     if (!acceptDetailNavigation(detailSequence, clearDirty)) return;
     ownerActivity.stop();
-    setDetailLoading(false);
+    setOpeningTrackId("");
     setRestoringDetail(false);
     try {
       await api(all ? "/auth/logout-all" : "/auth/logout", { method: "POST" });
@@ -1770,6 +1771,7 @@ export default function App() {
                     loading={loading || search !== query}
                     selectionDisabled={resultsUpdating}
                     selectedId={selectedId}
+                    openingTrackId={openingTrackId}
                     filter={filter}
                     onSelect={(track) => void openTrack(track)}
                   />
@@ -1807,6 +1809,7 @@ export default function App() {
                         key={track.id}
                         className={`queue-track ${selectedId === track.id ? "selected" : ""}`}
                         disabled={resultsUpdating}
+                        aria-busy={openingTrackId === track.id || undefined}
                         onClick={() => void openTrack(track, page)}
                       >
                         <Cover track={track} />
@@ -1828,6 +1831,7 @@ export default function App() {
                               : ""}
                             {track.review?.category && ` · ${reviewLabels[track.review.category]}`}
                           </span>
+                          {openingTrackId === track.id && <small>Открываем карточку…</small>}
                         </span>
                         {(track.review
                           ? track.review.proposal_state === "pending"
@@ -2117,6 +2121,7 @@ export default function App() {
                     loading={loading || search !== query}
                     selectionDisabled={resultsUpdating}
                     selectedId=""
+                    openingTrackId={openingTrackId}
                     onSelect={(track) => void openTrack(track)}
                     emptyTitle={
                       search.trim() ? "По запросу ничего не найдено" : "Готовых файлов пока нет"
@@ -2284,6 +2289,7 @@ function TrackList({
   loading,
   selectionDisabled,
   selectedId,
+  openingTrackId,
   filter,
   onSelect,
   emptyTitle = "Пока ничего не найдено",
@@ -2294,6 +2300,7 @@ function TrackList({
   loading: boolean;
   selectionDisabled: boolean;
   selectedId: string;
+  openingTrackId: string;
   filter?: string;
   onSelect: (track: Track) => void;
   emptyTitle?: string;
@@ -2327,6 +2334,7 @@ function TrackList({
             className={`track-row ${selectedId === track.id ? "selected" : ""}`}
             key={track.id}
             disabled={selectionDisabled}
+            aria-busy={openingTrackId === track.id || undefined}
             onClick={() => onSelect(track)}
           >
             <span className="track-name">
@@ -2357,6 +2365,7 @@ function TrackList({
                   </span>
                 )}
                 <GapSummary gaps={track.enrichment_gaps} filter={filter} />
+                {openingTrackId === track.id && <small>Открываем карточку…</small>}
               </span>
             </span>
             <span className="format-cell">
@@ -2386,7 +2395,11 @@ function TrackList({
                 {track.lrc ? "С таймкодами" : track.lyrics ? "Без таймкодов" : "Нет текста"}
               </Badge>
             </span>
-            <ChevronRight className="row-arrow" size={18} />
+            {openingTrackId === track.id ? (
+              <LoaderCircle className="row-arrow spin" size={18} aria-hidden="true" />
+            ) : (
+              <ChevronRight className="row-arrow" size={18} aria-hidden="true" />
+            )}
           </button>
         ))
       )}
