@@ -16,6 +16,8 @@ After confirming the Ready plan, the panel shows the state of that publication a
 
 Use the accepted revisions waiting for publication filter to batch the files still awaiting separate delivery. A retained source without a Ready revision stays in the full plan. The waiting filter drops it only when every derivative from the current source revision has a current Ready publication. A damaged source may still require replacement with a complete recording.
 
+Short SQLite contention can delay a publication checkpoint. The worker retries saving that checkpoint with the same result. If the job still stops, use its per-file receipts before preparing a new plan.
+
 Preparation and the pending-files search include expired provider matches whose content is no longer available. A historical successful search does not make those files ready for review. Current usable results and completed searches without matches are reused. Provider permissions still apply to each new request.
 
 The four main sections are **Overview**, **Collection**, **Processing**, and **Ready files**. Settings are in the left menu above the account button. Help opens guided setup. Previously saved navigation, filters, and scroll positions remain available after refresh.
