@@ -27,6 +27,20 @@ const render = (value: Track, asrEnabled = false) =>
     />,
   );
 describe("source search presentation", () => {
+  it("explains an exhausted recognition allowance in the source details", () => {
+    const html = render({
+      ...track,
+      analysis: {
+        input_sha256: track.sha256,
+        query_source: "embedded",
+        state: "candidates",
+        candidates: [],
+        sources: [{ provider: "shazam", state: "recognition_attempt_budget_exhausted" }],
+      },
+    });
+    expect(html).toContain("Лимит распознавания по аудио исчерпан");
+    expect(html).not.toContain("recognition_attempt_budget_exhausted");
+  });
   it("offers an explicit language for both audio checking and alignment", () => {
     const html = render({ ...track, lrc: "[00:01.00]Слова песни" }, true);
     expect(html).toContain("Язык записи<select>");
