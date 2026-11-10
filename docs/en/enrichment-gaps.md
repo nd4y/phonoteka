@@ -4,6 +4,7 @@ The catalog, review list and Ready list show relative paths when tracks on the s
 Changes to the query, filter or page use the same list refresh as completed processing.
 
 If you start search, recognition or alignment from a track card, its results appear there when the job finishes. The refresh applies to the open revision and waits while you select sources or have unsaved edits. The scroll position and playback are preserved. The Sources tab still offers a manual results refresh.
+If a file write takes longer, keep the card open. When the job finishes, the card shows the new revision and the action to review it before publication.
 
 The catalog shows a brief reason below the track name. Open the track to see “What remains to fill”: a separate explanation for each missing title, artist, album, cover and synchronized lyric field. Each row includes a next step, provider and analysis update time when known. This timestamp is not the time of each individual provider request.
 

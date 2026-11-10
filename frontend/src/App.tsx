@@ -461,10 +461,11 @@ export default function App() {
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [detailAnalysisJob, setDetailAnalysisJob] = useState<{
+  const [detailJob, setDetailJob] = useState<{
     id: string;
     trackId: string;
     revision: string;
+    writeKey?: string;
   } | null>(null);
   const [sourceSelectionActive, setSourceSelectionActive] = useState(false);
   const [error, setError] = useState("");
@@ -906,20 +907,24 @@ export default function App() {
   useEffect(() => {
     void loadTracks();
   }, [completedJobs, loadTracks]);
-  const detailAnalysisFinished =
-    !!detailAnalysisJob &&
-    jobs.some((job) => job.id === detailAnalysisJob.id && !activeStates.includes(job.state));
+  const trackedDetailJob = jobs.find((job) => job.id === detailJob?.id);
+  const detailJobFinished = !!trackedDetailJob && !activeStates.includes(trackedDetailJob.state);
+  const detailWriteSucceeded =
+    trackedDetailJob?.state === "succeeded" &&
+    trackedDetailJob.completed === 1 &&
+    trackedDetailJob.failed === 0;
   useEffect(() => {
     if (
-      !detailAnalysisFinished ||
-      !detailAnalysisJob ||
+      !detailJobFinished ||
+      !detailJob ||
       !selected ||
-      detailAnalysisJob.trackId !== selected.id ||
-      detailAnalysisJob.revision !== selected.sha256 ||
+      detailJob.trackId !== selected.id ||
+      detailJob.revision !== selected.sha256 ||
       (page !== "review" && page !== "lyrics") ||
       !session?.authenticated ||
       detailLoading ||
       busy ||
+      reviewMoving ||
       dirty ||
       sourceSelectionActive ||
       policyDirty ||
@@ -927,39 +932,55 @@ export default function App() {
     )
       return;
 
-    const { id, trackId, revision } = detailAnalysisJob;
+    const { id, trackId, revision, writeKey } = detailJob;
+    if (writeKey && !detailWriteSucceeded) {
+      pendingReviewWrites.current.delete(writeKey);
+      setNotice("");
+      setError("Изменения не записаны полностью. Причина доступна в обработке.");
+      setDetailJob((previous) => (previous?.id === id ? null : previous));
+      return;
+    }
     const controller = new AbortController();
     const detailRequest = detailSequence.current;
     void api<Track>(`/tracks/${encodeURIComponent(trackId)}`, { signal: controller.signal })
       .then((track) => {
         if (
           !controller.signal.aborted &&
+          authenticated.current &&
           detailRequest === detailSequence.current &&
           track.id === trackId &&
-          track.sha256 === revision
+          (writeKey || track.sha256 === revision)
         ) {
           setSelected((previous) =>
             previous?.id === trackId && previous.sha256 === revision ? track : previous,
           );
+          if (writeKey) {
+            pendingReviewWrites.current.delete(writeKey);
+            setWrittenTrack({ id: trackId, name: track.relative_path });
+            setNotice("");
+          }
         }
       })
       .catch(() => {
-        // The card keeps its data and the manual refresh remains available.
+        if (writeKey && !controller.signal.aborted && detailRequest === detailSequence.current)
+          setNotice("Запись завершилась. Обновите карточку, чтобы увидеть текущую версию файла.");
       })
       .finally(() => {
         if (!controller.signal.aborted)
-          setDetailAnalysisJob((previous) => (previous?.id === id ? null : previous));
+          setDetailJob((previous) => (previous?.id === id ? null : previous));
       });
     return () => controller.abort();
   }, [
-    detailAnalysisFinished,
-    detailAnalysisJob,
+    detailJobFinished,
+    detailWriteSucceeded,
+    detailJob,
     selected?.id,
     selected?.sha256,
     page,
     session?.authenticated,
     detailLoading,
     busy,
+    reviewMoving,
     dirty,
     sourceSelectionActive,
     policyDirty,
@@ -1168,6 +1189,7 @@ export default function App() {
           nextId = pending.nextId;
           nextPage = pending.nextPage;
         } else pendingReviewWrites.current.set(key, { job, nextId, nextPage, coverOnly });
+        setDetailJob({ id: job.id, trackId: track.id, revision: track.sha256, writeKey: key });
         setNotice("");
         const result = await awaitReviewWrite(
           job,
@@ -1178,13 +1200,14 @@ export default function App() {
         if (result === "pending") {
           setNotice(
             coverOnly
-              ? "Запись обложки выполняется. Проверьте задачу в обработке или повторно откройте результат той же кнопкой."
-              : "Запись еще не завершена. Проверьте задачу в обработке или нажмите «Записать и дальше», чтобы проверить ее результат. Повторная задача не создается.",
+              ? "Запись обложки продолжается. Карточка обновится после завершения."
+              : "Запись продолжается. Карточка обновится после завершения. Ход задачи доступен в обработке.",
           );
           return;
         }
         if (result === "failed") {
           pendingReviewWrites.current.delete(key);
+          setDetailJob((previous) => (previous?.id === job.id ? null : previous));
           setNotice("");
           setError(
             "Изменения не записаны полностью. Карточка сохранена; причина доступна в обработке.",
@@ -1925,7 +1948,7 @@ export default function App() {
                             const job = await submitJob(kind, [selected.id], params);
                             if (job) {
                               if (detailAnalysisKinds.has(kind)) {
-                                setDetailAnalysisJob({
+                                setDetailJob({
                                   id: job.id,
                                   trackId: selected.id,
                                   revision: selected.sha256,
