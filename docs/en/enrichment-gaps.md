@@ -12,6 +12,7 @@ In Sources, open the album search refinement when the track title, artist and al
 - An unattempted or stale search offers a search against the current file revision.
 - Artwork gaps explain whether the title or artist, album, or exact release is still needed. When a suitable release is known, the catalog shows whether its artwork has been requested.
 - Candidates require review; a saved proposal still needs writing to the file. A draft for one field does not explain other missing fields.
+- A timed draft awaits review against the audio. Open Lyrics and check the words and the start of each line against the vocals before writing. The matched-line percentage refers to current alignment for the current file.
 - Temporary provider errors or throttling mean the search is incomplete. Retries respect provider cooldowns; IP rotation and quota resets are not used.
 - If a new search or recognition attempt for the current file fails, the track shows that failure instead of an earlier gap explanation. Previous analysis and saved proposals remain available. The timestamp is the job update time, not an individual request time; processing contains error details. A successfully refreshed analysis supersedes the old failure explanation. Recognition is never retried automatically and its attempt allowance is not reset.
 - Expired results need refreshing, whereas denied storage or embedding requires checking the provider usage settings. AcoustID that is configured now is not shown as missing a key solely because of an earlier search.
