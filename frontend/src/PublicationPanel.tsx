@@ -112,18 +112,26 @@ export default function PublicationPanel({
   const cancel = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     let active = true;
+    let timedOut = false;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 25_000);
+    const options = { signal: controller.signal };
     setLoading(true);
     setError("");
     setItems([]);
     setPending(null);
     setFrozen(null);
     const request = trackId
-      ? api<PlanItem>(`/tracks/${encodeURIComponent(trackId)}/publication`).then((item) => ({
+      ? api<PlanItem>(`/tracks/${encodeURIComponent(trackId)}/publication`, options).then((item) => ({
           items: [item],
           total: 1,
         }))
       : api<Page>(
           `/publication/plan?page=${page}&page_size=20&stale_only=${staleOnly}&accepted_only=${accepted}`,
+          options,
         );
     request
       .then((data) => {
@@ -133,13 +141,21 @@ export default function PublicationPanel({
         }
       })
       .catch((err) => {
-        if (active) setError(messageFor(err));
+        if (active)
+          setError(
+            timedOut
+              ? "План Ready не загрузился за 25 секунд. Нажмите «Обновить план Ready»."
+              : messageFor(err),
+          );
       })
       .finally(() => {
+        window.clearTimeout(timeout);
         if (active) setLoading(false);
       });
     return () => {
       active = false;
+      window.clearTimeout(timeout);
+      controller.abort();
     };
   }, [trackId, page, staleOnly, accepted, generation, revision]);
   useEffect(() => {

@@ -42,6 +42,7 @@ Search and ASR started from a track card refresh that card after the job finishe
 If writing a file outlasts the initial wait, the open card shows the new revision when the job finishes.
 
 Line review applies to a specific file revision and lyric version. After a tag or cover update, earlier decisions remain in history. [Review the current version](docs/en/enrichment-gaps.md).
+If the Ready plan times out, use Refresh Ready plan to retry from the same view.
 
 After configuring AcoustID, an unfinished search can continue without resending conclusively checked fragments to Shazam. Historical recording IDs are retained as evidence, while expired tags are not reused. The existing attempt allowance and current-file evidence requirements remain in force.
 

@@ -8,6 +8,8 @@ If a file write takes longer, keep the card open. When the job finishes, the car
 
 In the Lyrics tab, the line review warning appears when the file revision or lyric version changes. For example, embedding a cover creates a new file revision even when the audio and timings stay the same. To confirm timing for the new revision, open line review and compare each line with the vocals.
 
+If the Ready plan list has not loaded after 25 seconds, select Refresh Ready plan. Changing a filter cancels the previous request. Retrying reads the list again. Publishing still requires separate confirmation.
+
 The catalog shows a brief reason below the track name. Open the track to see “What remains to fill”: a separate explanation for each missing title, artist, album, cover and synchronized lyric field. Each row includes a next step, provider and analysis update time when known. This timestamp is not the time of each individual provider request.
 
 The page indicator shows a loading state and disables pagination until the requested page arrives.
