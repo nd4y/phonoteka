@@ -10,6 +10,8 @@ In the Lyrics tab, the line review warning appears when the file revision or lyr
 
 If the Ready plan list has not loaded after 25 seconds, select Refresh Ready plan. Changing a filter cancels the previous request. Retrying reads the list again. Publishing still requires separate confirmation.
 
+“Audio recognition allowance exhausted” in the source details refers to recognition attempts for this recording. Compare any earlier candidates shown in the track card with the file. The allowance alone does not establish whether the provider has a match.
+
 The catalog shows a brief reason below the track name. Open the track to see “What remains to fill”: a separate explanation for each missing title, artist, album, cover and synchronized lyric field. Each row includes a next step, provider and analysis update time when known. This timestamp is not the time of each individual provider request.
 
 The page indicator shows a loading state and disables pagination until the requested page arrives.

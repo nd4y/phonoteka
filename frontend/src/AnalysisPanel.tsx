@@ -15,6 +15,7 @@ const states: Record<string, string> = {
   provider_unavailable: "Источник недоступен",
   provider_unauthorized: "Нет доступа",
   budget_exhausted: "Достигнут лимит",
+  recognition_attempt_budget_exhausted: "Лимит распознавания по аудио исчерпан",
   rate_limited: "Ограничение частоты",
   invalid_audio: "Ошибка аудио",
 };
