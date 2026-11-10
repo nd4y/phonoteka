@@ -90,6 +90,43 @@ describe("source selection decisions", () => {
     expect(html).toContain("edition-two");
     expect(html).toContain("Проверьте релиз");
   });
+  it("distinguishes same-title releases in the choice without a track-duration placeholder", () => {
+    const edition = (id: string): Candidate => ({
+      id: `mb-release:${id}`,
+      provider: "musicbrainz",
+      kind: "release",
+      tags: { album: "Studio deluxe", date: "2024-10-01" },
+      release_id: id,
+      match: { state: "needs_review", reasons: ["confirm_release"] },
+    });
+    const first = "12345678-1234-4234-8234-123456789abc";
+    const second = "87654321-1234-4234-8234-123456789abc";
+    const html = renderToStaticMarkup(
+      <SourceCandidatePicker
+        track={{
+          ...track,
+          analysis: {
+            ...track.analysis!,
+            candidates: [
+              {
+                ...candidates[0],
+                releases: [
+                  { id: first, title: "Studio deluxe", date: "2024-10-01", country: "GB" },
+                ],
+              },
+              edition(first),
+              edition(second),
+            ],
+          },
+        }}
+        changed={false}
+        onRefresh={() => {}}
+      />,
+    );
+    expect(html).toContain("2024-10-01 · GB · ID 12345678");
+    expect(html).toContain("2024-10-01 · ID 87654321");
+    expect(html).not.toContain("Длительность</dt><dd>Не указана");
+  });
   it("separates purposes without hiding competing versions or implying plain text has timing", () => {
     expect(groupCandidates(candidates).map((g) => [g.kind, g.candidates.length])).toEqual([
       ["metadata", 2],
