@@ -127,6 +127,23 @@ def test_proposal_only_explains_fields_it_will_fill(client, settings):
     assert values['synced_lyrics']['code'] != 'proposal_ready'
 
 
+def test_timed_lyrics_draft_opens_audio_review_and_ignores_stale_coverage(client, settings):
+    authenticated(client, settings)
+    identity, sha = seed(settings)
+    with db.transaction(settings.db_path) as conn:
+        conn.execute('INSERT INTO proposals VALUES(?,?,?,?,?)',
+                     ('p', identity, sha, db.encode({'lrc': '[00:01]First line\n[00:03]Second line'}), db.utcnow()))
+    analysis(settings, identity, sha, {'alignment': {'coverage': 0.25, 'complete': False}})
+    draft = gaps(client, identity)['synced_lyrics']
+    assert (draft['code'], draft['action']) == ('lyrics_draft_needs_review', 'lyrics')
+    assert draft['last_alignment_coverage'] == 0.25
+
+    analysis(settings, identity, sha, {'alignment': {'coverage': 0.25, 'stale': True}})
+    assert 'last_alignment_coverage' not in gaps(client, identity)['synced_lyrics']
+    analysis(settings, identity, 'b'*64, {'alignment': {'coverage': 0.25}})
+    assert 'last_alignment_coverage' not in gaps(client, identity)['synced_lyrics']
+
+
 def test_retry_does_not_claim_not_found_or_pollute_other_fields(client, settings):
     authenticated(client, settings)
     identity, sha = seed(settings)

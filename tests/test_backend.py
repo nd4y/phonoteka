@@ -520,6 +520,7 @@ def test_cue_inventory_preview_and_write_protection(client, settings):
     assert client.get('/api/tracks?filter=cue').json()['total'] == 1
     summary = client.get('/api/summary').json()
     assert summary['cue_sheets'] == 1 and summary['cue_tracks'] == 2
+    assert summary['formats'] == {'cue': 1, 'flac': 1}
     assert client.get(f"/api/tracks/{album['id']}/audio").status_code == 409
     endpoint = f"/api/tracks/{album['id']}/cue/2/audio"
     response = client.get(endpoint, headers={'Range': 'bytes=0-31'})
