@@ -608,6 +608,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 AND total>completed+failed
                 AND total>(SELECT COUNT(*) FROM job_items WHERE job_id=jobs.id)
                 THEN 1 ELSE 0 END DESC,"""
+            order += 'CASE WHEN ' + active_states + ' THEN created_at ELSE updated_at END DESC,'
         rows = db.fetchall(settings.db_path, "SELECT * FROM jobs" + where + " ORDER BY " + order + "created_at DESC,id DESC LIMIT ? OFFSET ?", (*params,page_size,(page-1)*page_size))
         total = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs" + where, params)["n"]
         activity = job_activity.summaries(settings, rows)
