@@ -3,6 +3,7 @@
 **Needs review** groups tracks by the next action: prepare data, choose a candidate, listen, or fix a file. Open the queue from the Overview, guide or collection menu. **Prepare available** queues bounded recording rechecks and lyric alignment drafts; disputed results remain pending. The summary, category counters and list use the same rules. [Review workflow](docs/en/review-preparation.md).
 
 **Music gaps** narrows the collection to individual recordings with missing tags, cover art or timed lyrics. The detailed report opens these gaps for each field. [Find gaps in music](docs/en/enrichment-gaps.md#finding-gaps-in-music).
+Collection actions can retry search and recognition within the selected music category.
 The missing-cover and missing-lyrics lists display the reason for the selected field in each row.
 
 If the album is known, refine its release and cover search by title in the track sources.

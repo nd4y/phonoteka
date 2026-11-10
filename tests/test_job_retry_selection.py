@@ -1,10 +1,12 @@
 """Retries resolve the original request, and pending work cannot starve behind done rows."""
+import asyncio
 from dataclasses import replace
 import json
 
 from fastapi.testclient import TestClient
 from phonoteka import db
 from phonoteka.app import create_app
+from phonoteka.worker import Worker
 from test_backend import settings, authenticated, seed
 
 
@@ -66,3 +68,61 @@ def test_active_job_lookup_finds_old_paused_task_after_recent_history(settings):
         visible = client.get('/api/jobs?active_first=true').json()
         assert visible['items'][0]['id'] == 'old-paused'
         assert len(visible['items']) == 50 and visible['total'] == 52
+
+
+def test_pending_music_filters_select_only_matching_incomplete_recordings(settings):
+    settings = replace(settings, external_metadata=True, external_fingerprints=True)
+    with TestClient(create_app(settings), base_url=settings.app_url) as client:
+        headers = authenticated(client, settings)
+        sha, now = 'a' * 64, db.utcnow()
+        tags = {'title': 'Song', 'artist': 'Artist', 'album': 'Album'}
+        timed = '[00:01.00] A line'
+        base = {'format': 'mp3', 'tags': tags, 'has_art': True, 'lrc': timed}
+        variants = {
+            'need-cover': {**base, 'has_art': False},
+            'need-timing': {**base, 'lrc': ''},
+            'need-tag': {**base, 'tags': {'artist': 'Artist', 'album': 'Album'}},
+            'complete': base,
+            'mix': {**base, 'possible_mix': True, 'has_art': False},
+            'speech': {**base, 'tags': {**tags, 'genre': ['Podcast']}, 'has_art': False},
+            'cue-image': {**base, 'cue_album_image': True, 'has_art': False},
+            'done-search': {**base, 'has_art': False},
+        }
+        with db.transaction(settings.db_path) as conn:
+            conn.executemany('INSERT INTO tracks(id,relative_path,sha256,metadata,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                             [(key, key + '.mp3', sha, db.encode(value), now, now) for key, value in variants.items()])
+            conn.execute('INSERT INTO analyses VALUES(?,?,?,?)', ('done-search', sha, db.encode({
+                'sources': [{'provider': p, 'state': 'no_match'} for p in ('shazam', 'musicbrainz', 'lrclib')]}), now))
+
+        def queue(kind, scope):
+            response = client.post('/api/jobs', json={'kind': kind, 'params': {'scope': scope}},
+                                   headers={**headers, 'Idempotency-Key': kind + '-' + scope})
+            assert response.status_code == 202, response.text
+            job = db.fetchone(settings.db_path, 'SELECT payload FROM jobs WHERE id=?', (response.json()['id'],))
+            return json.loads(job['payload'])['items']
+
+        cover_item, = queue('analyze', 'music_missing_art')
+        assert cover_item['track_id'] == 'need-cover'
+        assert cover_item['music_gap_filter'] == 'music_missing_art'
+        for kind, scope, expected in [
+            ('analyze', 'music_gaps', {'need-cover', 'need-timing', 'need-tag'}),
+            ('recognize', 'music_missing_lyrics', {'need-timing'}),
+            ('recognize', 'music_missing_tags', {'need-tag'}),
+        ]:
+            items = queue(kind, scope)
+            assert {item['track_id'] for item in items} == expected
+            assert all(item['music_gap_filter'] == scope and item['sha256'] == sha for item in items)
+        assert {'complete', 'mix', 'speech'} <= {item['track_id'] for item in queue('analyze', 'pending')}
+
+        invalid = client.post('/api/jobs', json={'kind': 'replaygain', 'params': {'scope': 'music_gaps'}},
+                              headers={**headers, 'Idempotency-Key': 'wrong-kind'})
+        assert invalid.status_code == 422 and invalid.json()['code'] == 'invalid_scope'
+
+        with db.transaction(settings.db_path) as conn:
+            conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(variants['mix']), 'need-cover'))
+        worker = Worker(settings)
+        try:
+            result = asyncio.run(worker.analyze_item({'kind': 'analyze'}, cover_item))
+        finally:
+            worker.pool.shutdown()
+        assert result == {'skipped': True, 'reason': 'music_gap_no_longer_matches', 'sha256': sha}

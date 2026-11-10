@@ -23,7 +23,7 @@ from contextvars import copy_context
 
 from . import work_folders, db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy, provider_attempts, input_readiness, automation, recording_review, processing_activity
 from .providers import Providers, ProviderError
-from .enrichment_gaps import can_search_album
+from .enrichment_gaps import can_search_album, matches_music_gap
 from .config import Settings
 from .telemetry import Metrics, configure_logging, context, log, opaque_id, bounded, KINDS, worker_server
 
@@ -737,6 +737,10 @@ class Worker:
         row = await self.io(db.fetchone, self.settings.db_path, 'SELECT * FROM tracks WHERE id=? AND is_current=1', (item['track_id'],))
         if not row or row['sha256'] != item['sha256']:
             raise media.MediaError('conflict', 'File revision changed')
+        gap_filter = item.get('music_gap_filter')
+        if gap_filter and (row['status'] in {'error', 'missing', 'conflict'} or
+                not matches_music_gap(row['metadata'], row['sha256'], gap_filter)):
+            return {'skipped': True, 'reason': 'music_gap_no_longer_matches', 'sha256': row['sha256']}
         path = self.settings.work_root/item['relative_path']
         await self.io(media._expect, path, item['sha256'])
         meta = json.loads(row['metadata'])

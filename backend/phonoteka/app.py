@@ -718,8 +718,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise security.error(422, exc.code, exc.message) from exc
         if body.kind=='replaygain_album' and not 1<=len(ids)<=200:
             raise security.error(422,'invalid_album','Выберите 1-200 файлов одной группы альбома')
-        if body.params.get('scope'):
-            if body.kind not in {'analyze','recognize','replaygain','youtube'} or body.params['scope'] not in {'all','pending'} or ids:
+        requested_scope = body.params.get('scope')
+        gap_filter = requested_scope if isinstance(requested_scope, str) and requested_scope in enrichment_gaps.MUSIC_GAP_FILTERS else None
+        if requested_scope:
+            allowed_scopes = {'all', 'pending'}
+            if body.kind in {'analyze', 'recognize'}:
+                allowed_scopes.update(enrichment_gaps.MUSIC_GAP_FILTERS)
+            if (body.kind not in {'analyze','recognize','replaygain','youtube'} or not isinstance(requested_scope, str)
+                    or requested_scope not in allowed_scopes or ids):
                 raise security.error(422,'invalid_scope','Полная библиотека доступна только для анализа')
             ids=[]
             # Stream a single snapshot; apply the batch bound to pending files,
@@ -727,13 +733,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             with db.connect(settings.db_path) as conn:
                 conn.execute('BEGIN')
                 completed=catalog_sources.completed_sources(conn)
-                for row in conn.execute("""SELECT t.id,t.metadata,a.payload FROM tracks t
+                for row in conn.execute("""SELECT t.id,t.sha256,t.status,t.metadata,a.payload FROM tracks t
                     LEFT JOIN analyses a ON a.track_id=t.id AND a.input_sha256=t.sha256
                     WHERE t.is_current=1 AND t.status NOT IN ('error','missing')
                     AND json_extract(t.metadata,'$.format')<>'cue'
                     AND COALESCE(json_extract(t.metadata,'$.cue_album_image'),0)=0 AND instr(t.relative_path,?)=1 ORDER BY t.id""", (folder + '/' if folder else '',)):
                     if row['id'] in completed:continue
-                    if body.params['scope']=='pending':
+                    if gap_filter and (row['status'] == 'conflict' or
+                            not enrichment_gaps.matches_music_gap(row['metadata'], row['sha256'], gap_filter)):
+                        continue
+                    if requested_scope == 'pending' or gap_filter:
                         if body.kind=='youtube':
                             m=json.loads(row['metadata']).get('youtube',{})
                             complete=m.get('lookup_complete') if body.params.get('youtube_lookup') else m.get('scanned_at')
@@ -747,7 +756,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             if all(sources.get(p) in done for p in wanted):continue
                     ids.append(row['id'])
                     if len(ids)==10000:break
-            if body.params['scope']=='pending' and not ids:
+            if (requested_scope == 'pending' or gap_filter) and not ids:
                 raise security.error(409,'nothing_to_process','Все доступные записи уже обработаны этим этапом')
         if body.kind=='analyze' and not settings.external_metadata:
             raise security.error(409,'provider_disabled','Внешние метаданные отключены')
@@ -789,7 +798,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for track_id in ids:
                 track = conn.execute("SELECT * FROM tracks WHERE id=? AND is_current=1", (track_id,)).fetchone()
                 if not track:
+                    if gap_filter:
+                        continue
                     raise security.error(404, "track_not_found", "Трек не найден", file_id=track_id)
+                if gap_filter and (track['status'] in {'error', 'missing', 'conflict'} or
+                        not enrichment_gaps.matches_music_gap(track['metadata'], track['sha256'], gap_filter)):
+                    continue
                 meta = json.loads(track['metadata'])
                 if body.kind in {'apply','publish','publish_sidecars','normalize_audio'} and recording_review.possible_mix(meta,track['sha256']):
                     raise security.error(409,'possible_mix_requires_manual_review','Составная запись не получает теги отдельной песни; подтвердите тип записи вручную')
@@ -803,6 +817,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 elif meta.get('format') == 'cue' or (meta.get('cue_album_image') and body.kind not in {'audit','analyze','transcribe','align','youtube'}):
                     raise security.error(409, 'cue_read_only', 'CUE и альбомные образы не изменяются заданиями записи')
                 item = {"track_id": track_id, "sha256": track["sha256"], "relative_path": track["relative_path"]}
+                if gap_filter:
+                    item['music_gap_filter'] = gap_filter
                 if release_search:
                     if release_search['revision'] != track['sha256']:
                         raise security.error(412,'revision_conflict','Файл изменился. Обновите карточку')
@@ -878,6 +894,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         raise security.error(409, "rollback_conflict", "Нет доступной резервной версии для текущего файла", file_id=track_id)
                     item["history_id"] = history["id"]
                 items.append(item)
+            if gap_filter and not items:
+                raise security.error(409, 'nothing_to_process', 'В выбранной категории нет записей для поиска')
             if body.kind == 'publish_sidecars':
                 try:
                     publication_sidecars.validate_enqueue(conn, body.params['plan_id'], ids, identity)
