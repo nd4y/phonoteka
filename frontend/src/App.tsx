@@ -365,13 +365,17 @@ export default function App() {
     if (session?.authenticated) saveGuideState({ step: guideStep, history: [] });
   }, [guideStep, session?.authenticated]);
   const [summary, setSummary] = useState<Summary | null>(null);
-  const [tracks, setTracks] = useState<TrackPage | null>(null);
+  const [trackPage, setTrackPage] = useState<{ key: string; data: TrackPage } | null>(null);
+  const tracks = trackPage?.data ?? null;
   const [jobs, setJobs] = useState<Job[]>([]);
   const [search, setSearch] = useState(initialView.query);
   const [query, setQuery] = useState(initialView.query);
   const [filter, setFilter] = useState(initialView.filter);
   const retryScope = Object.hasOwn(musicGapFilters, filter) ? filter : "pending";
   const [pageNumber, setPageNumber] = useState(initialView.pageNumber);
+  const trackRequest = `/tracks?search=${encodeURIComponent(query)}&page=${pageNumber}&page_size=30&filter=${encodeURIComponent(filter)}`;
+  const resultsUpdating =
+    search !== query || (trackPage !== null && trackPage.key !== trackRequest);
   const [selected, setSelected] = useState<Track | null>(null);
   const [selectedId, setSelectedId] = useState(initialView.selectedId);
   const [dirty, setDirty] = useState(false);
@@ -523,7 +527,7 @@ export default function App() {
     setPageNumber(1);
     setSelectedId("");
     setSelected(null);
-    setTracks(null);
+    setTrackPage(null);
     setSummary(null);
     setJobs([]);
     setDirty(false);
@@ -543,7 +547,7 @@ export default function App() {
     setError("");
     if (query !== target.query || filter !== target.filter || pageNumber !== target.pageNumber) {
       ++requestSequence.current;
-      setTracks(null);
+      setTrackPage(null);
     }
     setPage(target.page);
     setSearch(target.query);
@@ -845,15 +849,12 @@ export default function App() {
     setLoading(true);
     await loadLatestResult(
       requestSequence,
-      () =>
-        api<TrackPage>(
-          `/tracks?search=${encodeURIComponent(query)}&page=${pageNumber}&page_size=30&filter=${encodeURIComponent(filter)}`,
-        ),
-      setTracks,
+      () => api<TrackPage>(trackRequest),
+      (data) => setTrackPage({ key: trackRequest, data }),
       (err) => setError(messageFor(err)),
       () => setLoading(false),
     );
-  }, [session?.authenticated, query, pageNumber, filter]);
+  }, [session?.authenticated, trackRequest]);
   const loadStatus = useCallback(async () => {
     if (!session?.authenticated) return;
     await loadOrderedResult(
@@ -1044,7 +1045,8 @@ export default function App() {
     }
   }
   async function advanceReview(track: Track, apply = false, coverOnly = false) {
-    if (reviewLock.current || busy || loading || !tracks || !clearDirty()) return;
+    if (reviewLock.current || busy || loading || resultsUpdating || !tracks || !clearDirty())
+      return;
     reviewLock.current = true;
     setReviewMoving(true);
     setError("");
@@ -1196,7 +1198,7 @@ export default function App() {
       setSession({ authenticated: false });
       updateSession({ authenticated: false });
       setSelected(null);
-      setTracks(null);
+      setTrackPage(null);
       setSummary(null);
       setDirty(false);
       setPolicyDirty(false);
@@ -1662,7 +1664,8 @@ export default function App() {
                   />
                   <TrackList
                     tracks={tracks}
-                    loading={loading}
+                    loading={loading || search !== query}
+                    selectionDisabled={resultsUpdating}
                     selectedId={selectedId}
                     filter={filter}
                     onSelect={(track) => void openTrack(track)}
@@ -1695,11 +1698,12 @@ export default function App() {
                     filter={filter}
                     onFilter={changeFilter}
                   />
-                  <div className="queue-tracks">
+                  <div className="queue-tracks" aria-busy={loading || search !== query}>
                     {tracks?.items.map((track) => (
                       <button
                         key={track.id}
                         className={`queue-track ${selectedId === track.id ? "selected" : ""}`}
+                        disabled={resultsUpdating}
                         onClick={() => void openTrack(track, page)}
                       >
                         <Cover track={track} />
@@ -1726,8 +1730,8 @@ export default function App() {
                         )}
                       </button>
                     ))}
-                    {loading && <Spinner />}
-                    {!loading && tracks?.items.length === 0 && (
+                    {(loading || search !== query) && <Spinner />}
+                    {!loading && !resultsUpdating && tracks?.items.length === 0 && (
                       <div className="empty compact">
                         <Search size={25} />
                         <p>Треков не найдено</p>
@@ -1829,7 +1833,9 @@ export default function App() {
                               `/tracks/${encodeURIComponent(selected.id)}`,
                             );
                             setSelected(result);
-                            setNotice("Предложение сохранено. Файл пока не изменен.");
+                            setNotice(
+                              `Предложение сохранено для «${result.relative_path}». Файл пока не изменён.`,
+                            );
                             void loadTracks();
                           }}
                           onJob={async (kind, params) => {
@@ -1881,6 +1887,7 @@ export default function App() {
                           />
                           <PublicationPanel
                             key={`${selected.id}:${selected.sha256}`}
+                            jobs={jobs}
                             trackId={selected.id}
                             revision={publicationRevision}
                             onFix={(id, reason) => void fixTrack(id, reason)}
@@ -1964,6 +1971,7 @@ export default function App() {
                 <details ref={planElement} className="panel policy-details">
                   <summary>План сохранения и история версий</summary>
                   <PublicationPanel
+                    jobs={jobs}
                     revision={publicationRevision}
                     onFix={(id, reason) => void fixTrack(id, reason)}
                     disabled={busy || !summary?.capabilities.publish}
@@ -1991,7 +1999,8 @@ export default function App() {
                   />
                   <TrackList
                     tracks={tracks}
-                    loading={loading}
+                    loading={loading || search !== query}
+                    selectionDisabled={resultsUpdating}
                     selectedId=""
                     onSelect={(track) => void openTrack(track)}
                     emptyTitle={
@@ -2157,6 +2166,7 @@ export default function App() {
 function TrackList({
   tracks,
   loading,
+  selectionDisabled,
   selectedId,
   filter,
   onSelect,
@@ -2165,6 +2175,7 @@ function TrackList({
 }: {
   tracks: TrackPage | null;
   loading: boolean;
+  selectionDisabled: boolean;
   selectedId: string;
   filter?: string;
   onSelect: (track: Track) => void;
@@ -2198,6 +2209,7 @@ function TrackList({
           <button
             className={`track-row ${selectedId === track.id ? "selected" : ""}`}
             key={track.id}
+            disabled={selectionDisabled}
             onClick={() => onSelect(track)}
           >
             <span className="track-name">

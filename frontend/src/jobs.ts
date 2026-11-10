@@ -129,6 +129,29 @@ export const isActiveJob = (job: Job) =>
 export const needsJobAuthorization = (job: Job) =>
   job.state === "waiting_authorization" ||
   (job.state === "running" && job.stage === "waiting_authorization");
+export function readyPublicationStatus(job: Job): {
+  tone: "info" | "success" | "warning" | "error";
+  text: string;
+} {
+  if (job.state === "succeeded" && job.total > 0 && job.completed === job.total && job.failed === 0)
+    return {
+      tone: "success",
+      text: `В Ready сохранено ${job.completed} из ${job.total}.`,
+    };
+  const tone = jobTone(job);
+  const waiting =
+    isActiveJob(job) && ["waiting_storage", "waiting_authorization"].includes(job.stage);
+  const state = (jobStates[waiting ? job.stage : job.state] ?? "Результат не подтверждён") + ".";
+  if (isActiveJob(job))
+    return {
+      tone: tone === "cancelled" ? "warning" : "info",
+      text: `${job.cancel_requested ? "Останавливаем сохранение." : state} Ход задачи виден в обработке.`,
+    };
+  return {
+    tone: tone === "cancelled" ? "warning" : "error",
+    text: `В Ready сохранено ${job.completed} из ${job.total}. ${job.state === "succeeded" ? "Сохранение выполнено не полностью." : state} Подробности в обработке.`,
+  };
+}
 export function jobErrorMessage(job: Job): string {
   if (
     ["canceled", "cancelled", "cancelled_partial"].includes(job.state) &&

@@ -5,6 +5,8 @@ import { api, messageFor } from "./api";
 import "./PublicationPanel.css";
 import { reasonNames } from "./publicationReasons";
 import { useBackLayer } from "./useAppHistory";
+import { isActiveJob, readyPublicationStatus } from "./jobs";
+import type { Job } from "./types";
 
 type Version = {
   history_id: string;
@@ -32,6 +34,7 @@ type PlanItem = {
 };
 type Page = { items: PlanItem[]; page: number; page_size: number; total: number };
 interface Props {
+  jobs: Job[];
   trackId?: string;
   disabled?: boolean;
   onJobQueued?: () => void;
@@ -55,6 +58,7 @@ const integrity: Record<string, string> = {
 };
 
 export default function PublicationPanel({
+  jobs,
   trackId,
   disabled = false,
   onJobQueued,
@@ -87,6 +91,15 @@ export default function PublicationPanel({
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
   const [pending, setPending] = useState<{ item: PlanItem; version: Version } | null>(null);
+  const [submitted, setSubmitted] = useState<Job | null>(null);
+  const tracked =
+    submitted && isActiveJob(submitted) ? jobs.find((job) => job.id === submitted.id) : null;
+  const publication = tracked || submitted;
+  const publicationPending = publication && isActiveJob(publication);
+  const publicationStatus = publication && readyPublicationStatus(publication);
+  useEffect(() => {
+    if (tracked && !isActiveJob(tracked)) setSubmitted(tracked);
+  }, [tracked]);
   useBackLayer(
     !!pending,
     () => {
@@ -175,11 +188,12 @@ export default function PublicationPanel({
     }
   }
   async function preview(rows: PlanItem[]) {
-    if (lock.current || !rows.length) return;
+    if (lock.current || publicationPending || !rows.length) return;
     lock.current = true;
     setSaving(true);
     setError("");
     setNotice("");
+    setSubmitted(null);
     try {
       const plan = await api<{
         id: string;
@@ -217,17 +231,17 @@ export default function PublicationPanel({
     }
   }
   async function publish() {
-    if (!frozen || lock.current) return;
+    if (!frozen || lock.current || publicationPending) return;
     lock.current = true;
     setSaving(true);
     setError("");
     try {
-      await api("/publications/" + frozen.id + "/commit", {
+      const job = await api<Job>("/publications/" + frozen.id + "/commit", {
         method: "POST",
         headers: { "Idempotency-Key": frozen.key },
         body: JSON.stringify({ plan_sha256: frozen.plan_sha256 }),
       });
-      setNotice("Сохранение началось. Ход и результат доступны в обработке.");
+      setSubmitted(job);
       setFrozen(null);
       onJobQueued?.();
     } catch (e) {
@@ -289,7 +303,7 @@ export default function PublicationPanel({
         <div className="button-row">
           <button
             className="button primary"
-            disabled={disabled || saving}
+            disabled={disabled || saving || Boolean(publicationPending)}
             onClick={() => void preview(items.filter(eligible))}
           >
             {trackId
@@ -339,6 +353,11 @@ export default function PublicationPanel({
         <div className="notice success" role="status">
           <ShieldCheck size={18} />
           <span>{notice}</span>
+        </div>
+      )}
+      {publicationStatus && (
+        <div className={`notice ${publicationStatus.tone}`} role="status">
+          <span>{publicationStatus.text}</span>
         </div>
       )}
       {loading && (
