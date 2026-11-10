@@ -19,6 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
@@ -1151,10 +1152,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {'external_metadata':settings.external_metadata,'external_fingerprints':settings.external_fingerprints,'daily_limit':settings.provider_daily_limit,'daily_limit_enabled':settings.provider_daily_limit>0,'providers':providers}
 
     async def source_selection(request: Request, track_id: str, preview: bool):
-        from . import selection_preview
-        security.require_session(request, settings, True)
+        await run_in_threadpool(security.require_session, request, settings, True)
         try: body = await request.json()
         except ValueError: raise security.error(422,'invalid_selection','Ожидается JSON')
+        return await run_in_threadpool(select_source_candidates, request, track_id, preview, body)
+
+    def select_source_candidates(request: Request, track_id: str, preview: bool, body):
+        from . import selection_preview
         if not isinstance(body,dict): raise security.error(422,'invalid_selection','Ожидается объект')
         ids = body.get('candidate_ids')
         if not isinstance(ids,list) or not 1<=len(ids)<=8 or any(not isinstance(x,str) for x in ids):

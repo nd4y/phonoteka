@@ -1,4 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
+from threading import Event
 
 import pytest
 
@@ -19,6 +22,41 @@ def database_state(settings):
     with db.connect(settings.db_path) as conn:
         return {table: [tuple(row) for row in conn.execute(f'SELECT * FROM {table} ORDER BY rowid')]
                 for table in ('settings', 'analyses', 'proposals', 'events', 'tracks')}
+
+
+@pytest.mark.parametrize(('action', 'expected'), [('preview', 200), ('select', 201)])
+def test_source_selection_keeps_api_responsive_while_catalog_is_busy(client, settings, monkeypatch, action, expected):
+    headers = authenticated(client, settings)
+    tid, sha = seed(settings, lrc='Existing words')
+    values = candidates()
+    analysis(settings, tid, sha, values)
+    with db.transaction(settings.db_path) as conn:
+        grant(conn)
+        grant(conn, kind='metadata')
+
+    waiting, release = Event(), Event()
+    transaction = db.transaction
+
+    @contextmanager
+    def delayed_transaction(path):
+        waiting.set()
+        assert release.wait(10), 'Test did not release the waiting catalog request'
+        with transaction(path) as conn:
+            yield conn
+
+    monkeypatch.setattr(db, 'transaction', delayed_transaction)
+    with ThreadPoolExecutor(max_workers=2) as requests:
+        selection = requests.submit(client.post, f'/api/tracks/{tid}/analysis/{action}',
+                                    headers={**headers, 'If-Match': sha},
+                                    json={'candidate_ids': [values[0]['id']]})
+        try:
+            assert waiting.wait(5), 'Source selection did not reach the catalog transaction'
+            assert requests.submit(client.get, '/health').result(timeout=3).status_code == 200
+            assert not selection.done()
+        finally:
+            release.set()
+        response = selection.result(timeout=5)
+    assert response.status_code == expected, response.text
 
 
 def test_preview_is_read_only_and_save_matches_reviewed_fields(client, settings):
