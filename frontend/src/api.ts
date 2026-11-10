@@ -1,7 +1,9 @@
 import type { Session } from "./types";
 let csrfToken = "";
+let openAccess = false;
 export function setSession(session: Session) {
   csrfToken = session.csrf_token || "";
+  openAccess = session.authenticated && session.auth_enabled === false;
 }
 export class ApiError extends Error {
   constructor(
@@ -16,16 +18,36 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const headers = new Headers(options.headers);
   if (options.body && !(options.body instanceof FormData))
     headers.set("Content-Type", "application/json");
-  if (options.method && !["GET", "HEAD"].includes(options.method))
-    headers.set("X-CSRF-Token", csrfToken);
-  const response = await fetch(`/api${path}`, {
-    ...options,
-    headers,
-    credentials: "same-origin",
-    cache: "no-store",
-  });
+  const mutation = options.method && !["GET", "HEAD"].includes(options.method.toUpperCase());
+  if (mutation) headers.set("X-CSRF-Token", csrfToken);
+  const send = (requestHeaders: Headers) =>
+    fetch(`/api${path}`, {
+      ...options,
+      headers: requestHeaders,
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+  let response = await send(headers);
+  let payload = response.ok ? null : await response.json().catch(() => null);
+  // A stale open-mode token is rejected before the action starts.
+  if (
+    mutation &&
+    openAccess &&
+    !path.startsWith("/auth/") &&
+    response.status === 403 &&
+    payload?.code === "csrf_invalid" &&
+    (!options.body || typeof options.body === "string" || options.body instanceof FormData)
+  ) {
+    const fresh = await api<Session>("/auth/session", { signal: options.signal });
+    if (openAccess && fresh.authenticated && fresh.auth_enabled === false && fresh.csrf_token) {
+      setSession(fresh);
+      const refreshedHeaders = new Headers(headers);
+      refreshedHeaders.set("X-CSRF-Token", fresh.csrf_token);
+      response = await send(refreshedHeaders);
+      payload = response.ok ? null : await response.json().catch(() => null);
+    }
+  }
   if (!response.ok) {
-    const payload = await response.json().catch(() => null);
     const detail = payload?.message || payload?.detail || payload?.error;
     const message =
       typeof detail === "string"

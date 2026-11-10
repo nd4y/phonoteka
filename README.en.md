@@ -8,6 +8,7 @@ Write confirmed artwork separately and keep the lyrics draft for review.
 Collection actions can retry search and recognition within the selected music category.
 
 After an internal search or recognition failure, **Continue remaining files** in Processing continues the same task from files whose processing never started.
+Tasks that can continue are listed before regular completed history.
 The missing-cover list explains whether the recording, album or exact edition still needs confirmation, or whether the cover search can run now. The missing-lyrics list shows its own reason in each row.
 
 If the album is known, refine its release and cover search by title in the track sources.
@@ -75,6 +76,7 @@ The saved-proposal count is narrower than the full review queue, which also incl
 Record review offers one next action; the activity log provides search, a problems filter and scroll pause. Settings are above the account in the left menu. See the [collection workflow](docs/en/collection-workflow.md).
 
 Sign-in is controlled by AUTH_ENABLED (enabled by default). [Configuration and restoring authentication](docs/en/authentication.md).
+With sign-in disabled, an open tab refreshes a stale write token after a server restart.
 
 Guided setup prepares a selected directory in the mounted music folder for review and refreshes expired search results. Accepted revisions can be published through the plan and downloaded with the playlist in one ZIP. [Folder-to-collection workflow](docs/en/collection-workflow.md)
 

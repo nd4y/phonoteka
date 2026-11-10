@@ -63,3 +63,4 @@ For parallel-processing failures, JSON logs include up to eight nested exception
 After an internal search or recognition failure with unstarted files, **Continue remaining files** uses the original task and scope. Completed and failed results remain in its history. An admitted file whose outcome was lost is marked for review, since a provider request may have been sent already. Only files with no recorded start are admitted. The original authorization and provider budgets still apply.
 
 The worker retries the same local per-file checkpoint up to three times on SQLite contention. No provider request is repeated by this retry. The progress summary groups review cases and errors under **require attention**. File details show the individual reason.
+Processing lists jobs that can continue directly after active jobs, even if many newer history entries were created after the failure.

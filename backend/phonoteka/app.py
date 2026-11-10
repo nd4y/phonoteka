@@ -590,7 +590,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/jobs")
     def jobs(request: Request, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
-             active_only: bool = False, active_first: bool = False, kind: str = Query('', max_length=64)):
+             active_only: bool = False, active_first: bool = False, kind: str = Query('', max_length=64),
+             recoverable_first: bool = False):
         security.require_session(request, settings)
         where = ' WHERE 1=1'
         params = []
@@ -601,6 +602,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             where += ' AND kind=?'
             params.append(kind)
         order = '(' + active_states + ') DESC,' if active_first else ''
+        if recoverable_first and not active_only:
+            order += """CASE WHEN kind IN ('recognize','analyze') AND state='failed'
+                AND error='internal_error' AND NOT cancel_requested
+                AND total>completed+failed
+                AND total>(SELECT COUNT(*) FROM job_items WHERE job_id=jobs.id)
+                THEN 1 ELSE 0 END DESC,"""
         rows = db.fetchall(settings.db_path, "SELECT * FROM jobs" + where + " ORDER BY " + order + "created_at DESC,id DESC LIMIT ? OFFSET ?", (*params,page_size,(page-1)*page_size))
         total = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs" + where, params)["n"]
         activity = job_activity.summaries(settings, rows)
