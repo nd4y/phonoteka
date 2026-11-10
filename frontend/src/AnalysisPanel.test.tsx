@@ -13,13 +13,13 @@ const track: Track = {
   status: "ready",
   can_write: true,
 };
-const render = (value: Track) =>
+const render = (value: Track, asrEnabled = false) =>
   renderToStaticMarkup(
     <AnalysisPanel
       track={value}
       enabled
       recognitionEnabled
-      asrEnabled={false}
+      asrEnabled={asrEnabled}
       busy={false}
       changed={false}
       onJob={async () => {}}
@@ -27,6 +27,16 @@ const render = (value: Track) =>
     />,
   );
 describe("source search presentation", () => {
+  it("offers an explicit language for both audio checking and alignment", () => {
+    const html = render({ ...track, lrc: "[00:01.00]Слова песни" }, true);
+    expect(html).toContain("Язык записи<select>");
+    expect(html).toContain('<option value="" selected="">Определить автоматически</option>');
+    expect(html).toContain('<option value="ru">Русский</option>');
+    expect(html).toContain('<option value="en">Английский</option>');
+    expect(html).toContain("Проверить содержимое аудио");
+    expect(html).toContain("Свести текст с аудио");
+    expect(render(track)).toContain('Язык записи<select disabled="">');
+  });
   it("focuses attention on unresolved timing without accepting the remaining lines", () => {
     const html = render({
       ...track,

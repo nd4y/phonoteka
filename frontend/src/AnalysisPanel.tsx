@@ -40,6 +40,8 @@ export function AnalysisPanel({
 }) {
   const analysis = track.analysis;
   const [allAlignmentLines, setAllAlignmentLines] = useState(false);
+  const [asrLanguage, setAsrLanguage] = useState("");
+  const asrParams = asrLanguage ? { language: asrLanguage } : undefined;
   const alignmentLines = analysis?.alignment?.lines || [];
   const uncertainLines = alignmentLines.filter(
     (line) => line.start_ms == null || !!line.low_probability_words,
@@ -153,10 +155,22 @@ export function AnalysisPanel({
           <span className="muted small">Аудиосэмплы не меняются</span>
         </div>
         <div className="button-row asr-tools">
+          <label>
+            Язык записи
+            <select
+              value={asrLanguage}
+              disabled={!asrEnabled || busy || !!track.input_error}
+              onChange={(event) => setAsrLanguage(event.target.value)}
+            >
+              <option value="">Определить автоматически</option>
+              <option value="ru">Русский</option>
+              <option value="en">Английский</option>
+            </select>
+          </label>
           <button
             className="button secondary"
             disabled={!asrEnabled || busy || !!track.input_error}
-            onClick={() => void onJob("transcribe")}
+            onClick={() => void onJob("transcribe", asrParams)}
           >
             Проверить содержимое аудио
           </button>
@@ -165,7 +179,7 @@ export function AnalysisPanel({
             disabled={
               !asrEnabled || busy || changed || !(track.lrc || track.lyrics || track.proposal?.lrc)
             }
-            onClick={() => void onJob("align")}
+            onClick={() => void onJob("align", asrParams)}
           >
             Свести текст с аудио
           </button>

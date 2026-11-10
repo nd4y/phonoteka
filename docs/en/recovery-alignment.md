@@ -1,5 +1,7 @@
 # Queue recovery and ASR reference words
 
+In **Sources**, open the timing, audio and loudness actions and set **Recording language** if automatic detection gets a song wrong. The choice applies to the next transcription or alignment request from that track editor.
+
 ASR uses decoded sample duration for transcription and alignment. A single-stream raw MP3 can have an inaccurate bitrate/header duration estimate; its result retains both reported and decoded durations in `duration_evidence`. A substantial mismatch in other containers or multiple streams remains an error. Decoding permits a one-second sentinel beyond the profile limit, then rejects excess samples before loading them or calling PC2. It never accepts a silently truncated 30-minute result. The conservative preflight rejection for a reported duration above 30 minutes remains. No source bytes, model weights, confidence gates or automatic acceptance rules change.
 
 If the worker exits during metadata analysis, recognition, audio audit, ASR, alignment, ReplayGain or YouTube provenance lookup, startup pauses that job. Use Resume in Processing. Completed items are skipped and interrupted items no longer appear to be running. A cancellation requested before the crash remains effective. Provider budgets and unknown request outcomes are preserved.

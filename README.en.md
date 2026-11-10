@@ -40,6 +40,8 @@ CI checks installed media tools and uses the official Ubuntu HTTPS repositories 
 
 ASR uses decoded sample duration for raw MP3 files with inaccurate header estimates. The result retains the reported estimate; the 30-minute limit is checked before contacting PC2. [Details and limits](docs/en/recovery-alignment.md).
 
+Choose the recording language in Sources before transcribing audio or aligning lyrics when automatic detection picks the wrong language.
+
 After a worker crash, unfinished read jobs pause while retaining completed results and provider budgets. ASR checks the actual reference words separately from tags and artwork: [recovery and alignment](docs/en/recovery-alignment.md).
 
 Recovery preserves the original audio file; invalid embedded artwork remains in that source and is explicitly recorded as omitted from the derivative.
