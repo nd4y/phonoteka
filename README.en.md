@@ -23,6 +23,8 @@ Search for an album or artist in the detailed report to find groups beyond the i
 Release choices show the available date, country and short ID so you can distinguish editions with the same title.
 
 The Ready panel shows publication receipts for the open track revision. After switching tracks, look for that track's own receipt before moving on.
+
+The accepted revisions waiting for publication filter lists files that still need separate delivery. Retained CUE images and damaged inputs stay visible in the full plan. A source with no Ready publication drops out of the waiting list once all its verified outputs have current Ready revisions.
 After confirmation, the panel shows the publication job state and the number of files saved.
 Previous rows cannot be opened while a search or filter is updating. The proposal confirmation names the file path.
 
@@ -46,6 +48,8 @@ CI checks installed media tools and uses the official Ubuntu HTTPS repositories 
 ASR uses decoded sample duration for raw MP3 files with inaccurate header estimates. The result retains the reported estimate; the 30-minute limit is checked before contacting PC2. [Details and limits](docs/en/recovery-alignment.md).
 
 Choose the recording language in Sources before transcribing audio or aligning lyrics when automatic detection picks the wrong language.
+
+The LRCLIB comparison shows when it removes an empty marker just after the audio ends. It preserves the words and their timestamps for review.
 
 After a worker crash, unfinished read jobs pause while retaining completed results and provider budgets. ASR checks the actual reference words separately from tags and artwork: [recovery and alignment](docs/en/recovery-alignment.md).
 
