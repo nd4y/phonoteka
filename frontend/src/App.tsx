@@ -2507,13 +2507,15 @@ function TrackEditor({
       setLocalError(messageFor(err));
     }
   }
+  const invalidEditorLyrics = hasUntimed || !!lyricsInvalid;
+  const savedMetadataOnly =
+    !!activeProposal && !activeProposal.lrc && !activeProposal.lyrics_document;
   const applyBlocked =
     !writable ||
     !summary?.capabilities.apply ||
     !activeProposal ||
     changed ||
-    hasUntimed ||
-    !!lyricsInvalid ||
+    (invalidEditorLyrics && !savedMetadataOnly) ||
     busy ||
     saving;
   const canWriteCoverSeparately =
@@ -2526,7 +2528,8 @@ function TrackEditor({
   const nextAction = reviewNextAction({
     changed,
     savedProposal: !!activeProposal,
-    invalidLyrics: hasUntimed || !!lyricsInvalid,
+    savedMetadataOnly,
+    invalidLyrics: invalidEditorLyrics,
     canRecover: track.can_recover,
     preparation: !!track.review?.action,
     possibleMix: !!track.possible_mix,
@@ -2545,7 +2548,9 @@ function TrackEditor({
               ? "Файл недоступен для записи. Причина показана ниже."
               : !summary?.capabilities.apply
                 ? "Запись сейчас недоступна. Проверьте состояние хранилища в настройках."
-                : "Проверьте значения ниже. Запись применит сохранённое предложение и откроет следующий трек."
+                : savedMetadataOnly && invalidEditorLyrics
+                  ? "Черновик меняет только теги или обложку. Текст в файле сохранится."
+                  : "Проверьте значения ниже. Запись применит сохранённое предложение и откроет следующий трек."
             : track.analysis?.candidates?.length
               ? "Найдены варианты. Выберите подходящие данные или заполните поля вручную."
               : "Найдите данные по аудио или заполните поля вручную. Исходный файл пока не изменяется.";
