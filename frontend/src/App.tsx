@@ -862,7 +862,7 @@ export default function App() {
       () =>
         Promise.allSettled([
           api<Summary>("/summary"),
-          api<{ items: Job[] }>("/jobs?active_first=true"),
+          api<{ items: Job[] }>("/jobs?active_first=true&recoverable_first=true"),
         ]),
       (results) => {
         if (results[0].status === "fulfilled") setSummary(results[0].value);

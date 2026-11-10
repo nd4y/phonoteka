@@ -222,6 +222,29 @@ def test_resume_failed_recognition_admits_only_never_started_files(settings, mon
         assert len(db.fetchall(cfg.db_path, 'SELECT id FROM jobs')) == 1
 
 
+def test_processing_lists_recoverable_job_after_active_even_outside_recent_page(settings):
+    cfg = replace(settings, external_fingerprints=True)
+    with TestClient(create_app(cfg), base_url=cfg.app_url) as client:
+        owner = authenticated(client, cfg)
+        track, _ = seed(cfg)
+        old = job(client, owner, 'recognize', [track])['id']
+        all_started = job(client, owner, 'recognize', [track])['id']
+        active = job(client, owner, 'scan')['id']
+        with db.transaction(cfg.db_path) as conn:
+            conn.execute("""UPDATE jobs SET state='failed',stage='failed',error='internal_error',
+                created_at='2020-01-01T00:00:00+00:00' WHERE id IN (?,?)""", (old, all_started))
+            conn.execute('INSERT INTO job_items VALUES(?,?,?,?)', (all_started, track, 'running', '{}'))
+            conn.executemany("""INSERT INTO jobs(id,kind,state,stage,payload,created_at,updated_at)
+                VALUES(?,'scan','succeeded','succeeded','{}',?,?)""",
+                [(f'recent-{n}', f'2025-01-01T00:00:{n:02d}+00:00', db.utcnow()) for n in range(55)])
+        default = client.get('/api/jobs?active_first=true').json()['items']
+        assert default[0]['id'] == active and old not in {item['id'] for item in default}
+        processing = client.get('/api/jobs?active_first=true&recoverable_first=true').json()['items']
+        assert [item['id'] for item in processing[:2]] == [active, old]
+        assert processing[1]['resume_remaining'] is True
+        assert all_started not in {item['id'] for item in processing}
+
+
 async def until(predicate, seconds=5):
     async def poll():
         while not predicate():
