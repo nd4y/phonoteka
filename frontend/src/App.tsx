@@ -889,9 +889,6 @@ export default function App() {
     );
   }, [session?.authenticated]);
   useEffect(() => {
-    void loadTracks();
-  }, [loadTracks]);
-  useEffect(() => {
     if (!session?.authenticated) return;
     return startStatusPolling(loadStatus, () => !document.hidden);
   }, [loadStatus, session?.authenticated]);
@@ -900,7 +897,7 @@ export default function App() {
     .map((job) => `${job.id}:${job.state}`)
     .join(",");
   useEffect(() => {
-    if (completedJobs) void loadTracks();
+    void loadTracks();
   }, [completedJobs, loadTracks]);
   const clearDirty = () =>
     !(dirty || policyDirty || reviewDirty || settingsDirty) ||
