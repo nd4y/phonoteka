@@ -154,6 +154,12 @@ def public_history(settings, row):
     }
 
 
+def recovery_candidate(row):
+    return (row['kind'] in {'recognize', 'analyze'} and row['state'] == 'failed'
+            and row['error'] == 'internal_error' and not row['cancel_requested']
+            and row['total'] > row['completed'] + row['failed'])
+
+
 def public_job(settings: Settings, row: dict, detail=False, activity=None):
     total = row["total"]
     result = {key: row[key] for key in ("id", "kind", "state", "stage", "total", "completed", "failed", "cancel_requested", "created_at", "updated_at", "error")}
@@ -164,6 +170,9 @@ def public_job(settings: Settings, row: dict, detail=False, activity=None):
     result['pause_requested']=bool(payload.get('pause_requested'))
     if row['kind']=='export_ready': result['export_progress']=payload.get('export_progress')
     result['authorization']=automation.public_authorization(row,payload)
+    if recovery_candidate(row):
+        started = db.fetchone(settings.db_path, 'SELECT COUNT(*) AS started FROM job_items WHERE job_id=?', (row['id'],))['started']
+        result['resume_remaining'] = started < total
     result.update(activity if activity is not None else job_activity.summaries(settings, [row])[row['id']])
     if detail:
         items = db.fetchall(settings.db_path, """SELECT j.item_key,j.state,j.result,t.id AS track_id,t.relative_path
@@ -998,13 +1007,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 stage='paused' if state=='paused' else row['stage']
             else:
                 if row['state']=='waiting_authorization':raise security.error(409,'authorization_required','Ожидается явное подтверждение прав владельцем')
-                if row['state']!='paused':raise security.error(409,'job_not_paused','Задание не приостановлено')
+                recovering = recovery_candidate(row)
+                if row['state']!='paused' and not recovering:raise security.error(409,'job_not_paused','Задание не приостановлено')
+                if recovering and active.get('api_token_id'):
+                    raise security.error(403,'owner_session_required','Откройте обработку в браузере, чтобы продолжить оставшиеся файлы')
+                if recovering and not (settings.external_fingerprints if row['kind']=='recognize' else settings.external_metadata):
+                    raise security.error(409,'provider_disabled','Подключение для этой обработки выключено')
                 if db.setting(settings.db_path,'recovery_required','false')=='true':raise security.error(409,'recovery_required','Сначала завершите восстановление')
                 control=conn.execute(f'SELECT {automation.CONTROL_COLUMNS} FROM jobs WHERE id=?',(job_id,)).fetchone()
                 reason=automation.grant_reason(conn,control)
                 if reason:
+                    if recovering:
+                        raise security.error(409,'authorization_required','Исходное разрешение на обработку больше не действует')
                     automation.wait_for_authorization(conn,job_id,reason)
                     denied=True
+                if recovering:
+                    started = conn.execute('SELECT COUNT(*) FROM job_items WHERE job_id=?', (job_id,)).fetchone()[0]
+                    if started >= row['total']:
+                        raise security.error(409,'no_unstarted_items','Файлов, которые ещё не начали обрабатывать, нет')
+                    # Keep admitted work in history: a network request may have
+                    # been sent even when its last local checkpoint was lost.
+                    held = conn.execute("""UPDATE job_items SET state='needs_review',
+                        result=json_set(result,'$.code','interrupted_outcome_unknown','$.retryable',json('false'),
+                            '$.message','Исход начатой попытки неизвестен. Запись требует проверки.')
+                        WHERE job_id=? AND state NOT IN ('succeeded','failed','conflict','needs_review')""", (job_id,)).rowcount
+                    conn.execute("""UPDATE jobs SET error=NULL,completed=(SELECT COUNT(*) FROM job_items
+                        WHERE job_id=? AND state='succeeded'),failed=(SELECT COUNT(*) FROM job_items
+                        WHERE job_id=? AND state IN ('failed','conflict','needs_review')) WHERE id=?""", (job_id,job_id,job_id))
+                    db.event(conn,'job_recovered_remaining',{'job_id':job_id,'previous_error':row['error'],
+                             'held':held,'unstarted':row['total']-started})
                 payload['pause_requested']=False
                 state='queued';stage=('waiting_storage' if payload.get('wait_reason')=='storage' else 'waiting_provider') if payload.get('retry_at',0)>time.time() else 'pending'
             if not denied:

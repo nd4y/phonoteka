@@ -447,6 +447,16 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
                               : "Пауза"}
                         </button>
                       )}
+                    {job.resume_remaining && (
+                      <button
+                        className="button subtle"
+                        disabled={pending === job.id}
+                        onClick={() => void control(job, "resume")}
+                      >
+                        <Play size={15} />
+                        Продолжить оставшиеся файлы
+                      </button>
+                    )}
                     {(active || job.state === "interrupted") && (
                       <button
                         className="button subtle"
@@ -459,6 +469,12 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
                     )}
                   </div>
                 </div>
+                {job.resume_remaining && (
+                  <p className="muted small">
+                    Обработка продолжится с файлов, которые ещё не начали проверять. Начатые попытки
+                    с неизвестным исходом будут отмечены для проверки.
+                  </p>
+                )}
                 <div className="job-progress-heading">
                   <strong className="job-percent">
                     {job.total ? `${percent}%` : active ? "-" : "0%"}
@@ -472,7 +488,7 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
                           : "Файлов для обработки нет"}
                     </span>
                     <small>
-                      {count(job.completed)} успешно · {count(job.failed)} с ошибками
+                      {count(job.completed)} успешно · {count(job.failed)} требуют внимания
                     </small>
                   </div>
                   {active && (

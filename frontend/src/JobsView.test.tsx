@@ -41,7 +41,7 @@ describe("cancelled task presentation", () => {
     expect(html).toContain("Отменено частично");
     expect(html).toContain("invalid_audio");
     expect(html).toContain('role="alert"');
-    expect(html).toContain("с ошибками");
+    expect(html).toContain("требуют внимания");
   });
   it("allows cancelling the remaining work of an interrupted task without offering resume", () => {
     const html = render({
@@ -55,5 +55,10 @@ describe("cancelled task presentation", () => {
     expect(html).toContain("Отменить оставшиеся файлы");
     expect(html).not.toContain(">Продолжить<");
     expect(html).not.toContain(">Пауза<");
+  });
+  it("offers continuation only for a failed task with unstarted work", () => {
+    const failed = { ...job, state: "failed", stage: "failed", cancel_requested: false };
+    expect(render({ ...failed, resume_remaining: true })).toContain("Продолжить оставшиеся файлы");
+    expect(render(failed)).not.toContain("Продолжить оставшиеся файлы");
   });
 });

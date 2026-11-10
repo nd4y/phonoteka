@@ -96,6 +96,84 @@ def test_busy_catalog_returns_retryable_response_without_enqueuing(settings, mon
         assert not db.fetchall(settings.db_path, 'SELECT id FROM jobs')
 
 
+def test_recognition_checkpoint_retries_without_repeating_search(settings, monkeypatch):
+    short_busy_timeout(monkeypatch)
+    cfg = replace(settings, external_fingerprints=True, file_workers=2)
+    with TestClient(create_app(cfg), base_url=cfg.app_url) as client:
+        owner = authenticated(client, cfg)
+        first, _ = seed(cfg, 'first.mp3')
+        second, _ = seed(cfg, 'second.mp3')
+        identity = job(client, owner, 'recognize', [first, second])['id']
+        worker = Worker(cfg)
+        seen, attempts = [], []
+
+        async def recognize(_, item):
+            seen.append(item['track_id'])
+            return {'state': 'no_match'}
+
+        original = worker.item_result
+
+        def contended(job_id, key, state, result):
+            if key == first and state == 'succeeded':
+                attempts.append(state)
+                if len(attempts) == 1:
+                    with db.transaction(cfg.db_path):
+                        return original(job_id, key, state, result)
+            return original(job_id, key, state, result)
+
+        monkeypatch.setattr(worker, 'analyze_item', recognize)
+        monkeypatch.setattr(worker, 'item_result', contended)
+        try:
+            asyncio.run(worker.process(worker.claim_job()))
+        finally:
+            worker.pool.shutdown()
+        result = client.get('/api/jobs/' + identity).json()
+        assert result['state'] == 'succeeded' and result['completed'] == 2
+        assert sorted(seen) == sorted([first, second]) and len(attempts) == 2
+
+
+def test_resume_failed_recognition_admits_only_never_started_files(settings, monkeypatch):
+    cfg = replace(settings, external_fingerprints=True)
+    with TestClient(create_app(cfg), base_url=cfg.app_url) as client:
+        owner = authenticated(client, cfg)
+        finished, _ = seed(cfg, 'finished.mp3')
+        unknown, _ = seed(cfg, 'unknown.mp3')
+        pending, _ = seed(cfg, 'pending.mp3')
+        identity = job(client, owner, 'recognize', [finished, unknown, pending])['id']
+        with db.transaction(cfg.db_path) as conn:
+            conn.execute("UPDATE jobs SET state='failed',stage='failed',error='internal_error',completed=1 WHERE id=?", (identity,))
+            conn.executemany('INSERT INTO job_items VALUES(?,?,?,?)', [
+                (identity, finished, 'succeeded', db.encode({'state': 'no_match'})),
+                (identity, unknown, 'running', db.encode({'checkpoint': 'provider_admitted'})),
+            ])
+        assert client.get('/api/jobs/' + identity).json()['resume_remaining']
+        response = client.post('/api/jobs/' + identity + '/resume', headers=owner)
+        assert response.status_code == 200 and response.json()['id'] == identity
+        assert response.json()['state'] == 'queued' and response.json()['failed'] == 1
+        assert client.post('/api/jobs/' + identity + '/resume', headers=owner).status_code == 409
+
+        executed = []
+
+        async def recognize(_, item):
+            executed.append(item['track_id'])
+            return {'state': 'no_match'}
+
+        worker = Worker(cfg)
+        monkeypatch.setattr(worker, 'analyze_item', recognize)
+        try:
+            asyncio.run(worker.process(worker.claim_job()))
+        finally:
+            worker.pool.shutdown()
+        detail = client.get('/api/jobs/' + identity).json()
+        by_track = {item['track_id']: item for item in detail['results']}
+        assert executed == [pending] and detail['completed'] == 2 and detail['failed'] == 1
+        assert by_track[unknown]['item_state'] == 'needs_review'
+        assert by_track[unknown]['code'] == 'interrupted_outcome_unknown'
+        assert by_track[unknown]['checkpoint'] == 'provider_admitted'
+        assert by_track[finished]['item_state'] == 'succeeded'
+        assert len(db.fetchall(cfg.db_path, 'SELECT id FROM jobs')) == 1
+
+
 async def until(predicate, seconds=5):
     async def poll():
         while not predicate():

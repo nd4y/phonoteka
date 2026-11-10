@@ -138,6 +138,7 @@ export type Job = {
   state: string;
   stage: string;
   pause_requested?: boolean;
+  resume_remaining?: boolean;
   retry_at?: number | null;
   progress: number;
   total: number;
