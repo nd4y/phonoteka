@@ -56,6 +56,8 @@ When preparing an album batch, read the additional-fields line for each file. Fo
 
 The file name and thumbnail confirm that the browser has read the shared artwork. Preview is disabled while the file is loading.
 
+For an individual track, use the artwork slot button in the image editor. The embedded slots open so you can choose whether to replace an existing image or add a front cover.
+
 To select a few files from a large album, open the individual exclusions, exclude all files, then clear the exclusion for the files you want. The counter shows how many files will be included in the preview.
 
 Use the Albums section of the detailed report to search the collection by album and artist. Refine the query if only part of the matching groups is shown. Searching leaves the files untouched.
