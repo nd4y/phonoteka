@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from phonoteka import db, inference_client, media
+from phonoteka import db, inference_client, media, publication
 from phonoteka import worker as worker_module
 from phonoteka.app import create_app
 from phonoteka.worker import Worker, sqlite_busy
@@ -182,6 +182,51 @@ def test_busy_publication_checkpoint_retries_without_copying_twice(settings, mon
             for path in paths:
                 assert media.sha256_file(path) == versions[path.name]
                 assert media.sha256_file(cfg.publication_root / 'Ready' / path.name) == versions[path.name]
+    finally:
+        worker.pool.shutdown()
+
+
+@pytest.mark.skipif(sys.platform != 'linux', reason='Durable publication requires Linux')
+def test_busy_ready_catalog_commit_retries_the_same_receipt(settings, monkeypatch):
+    short_busy_timeout(monkeypatch)
+    cfg = replace(settings, read_only=False, storage_verified=True)
+    source = synthetic(cfg)
+    sha = media.sha256_file(source)
+    ready = cfg.publication_root / 'Ready' / source.name
+    worker = Worker(cfg)
+    try:
+        with TestClient(create_app(cfg), base_url=cfg.app_url) as client:
+            owner = authenticated(client, cfg)
+            job(client, owner, 'scan')
+            asyncio.run(worker.process(worker.claim_job()))
+            track_id = client.get('/api/tracks').json()['items'][0]['id']
+            accept_publication_review(client, owner, track_id)
+            identity = job(client, owner, 'publish', [track_id])['id']
+            publish, persist = media.publish, publication.persist
+            effects, receipts = [], []
+
+            def observed_publish(*args, **kwargs):
+                result = publish(*args, **kwargs)
+                effects.append(result['operation_id'])
+                return result
+
+            def contended_persist(settings, job, item, result):
+                receipts.append(result['operation_id'])
+                assert media.sha256_file(ready) == sha
+                if len(receipts) == 1:
+                    with db.transaction(cfg.db_path):
+                        return persist(settings, job, item, result)
+                return persist(settings, job, item, result)
+
+            monkeypatch.setattr(media, 'publish', observed_publish)
+            monkeypatch.setattr(publication, 'persist', contended_persist)
+            asyncio.run(worker.process(worker.claim_job()))
+            detail = client.get('/api/jobs/' + identity).json()
+            history = db.fetchall(cfg.db_path, 'SELECT id,after_sha256 FROM history WHERE job_id=?', (identity,))
+            assert detail['state'] == 'succeeded' and detail['completed'] == 1
+            assert not worker.stopping and len(effects) == 1 and receipts == effects * 2
+            assert [(row['id'], row['after_sha256']) for row in history] == [(effects[0], sha)]
+            assert media.sha256_file(source) == media.sha256_file(ready) == sha
     finally:
         worker.pool.shutdown()
 

@@ -98,4 +98,5 @@ Collection reports and Ready snapshot responses are completed in temporary stora
 
 Sources groups candidates by song tags, releases, lyrics, and artwork. Compare changes shows the resolved result per field without saving; a separate action saves the reviewed selection as a proposal. [Choosing source data](docs/en/collection-workflow.md#choosing-source-data).
 Other requests continue while a comparison or save waits for catalog access.
+If the catalog is temporarily busy after writing a Ready file, the worker retries saving the verified publication receipt.
 Clear the checkbox for any field you want to keep as it is.

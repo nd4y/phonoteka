@@ -526,6 +526,16 @@ class Worker:
     def persist_mutation(self, job, item, result, metadata=None):
         if job['kind'] in {'publish', 'rollback_ready'}:
             from . import publication
+            # The file operation has committed. Retry only its rolled-back
+            # catalog transaction with the same receipt and revision checks.
+            for delay in (.5, 1.5):
+                try:
+                    return publication.persist(self.settings, job, item, result)
+                except sqlite3.OperationalError as exc:
+                    if not sqlite_busy(exc):
+                        raise
+                    log('worker_database_busy', logging.WARNING, operation='ready_catalog_commit', job_id=job['id'])
+                    time.sleep(delay)
             return publication.persist(self.settings, job, item, result)
         track_id = item["track_id"]
         path = self.settings.work_root / item["relative_path"]
