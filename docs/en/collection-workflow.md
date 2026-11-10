@@ -56,6 +56,8 @@ When preparing an album batch, read the additional-fields line for each file. Fo
 
 To select a few files from a large album, open the individual exclusions, exclude all files, then clear the exclusion for the files you want. The counter shows how many files will be included in the preview.
 
+Use the Albums section of the detailed report to search the collection by album and artist. Refine the query if only part of the matching groups is shown. Searching leaves the files untouched.
+
 When publishing from a track card, wait for its submission receipt. Switching tracks or changing the working revision resets the Ready panel, including the previous confirmation plan and receipt. The Processing view keeps the actual job state.
 
 Select **Compare changes** to see the actual current-file versus proposed values after source priorities, including tags supplied by a lyrics provider. Locked and omitted fields are explicit. Comparison does not modify the file, previous proposal, lyrics document, or alignment. **Save as proposal** is a separate action that replaces the previous proposal in full without writing audio. Then open Tags and artwork or Lyrics to review and write the proposal. Changed search results, priorities, locks, or draft state require another comparison before saving.

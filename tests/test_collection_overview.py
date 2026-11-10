@@ -1,5 +1,5 @@
 import json
-from phonoteka import db
+from phonoteka import db, reports
 from test_backend import settings, client, authenticated, seed
 
 
@@ -55,3 +55,23 @@ def test_empty_overview_is_known_zero_not_readiness(client, settings):
     report = client.get('/api/reports/collection').json()
     assert report['counts']['audio_files'] == report['counts']['current_proposals'] == report['counts']['published_current'] == 0
     assert 'readiness_percent' not in report
+
+
+def test_album_search_reaches_groups_beyond_the_report_limit(client, settings, monkeypatch):
+    authenticated(client, settings)
+    monkeypatch.setattr(reports, 'ALBUM_REPORT_LIMIT', 1)
+    early, _ = seed(settings, relative='a.mp3')
+    late, _ = seed(settings, relative='z.mp3')
+    with db.transaction(settings.db_path) as conn:
+        for track_id, artist, album in ((early, 'Louna', 'Белый'), (late, 'Green Day', '21st Century Breakdown')):
+            metadata = json.loads(conn.execute('SELECT metadata FROM tracks WHERE id=?', (track_id,)).fetchone()[0])
+            metadata['tags'] = {'artist': [artist], 'album': [album]}
+            conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(metadata), track_id))
+
+    default = client.get('/api/reports/collection').json()
+    assert default['album_matches'] == 2 and default['albums'][0]['ids'] == [early]
+    matching = client.get('/api/reports/collection', params={'album_q': '21st, GREEN day'}).json()
+    assert matching['album_matches'] == 1 and matching['albums'][0]['ids'] == [late]
+    assert matching['counts'] == default['counts']
+    empty = client.get('/api/reports/collection', params={'album_q': 'unknown'}).json()
+    assert empty['album_matches'] == 0 and empty['albums'] == []
