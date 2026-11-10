@@ -34,6 +34,8 @@ At the start of guided setup, select a directory inside the installed music moun
 
 Collection, Ready files, and the editor queue display an opening indicator beside the requested record. If the server is slow, you can select another row or change the filter. The latest action takes precedence.
 
+If the list takes more than 25 seconds to load, select **Retry** beside the search. This reloads the current page with its existing filters. A new search cancels the previous request.
+
 On narrow screens, each field retains its before/after pair, and write controls sit above the compact player. Back dismisses an open disclosure or the Sources tab before returning through application actions. Unsaved-change protection remains in place.
 
 The guide labels its input/output path example as illustrative, not a real rename result. This UI release does not alter available sources, formats, quality profiles, provider permissions, or the tracing architecture.
