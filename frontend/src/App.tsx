@@ -2352,7 +2352,7 @@ function TrackEditor({
     artworkReceipt,
   };
   const lyricsTouched = lyricsDraftChanged(baseline, currentDraft);
-  const changed = editorDraftChanged(baseline, currentDraft);
+  const changed = editorDraftChanged(baseline, currentDraft, activeProposal);
   const [classificationDirty, setClassificationDirty] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const lyricsEditorContainer = useRef<HTMLDivElement>(null);

@@ -13,6 +13,7 @@ If the album is known, refine its release and cover search by title in the track
 Album batch previews show which earlier proposal fields will remain alongside the selected edits. Check these fields in the track editor before writing the file.
 After selecting shared artwork, wait for its file name next to the thumbnail before previewing the batch.
 In the track editor, the artwork slot button opens the list of embedded images.
+After choosing a slot, apply the artwork preview to the draft before saving. Choosing a slot alone leaves the file unchanged.
 
 To work on a few files from a large album, exclude all files and include only the ones you need. Check the selected count before previewing.
 Search for an album or artist in the detailed report to find groups beyond the initial list.

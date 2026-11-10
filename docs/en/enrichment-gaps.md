@@ -23,6 +23,8 @@ When a source policy blocks saving manual changes, choose **Restore saved values
 
 ## Finding gaps in music
 
+When uploading a cover, select the embedded slot and apply the artwork preview to the draft. A slot selection by itself does not create a change to write.
+
 Choose **Music gaps** in the collection or select a specific field in the **Gaps in individual music recordings** group. These filters skip possible mixes, CUE sheets and album images, and entries explicitly tagged as speech, audiobooks or podcasts. Entries with no genre remain visible for review. The filter sets the list and playback order. In **Collection actions**, retrying search or recognition covers all eligible records in the selected music category, including those outside the current text search. Review the results before writing them.
 
 If a saved proposal contains artwork and lyrics, choose **Write cover only**. The lyrics draft stays available for review when the audio and native lyric slots are unchanged.

@@ -19,12 +19,13 @@ def proposal_state(meta, revision, proposal):
     if not proposal: return 'none'
     if proposal['input_sha256'] != revision: return 'stale'
     p = proposal['data']
-    # Artwork and explicit slot changes need inspection; never infer equal bytes
-    # from has_art, or load base64 artwork into the polling read model.
-    if p.get('cover_present') or p.get('slot_selection'): return 'pending'
+    # Artwork needs inspection without loading its base64 bytes into this read model.
+    # A selected slot alone does not write anything to the audio file.
+    if p.get('cover_present'): return 'pending'
     if any(field_policy.normalized_value(k, v) != field_policy.normalized_value(k, meta.get('tags', {}).get(k))
            for k, v in p.get('tags', {}).items()): return 'pending'
-    if 'lrc' in p and p['lrc'] is not None and p['lrc'] != (meta.get('lrc') or meta.get('lyrics') or ''):
+    if p.get('lrc') is not None and (p['lrc'] != (meta.get('lrc') or meta.get('lyrics') or '')
+                                     or (p.get('slot_selection') or {}).get('lyrics_slot_id')):
         return 'pending'
     return 'no_changes'
 

@@ -83,6 +83,8 @@ def payload_values(payload):
 
 def validate_payload(settings, conn, row, payload, mode='manual'):
     """Filter candidates, reject attempted writes; old proposals cannot bypass locks."""
+    if mode == 'apply' and not (payload.get('tags') or payload.get('cover') or payload.get('lrc') is not None):
+        raise media.MediaError('proposal_empty', 'В предложении нет тегов, обложки или текста для записи')
     result = copy.deepcopy(payload)
     policy = load(conn, row['id'])
     stale = stale_fields(settings, row, policy)
