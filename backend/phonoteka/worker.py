@@ -25,20 +25,13 @@ from . import work_folders, db, media, cue, cue_export, inference_client, intake
 from .providers import Providers, ProviderError
 from .enrichment_gaps import can_search_album, matches_music_gap
 from .config import Settings
+from .db import sqlite_busy
 from .telemetry import Metrics, configure_logging, context, log, opaque_id, bounded, KINDS, worker_server
 
 LOG = logging.getLogger("phonoteka.worker")
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".aiff", ".ape", ".wv", ".wma", ".webm", ".cue", ".m4b", ".oga", ".aif", ".mp4", ".mka", ".mkv", ".dsf", ".dff", ".ac3", ".wave", ".bin"}
 EXCLUDED_DIRS = work_folders.EXCLUDED
 DB_BUSY_RETRY_SECONDS = .5
-
-
-def sqlite_busy(exc):
-    """Extended BUSY/LOCKED codes are contention; other DB errors are fatal."""
-    code = getattr(exc, "sqlite_errorcode", None)
-    return isinstance(exc, sqlite3.OperationalError) and isinstance(code, int) and (
-        code & 0xff
-    ) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
 
 
 @contextmanager
@@ -1250,9 +1243,13 @@ class Worker:
                 directory = self.settings.state_dir / "backups" / item["track_id"] / job["id"]
                 for journal in directory.glob("*.json") if directory.exists() else []:
                     try:
-                        known = db.fetchone(self.settings.db_path, "SELECT id FROM history WHERE id=?", (journal.stem,))
+                        known = db.fetchone(self.settings.db_path,
+                            'SELECT id,after_sha256 FROM history WHERE id=? AND track_id=? AND job_id=? AND kind=?',
+                            (journal.stem,item['track_id'],job['id'],job['kind']))
                         if known:
-                            self.item_result(job["id"], item["track_id"], "succeeded", {"recovered": True, "history_id": known["id"]})
+                            self.item_result(job['id'], item['track_id'], 'succeeded', {
+                                'recovered':True, 'history_id':known['id'], 'operation_id':known['id'],
+                                'sha256':known['after_sha256']})
                             continue
                         restored = media.recover(journal, self.settings.roots)
                         if restored.get("state") == "committed":
@@ -1264,7 +1261,8 @@ class Worker:
                             if isinstance(audio, str) and media._SHA.fullmatch(audio):
                                 result['audio_identity'] = audio
                             self.persist_mutation(job, item, result)
-                            self.item_result(job["id"], item["track_id"], "succeeded", {"recovered": True, "sha256": result["sha256"]})
+                            self.item_result(job['id'], item['track_id'], 'succeeded', {
+                                'recovered':True, 'operation_id':result['operation_id'], 'sha256':result['sha256']})
                     except Exception as exc:
                         self.item_result(job["id"], item["track_id"], "conflict", self.failure(exc))
             totals = db.fetchone(self.settings.db_path, "SELECT total,completed FROM jobs WHERE id=?", (job["id"],))

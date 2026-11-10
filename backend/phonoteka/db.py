@@ -21,6 +21,14 @@ def encode(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+def sqlite_busy(exc):
+    """Extended BUSY/LOCKED codes are contention; other DB errors are fatal."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    return isinstance(exc, sqlite3.OperationalError) and isinstance(code, int) and (
+        code & 0xff
+    ) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+
+
 class ClosingConnection(sqlite3.Connection):
     def __exit__(self, exc_type, exc_value, traceback):
         try:

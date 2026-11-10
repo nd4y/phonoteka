@@ -8,15 +8,16 @@ import sys
 import threading
 import wave
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
-from phonoteka import db
+from phonoteka import db, inference_client
 from phonoteka import worker as worker_module
 from phonoteka.app import create_app
 from phonoteka.worker import Worker, sqlite_busy
-from test_backend import settings, authenticated, job
+from test_backend import settings, authenticated, job, seed
 
 
 def short_busy_timeout(monkeypatch):
@@ -30,6 +31,69 @@ def short_busy_timeout(monkeypatch):
         return connection
 
     monkeypatch.setattr(db, 'configure_connection', configured)
+
+
+def test_completed_asr_retries_local_save_without_resubmission(settings, monkeypatch):
+    short_busy_timeout(monkeypatch)
+    secret = settings.state_dir / 'generated-asr-key'
+    secret.parent.mkdir(exist_ok=True)
+    secret.write_text('generated-test-only')
+    cfg = replace(settings, inference_url='http://generated-inference', inference_secret_file=secret)
+    with TestClient(create_app(cfg), base_url=cfg.app_url) as client:
+        owner = authenticated(client, cfg)
+        track_id, sha = seed(cfg)
+        identity = job(client, owner, 'transcribe', [track_id])['id']
+        submissions, saves = [], []
+
+        class Remote:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): pass
+
+            async def get(self, path):
+                result = {'model':'test','model_revision':'r1','profile_revision':'p1','contract':'transcribe-v3'}
+                if path != '/health':
+                    result = {'state':'succeeded','result':{'input_sha256':sha,'words':[],'language':'ru'}}
+                return SimpleNamespace(json=lambda: result, raise_for_status=lambda: None)
+
+            async def post(self, path, json):
+                request = [json, 'test', 'r1', 'p1', 'transcribe-v3']
+                remote_id = hashlib.sha256(dumps(request, sort_keys=True).encode()).hexdigest()
+                submissions.append(remote_id)
+                return SimpleNamespace(json=lambda: {'id': remote_id}, raise_for_status=lambda: None)
+
+        dumps = json.dumps
+        store_result = inference_client.store_result
+
+        def contended_store(*args):
+            saves.append(args[-1])
+            if len(saves) == 1:
+                with db.transaction(cfg.db_path):
+                    return store_result(*args)
+            return store_result(*args)
+
+        monkeypatch.setattr(inference_client.httpx, 'AsyncClient', lambda **_: Remote())
+        monkeypatch.setattr(inference_client, 'store_result', contended_store)
+        worker = Worker(cfg)
+        try:
+            asyncio.run(worker.process(worker.claim_job()))
+        finally:
+            worker.pool.shutdown()
+        assert len(submissions) == 1 and saves == submissions * 2
+        assert client.get('/api/jobs/' + identity).json()['state'] == 'succeeded'
+        analysis = db.fetchone(cfg.db_path, 'SELECT payload FROM analyses WHERE track_id=?', (track_id,))
+        assert json.loads(analysis['payload'])['asr']['remote_job_id'] == submissions[0]
+        assert len(db.fetchall(cfg.db_path, "SELECT 1 FROM events WHERE kind='analysis_completed'")) == 1
+
+
+def test_busy_catalog_returns_retryable_response_without_enqueuing(settings, monkeypatch):
+    short_busy_timeout(monkeypatch)
+    with TestClient(create_app(settings), base_url=settings.app_url) as client:
+        owner = authenticated(client, settings)
+        with db.transaction(settings.db_path):
+            response = client.post('/api/jobs', headers={**owner, 'Idempotency-Key': 'busy-scan'}, json={'kind': 'scan'})
+        assert response.status_code == 503 and response.headers['Retry-After'] == '2'
+        assert response.json()['code'] == 'catalog_busy' and response.json()['retryable']
+        assert not db.fetchall(settings.db_path, 'SELECT id FROM jobs')
 
 
 async def until(predicate, seconds=5):
