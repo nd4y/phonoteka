@@ -492,6 +492,32 @@ class Worker:
         LOG.exception('Unexpected file operation failure',extra={'event':'file_operation_failed'})
         return {"code": "internal_error", "message": "Ошибка обработки файла", "retryable": False}
 
+    def retain_lyrics_draft(self, conn, current, old, metadata, item, result):
+        if current['sha256'] != item['sha256'] or not result.get('audio_identity'):
+            return None
+        if any((old.get(key) or '') != (metadata.get(key) or '') for key in ('lrc', 'lyrics')):
+            return None
+        latest = conn.execute('SELECT id,payload FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1',
+                              (current['id'],)).fetchone()
+        if not latest or latest['id'] != item['proposal_id']:
+            return None
+        _, pending = field_policy.cover_lyrics_draft_parts(json.loads(latest['payload']))
+        if any(not provider_policy._allowed(conn, usage, 'cache') for usage in provider_policy.references(pending)):
+            return None
+        if selection := pending.get('slot_selection'):
+            inventory = metadata.get('slot_inventory', {})
+            slot = selection['lyrics_slot_id']
+            if inventory.get('truncated') or not inventory.get('inventory_sha256'):
+                return None
+            if slot != 'new' and not any(entry['id'] == slot and entry['kind'] == 'lyrics' and entry.get('editable')
+                                         for entry in inventory.get('slots', [])):
+                return None
+            selection['inventory_sha256'] = inventory['inventory_sha256']
+        identity = str(uuid.uuid4())
+        conn.execute('INSERT INTO proposals VALUES(?,?,?,?,?)',
+                     (identity, current['id'], metadata['sha256'], db.encode(pending), db.utcnow()))
+        return identity
+
     def persist_mutation(self, job, item, result, metadata=None):
         if job['kind'] in {'publish', 'rollback_ready'}:
             from . import publication
@@ -537,6 +563,11 @@ class Worker:
             status = recording_review.catalog_status("accepted" if job["kind"] == "apply" else "indexed",metadata['possible_mix'])
             from . import lyrics_document
             lyrics_document.committed(conn, current, metadata, item.get('proposal', {}) if job['kind'] == 'apply' else {})
+            if item.get('cover_only'):
+                retained = self.retain_lyrics_draft(conn, current, old, metadata, item, result)
+                result['retained_lyrics_proposal_id'] = retained
+                if retained:
+                    status = recording_review.catalog_status('needs_review', metadata['possible_mix'])
             conn.execute("UPDATE tracks SET sha256=?,metadata=?,status=?,updated_at=? WHERE id=?", (metadata["sha256"],db.encode(metadata),status,db.utcnow(),track_id))
             effect_id = result.get("operation_id", str(uuid.uuid4()))
             conn.execute("INSERT OR IGNORE INTO history VALUES(?,?,?,?,?,?,?,?)", (effect_id,track_id,job["id"],job["kind"],result.get("before_sha256"),result.get("after_sha256"),db.encode(result),db.utcnow()))
@@ -665,6 +696,11 @@ class Worker:
                 from . import album_gain_policy
                 automatic_quality.assert_frozen(self.settings, current, item, job)
                 with db.connect(self.settings.db_path) as connection:
+                    if item.get('cover_only'):
+                        draft = connection.execute('SELECT id FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1',
+                                                   (item['track_id'],)).fetchone()
+                        if not draft or draft['id'] != item['proposal_id']:
+                            raise media.MediaError('conflict', 'Сохранённый черновик изменился до записи')
                     field_policy.assert_apply(self.settings,current,item['proposal'],conn=connection)
                     provider_policy.require_payload(connection,current,item['proposal'],'embed')
                     album_gain_policy.payload(self.settings,connection,current,item['proposal'],verify_files=True)
@@ -1224,6 +1260,9 @@ class Worker:
                                       "after_sha256": restored["after_sha256"], "sha256": restored["after_sha256"],
                                       "backup_path": restored.get("backup"), "journal_path": str(journal), "state": "committed", "recovered": True}
                             if 'metadata_slot_targets' in restored: result['metadata_slot_targets'] = restored['metadata_slot_targets']
+                            audio = restored.get('audio_identity')
+                            if isinstance(audio, str) and media._SHA.fullmatch(audio):
+                                result['audio_identity'] = audio
                             self.persist_mutation(job, item, result)
                             self.item_result(job["id"], item["track_id"], "succeeded", {"recovered": True, "sha256": result["sha256"]})
                     except Exception as exc:

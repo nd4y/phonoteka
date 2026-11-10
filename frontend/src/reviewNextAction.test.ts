@@ -37,6 +37,19 @@ describe("review next step", () => {
       "lyrics",
     );
   });
+  it("offers to write saved tags or artwork while the existing lyrics still need work", () => {
+    const draft = {
+      changed: false,
+      savedProposal: true,
+      savedMetadataOnly: true,
+      invalidLyrics: true,
+      preparation: true,
+    };
+    expect(reviewNextAction(draft)).toBe("write");
+    expect(reviewNextAction({ ...draft, possibleMix: true })).toBe("recording");
+    expect(reviewNextAction({ ...draft, fileProblem: true })).toBe("file");
+    expect(reviewNextAction({ ...draft, changed: true })).toBe("save");
+  });
   it("offers a write only for a saved, unchanged valid proposal", () => {
     expect(reviewNextAction({ changed: false, savedProposal: true, invalidLyrics: false })).toBe(
       "write",

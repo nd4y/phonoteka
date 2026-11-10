@@ -643,8 +643,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     raise security.error(409, 'idempotency_conflict', 'Этот ключ уже использован для другого запроса')
                 existing = dict(conn.execute('SELECT * FROM jobs WHERE id=?', (previous['job_id'],)).fetchone())
                 return public_job(settings, existing)
-        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout", "review_tokens", "release_search"}:
+        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout", "review_tokens", "release_search", "cover_only"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
+        if 'cover_only' in body.params and (
+                body.params['cover_only'] is not True or body.kind != 'apply' or len(body.track_ids) != 1
+                or not isinstance(body.params.get('proposal_id'), str) or not body.params['proposal_id']
+                or body.params.get('acceptance_mode', 'manual') != 'manual'):
+            raise security.error(422, 'invalid_cover_only', 'Выберите один сохранённый черновик для записи обложки')
         if 'review_tokens' in body.params:
             tokens = body.params['review_tokens']
             if (body.kind not in {'recognize', 'align'} or set(body.params) != {'review_tokens'}
@@ -873,6 +878,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         raise security.error(409, "proposal_stale", "Создайте актуальное предложение", file_id=track_id)
                     item["proposal_id"] = prop["id"]
                     item["proposal"] = json.loads(prop["payload"])
+                    if body.params.get('cover_only'):
+                        latest = conn.execute('SELECT id FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1',
+                                              (track_id,)).fetchone()
+                        if not latest or latest['id'] != prop['id']:
+                            raise security.error(409, 'proposal_stale', 'Обновите сохранённый черновик')
+                        try:
+                            item['proposal'], _ = field_policy.cover_lyrics_draft_parts(item['proposal'])
+                        except media.MediaError as exc:
+                            raise security.error(409, exc.code, exc.message) from exc
+                        item['cover_only'] = True
                     field_policy.require_payload(settings, conn, track, item['proposal'], 'apply')
                     item['proposal']=provider_policy.api_payload(conn,track,item['proposal'],'embed')
                     try:

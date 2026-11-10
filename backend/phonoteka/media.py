@@ -835,7 +835,8 @@ def _journal(path: Path, document: dict[str, Any]) -> None:
 
 def _transaction(target: Path, staged: Path, *, before: str | None, backup_dir: Path,
                  roots: Mapping[str, Any], authorize: Callable[[], None] | None = None,
-                 source_backup: Path | None = None, action: str = "apply", metadata_slot_targets=None) -> dict[str, Any]:
+                 source_backup: Path | None = None, action: str = "apply", metadata_slot_targets=None,
+                 verified_audio_identity: str | None = None) -> dict[str, Any]:
     operation_id = uuid.uuid4().hex
     if any(_within(backup_dir, _absolute(value)) or _within(_absolute(value), backup_dir)
            for key, value in roots.items() if key in {"source", "work", "publication"} and value):
@@ -858,6 +859,8 @@ def _transaction(target: Path, staged: Path, *, before: str | None, backup_dir: 
         if set(metadata_slot_targets) - {'lyrics', 'cover'} or any(not isinstance(value, str) or len(value) > 2048 for value in metadata_slot_targets.values()):
             raise MediaError('invalid_slot_selection', 'Invalid durable native slot identity')
         document['metadata_slot_targets'] = metadata_slot_targets
+    if verified_audio_identity is not None:
+        document['audio_identity'] = verified_audio_identity
     _journal(journal_path, document)
     try:
         _validate(target, roots, write=True, missing=before is None)
@@ -971,7 +974,8 @@ def _apply_changes_impl(path: str | Path, tags: Mapping[str, Any], lrc: str | No
         _process(staged, "ffmpeg", ["-nostdin", "-xerror", "-map", "0:a:0", "-f", "null", "-"], timeout=1800)
     _preserve_access(path, staged)
     result = _transaction(path, staged, before=expected_sha256, backup_dir=_absolute(backup_dir), roots=roots, authorize=authorize,
-                          metadata_slot_targets={kind: slot['native_identity'] for kind, slot in preservation_targets.items()})
+                          metadata_slot_targets={kind: slot['native_identity'] for kind, slot in preservation_targets.items()},
+                          verified_audio_identity=before_audio)
     result["audio_identity"] = before_audio
     return result
 

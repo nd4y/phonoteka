@@ -25,6 +25,8 @@ When a source policy blocks saving manual changes, choose **Restore saved values
 
 Choose **Music gaps** in the collection or select a specific field in the **Gaps in individual music recordings** group. These filters skip possible mixes, CUE sheets and album images, and entries explicitly tagged as speech, audiobooks or podcasts. Entries with no genre remain visible for review. The filter sets the list and playback order. In **Collection actions**, retrying search or recognition covers all eligible records in the selected music category, including those outside the current text search. Review the results before writing them.
 
+If a saved proposal contains artwork and lyrics, choose **Write cover only**. The lyrics draft stays available for review when the audio and native lyric slots are unchanged.
+
 The detailed report has separate entry points for core tags, artwork and timed lyrics. They open gaps in individual recordings. The cards count the entire audio catalog, so the number of results after opening a filter can differ.
 The artwork and timed-lyrics filters show the reason for that field in each row. The track editor still lists the other gaps.
 
