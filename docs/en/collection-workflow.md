@@ -10,6 +10,10 @@ Only accepted, current Ready revisions enter the snapshot. LRC files stay beside
 
 ## Review and delivery
 
+When a search, filter or page changes, the previous results remain visible while the next list loads. Wait until the rows are enabled before opening a file. The draft confirmation includes the file path, which distinguishes recordings with the same title and artist.
+
+After confirming the Ready plan, the panel shows the state of that publication and the saved file count. Wait for the final count before opening the next record. If only some files were saved, check the reasons in **Processing** and use the updated plan for the remaining revisions.
+
 Preparation and the pending-files search include expired provider matches whose content is no longer available. A historical successful search does not make those files ready for review. Current usable results and completed searches without matches are reused. Provider permissions still apply to each new request.
 
 The four main sections are **Overview**, **Collection**, **Processing**, and **Ready files**. Settings are in the left menu above the account button. Help opens guided setup. Previously saved navigation, filters, and scroll positions remain available after refresh.

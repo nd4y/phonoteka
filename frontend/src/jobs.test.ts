@@ -37,9 +37,9 @@ describe("job progress presentation", () => {
       tone: "success",
       text: "В Ready сохранено 2 из 2.",
     });
-    expect(
-      readyPublicationStatus({ ...publish, state: "succeeded", completed: 1 }),
-    ).toMatchObject({ tone: "error" });
+    expect(readyPublicationStatus({ ...publish, state: "succeeded", completed: 1 })).toMatchObject({
+      tone: "error",
+    });
     expect(
       readyPublicationStatus({ ...publish, state: "cancelled_partial", completed: 1 }),
     ).toMatchObject({ tone: "warning" });

@@ -374,7 +374,8 @@ export default function App() {
   const retryScope = Object.hasOwn(musicGapFilters, filter) ? filter : "pending";
   const [pageNumber, setPageNumber] = useState(initialView.pageNumber);
   const trackRequest = `/tracks?search=${encodeURIComponent(query)}&page=${pageNumber}&page_size=30&filter=${encodeURIComponent(filter)}`;
-  const resultsUpdating = search !== query || (trackPage !== null && trackPage.key !== trackRequest);
+  const resultsUpdating =
+    search !== query || (trackPage !== null && trackPage.key !== trackRequest);
   const [selected, setSelected] = useState<Track | null>(null);
   const [selectedId, setSelectedId] = useState(initialView.selectedId);
   const [dirty, setDirty] = useState(false);
@@ -1044,7 +1045,8 @@ export default function App() {
     }
   }
   async function advanceReview(track: Track, apply = false, coverOnly = false) {
-    if (reviewLock.current || busy || loading || resultsUpdating || !tracks || !clearDirty()) return;
+    if (reviewLock.current || busy || loading || resultsUpdating || !tracks || !clearDirty())
+      return;
     reviewLock.current = true;
     setReviewMoving(true);
     setError("");

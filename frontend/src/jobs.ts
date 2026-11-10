@@ -139,7 +139,8 @@ export function readyPublicationStatus(job: Job): {
       text: `В Ready сохранено ${job.completed} из ${job.total}.`,
     };
   const tone = jobTone(job);
-  const waiting = isActiveJob(job) && ["waiting_storage", "waiting_authorization"].includes(job.stage);
+  const waiting =
+    isActiveJob(job) && ["waiting_storage", "waiting_authorization"].includes(job.stage);
   const state = (jobStates[waiting ? job.stage : job.state] ?? "Результат не подтверждён") + ".";
   if (isActiveJob(job))
     return {
