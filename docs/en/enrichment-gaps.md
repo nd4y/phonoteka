@@ -6,6 +6,8 @@ Changes to the query, filter or page use the same list refresh as completed proc
 If you start search, recognition or alignment from a track card, its results appear there when the job finishes. The refresh applies to the open revision and waits while you select sources or have unsaved edits. The scroll position and playback are preserved. The Sources tab still offers a manual results refresh.
 If a file write takes longer, keep the card open. When the job finishes, the card shows the new revision and the action to review it before publication.
 
+In the Lyrics tab, the line review warning appears when the file revision or lyric version changes. For example, embedding a cover creates a new file revision even when the audio and timings stay the same. To confirm timing for the new revision, open line review and compare each line with the vocals.
+
 The catalog shows a brief reason below the track name. Open the track to see “What remains to fill”: a separate explanation for each missing title, artist, album, cover and synchronized lyric field. Each row includes a next step, provider and analysis update time when known. This timestamp is not the time of each individual provider request.
 
 The page indicator shows a loading state and disables pagination until the requested page arrives.
