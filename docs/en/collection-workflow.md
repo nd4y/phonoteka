@@ -14,6 +14,8 @@ When a search, filter or page changes, the previous results remain visible while
 
 After confirming the Ready plan, the panel shows the state of that publication and the saved file count. Wait for the final count before opening the next record. If only some files were saved, check the reasons in **Processing** and use the updated plan for the remaining revisions.
 
+Use the accepted revisions waiting for publication filter to batch the files still awaiting separate delivery. A retained source without a Ready revision stays in the full plan. The waiting filter drops it only when every derivative from the current source revision has a current Ready publication. A damaged source may still require replacement with a complete recording.
+
 Preparation and the pending-files search include expired provider matches whose content is no longer available. A historical successful search does not make those files ready for review. Current usable results and completed searches without matches are reused. Provider permissions still apply to each new request.
 
 The four main sections are **Overview**, **Collection**, **Processing**, and **Ready files**. Settings are in the left menu above the account button. Help opens guided setup. Previously saved navigation, filters, and scroll positions remain available after refresh.
@@ -71,6 +73,8 @@ In Album and edition, compare the date, country and short ID. The full identifie
 When publishing from a track card, wait for its submission receipt. Switching tracks or changing the working revision resets the Ready panel, including the previous confirmation plan and receipt. The Processing view keeps the actual job state.
 
 Select **Compare changes** to see the actual current-file versus proposed values after source priorities, including tags supplied by a lyrics provider. Locked and omitted fields are explicit. Comparison does not modify the file, previous proposal, lyrics document, or alignment. **Save as proposal** is a separate action that replaces the previous proposal in full without writing audio. Then open Tags and artwork or Lyrics to review and write the proposal. Changed search results, priorities, locks, or draft state require another comparison before saving.
+
+If LRCLIB places a single empty end marker up to one second past the audio, the comparison shows that it was removed. Timed words stay in the draft with their original timestamps. A timed line with words outside the audio still needs a different version or manual correction.
 
 Detailed fields and usage terms expand on demand. Embed/export restrictions remain visible and server provenance and permission checks remain enforced. `POST /api/tracks/{id}/analysis/preview` accepts the same `candidate_ids` and `If-Match` as selection. The UI submits its returned `preview_revision` when saving. Existing API clients can still create proposals directly. App Back first closes the comparison and returns to the retained choices.
 
