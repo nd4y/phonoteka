@@ -84,7 +84,7 @@ def test_unrelated_or_superseded_failure_does_not_override_current_analysis(clie
             conn.execute('UPDATE analyses SET updated_at=? WHERE track_id=?',
                          ('2090-01-03T00:00:00+00:00', identity))
     values = gaps(client, identity)
-    assert values['cover']['code'] == 'cover_not_searched'
+    assert values['cover']['code'] == 'cover_album_unconfirmed'
     assert values['synced_lyrics']['code'] == 'no_result_for_query'
 
 
@@ -108,7 +108,7 @@ def test_reasons_are_current_and_field_specific(client, settings):
     assert gaps(client, identity)['cover']['code'] == 'not_searched'
     analysis(settings, identity, sha, {'sources': [{'provider':'lrclib','state':'no_match'}]})
     current = gaps(client, identity)
-    assert current['cover']['code'] == 'cover_not_searched'
+    assert current['cover']['code'] == 'cover_album_unconfirmed'
     assert current['synced_lyrics']['code'] == 'no_result_for_query'
     assert 'невозможно' not in current['synced_lyrics']['message']
     analysis(settings, identity, 'b'*64, {'sources': [{'provider':'lrclib','state':'no_match'}]})
@@ -134,7 +134,41 @@ def test_retry_does_not_claim_not_found_or_pollute_other_fields(client, settings
     values = gaps(client, identity)
     assert values['synced_lyrics']['code'] == 'provider_retry'
     assert values['synced_lyrics']['provider'] == 'lrclib'
-    assert values['cover']['code'] == 'cover_not_searched'
+    assert values['cover']['code'] == 'cover_album_unconfirmed'
+
+
+@pytest.mark.parametrize('case,code,action', [
+    ('missing_artist', 'cover_recording_unconfirmed', 'sources'),
+    ('known_album', 'cover_edition_unconfirmed', 'sources'),
+    ('ambiguous_release', 'cover_edition_unconfirmed', 'sources'),
+    ('different_album', 'cover_edition_unconfirmed', 'sources'),
+    ('single_release', 'cover_not_searched', 'search'),
+    ('pinned_release', 'cover_not_searched', 'search'),
+])
+def test_artwork_explains_the_missing_recording_or_edition(client, settings, case, code, action):
+    authenticated(client, settings)
+    identity, sha = seed(settings)
+    release = '00000000-0000-0000-0000-000000000001'
+    with db.transaction(settings.db_path) as conn:
+        row = conn.execute('SELECT metadata FROM tracks WHERE id=?', (identity,)).fetchone()
+        meta = json.loads(row['metadata'])
+        meta['tags']['album'] = 'Альбом'
+        if case == 'missing_artist':
+            del meta['tags']['artist']
+        if case == 'pinned_release':
+            meta['tags']['musicbrainz_albumid'] = release
+        conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), identity))
+    candidates = []
+    if case in {'single_release', 'different_album', 'ambiguous_release'}:
+        releases = [{'id': release, 'title': 'Другое издание' if case == 'different_album' else 'альбом'}]
+        if case == 'ambiguous_release':
+            releases.append({'id': '00000000-0000-0000-0000-000000000002', 'title': 'Альбом'})
+        candidates = album_candidates([{'releases': releases}], '')
+    analysis(settings, identity, sha, {'sources': [{'provider':'musicbrainz','state':'candidates'}],
+                                       'candidates': candidates})
+    cover = gaps(client, identity)['cover']
+    assert (cover['code'], cover['action']) == (code, action)
+    assert cover['message'] and cover['next_step']
 
 
 def test_instrumental_claim_never_means_lyrics_not_applicable(client, settings):

@@ -7,7 +7,7 @@ The page indicator shows a loading state and disables pagination until the reque
 In Sources, open the album search refinement when the track title, artist and album are known and the file lacks an album or cover. The search finds MusicBrainz releases with the given album title and their covers. Earlier lyric results remain available. Review the edition and select the fields before writing.
 
 - An unattempted or stale search offers a search against the current file revision.
-- An unattempted separate cover search does not mean artwork is unavailable online. Check the album and release candidates first.
+- Artwork gaps explain whether the title or artist, album, or exact release is still needed. When a suitable release is known, the catalog shows whether its artwork has been requested.
 - Candidates require review; a saved proposal still needs writing to the file. A draft for one field does not explain other missing fields.
 - Temporary provider errors or throttling mean the search is incomplete. Retries respect provider cooldowns; IP rotation and quota resets are not used.
 - If a new search or recognition attempt for the current file fails, the track shows that failure instead of an earlier gap explanation. Previous analysis and saved proposals remain available. The timestamp is the job update time, not an individual request time; processing contains error details. A successfully refreshed analysis supersedes the old failure explanation. Recognition is never retried automatically and its attempt allowance is not reset.

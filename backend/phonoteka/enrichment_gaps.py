@@ -4,9 +4,10 @@ Catalog pages project candidate flags in SQLite. Cover bytes, lyrics and ASR
 transcripts must not be copied into this read model or accumulated for a page.
 """
 import json
+import re
 
 from . import acoustid, media, provider_attempts, provider_policy, recording_review
-from .providers import scalar
+from .providers import normalized, scalar
 
 
 FIELDS = ('title', 'artist', 'album', 'cover', 'synced_lyrics')
@@ -25,6 +26,7 @@ RETRY_STATES = {
     'timeout', 'network_error', 'deadline_exceeded', 'partial',
 }
 CONFIG_STATES = {'key_required', 'provider_unauthorized', 'disabled', 'provider_disabled'}
+RELEASE_ID = re.compile(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}')
 
 
 def project(conn, ids):
@@ -43,6 +45,8 @@ def project(conn, ids):
             'artist',COALESCE(length(json_extract(c.value,'$.tags.artist'))>0,0),
             'album',COALESCE(length(json_extract(c.value,'$.tags.album'))>0,0),
             'releases',COALESCE(json_array_length(c.value,'$.releases'),0),
+            'release_id',CASE WHEN json_extract(c.value,'$.kind')='release' THEN json_extract(c.value,'$.release_id') END,
+            'release_album',CASE WHEN json_extract(c.value,'$.kind')='release' THEN json_extract(c.value,'$.tags.album') END,
             'cover',COALESCE(length(json_extract(c.value,'$.cover'))>0,0),
             'synced_lyrics',COALESCE(length(json_extract(c.value,'$.lrc'))>0,0),
             'plain',COALESCE(length(json_extract(c.value,'$.plain_lyrics'))>0,0),
@@ -231,7 +235,24 @@ def describe(conn, settings, row, *, analysis=None, proposal=None, connection=No
             if sources.get('musicbrainz') in RETRY_STATES:
                 add('provider_retry', 'Поиск обложки не начат: не завершён поиск издания.', 'search', 'Повторите поиск метаданных после окончания паузы источника.', 'musicbrainz')
                 continue
-            add('cover_not_searched', 'Отдельный поиск обложки ещё не выполнялся.', 'sources', 'Проверьте альбом и варианты изданий, затем повторите поиск.', 'coverartarchive')
+            tags = meta.get('tags', {})
+            album = normalized(scalar(tags, 'album'))
+            if not all(scalar(tags, key).strip() for key in ('title', 'artist')):
+                add('cover_recording_unconfirmed', 'Для поиска обложки нужны название и исполнитель.',
+                    'sources', 'Распознайте запись или заполните эти теги вручную.')
+            elif not album:
+                add('cover_album_unconfirmed', 'В файле не указан альбом или сингл.',
+                    'sources', 'Выберите альбом в найденных вариантах, затем найдите его обложку.')
+            else:
+                releases = {c['release_id'] for c in candidates if c.get('kind') == 'release'
+                            and not c.get('transient') and RELEASE_ID.fullmatch(str(c.get('release_id') or ''))
+                            and normalized(c.get('release_album') or '') == album}
+                if RELEASE_ID.fullmatch(scalar(tags, 'musicbrainz_albumid')) or len(releases) == 1:
+                    add('cover_not_searched', 'Для найденного издания обложку ещё не запрашивали.',
+                        'search', 'Повторите поиск и проверьте найденное изображение.', 'coverartarchive')
+                else:
+                    add('cover_edition_unconfirmed', 'Точное издание этого альбома ещё не определено.',
+                        'sources', 'Уточните поиск по альбому и сравните год, регион и состав треков.', 'musicbrainz')
             continue
         restricted = next((p for p in providers if sources.get(p) == 'provider_policy_denied'), None)
         if restricted:
