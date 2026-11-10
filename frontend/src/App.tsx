@@ -433,7 +433,7 @@ export default function App() {
     }
   }
   const pendingReviewWrites = useRef(
-    new Map<string, { job: Job; nextId: string | null; nextPage: number }>(),
+    new Map<string, { job: Job; nextId: string | null; nextPage: number; coverOnly: boolean }>(),
   );
   const [reviewMoving, setReviewMoving] = useState(false);
   const reviewLock = useRef(false);
@@ -1043,7 +1043,7 @@ export default function App() {
       setPlayerNavigating(false);
     }
   }
-  async function advanceReview(track: Track, apply = false) {
+  async function advanceReview(track: Track, apply = false, coverOnly = false) {
     if (reviewLock.current || busy || loading || !tracks || !clearDirty()) return;
     reviewLock.current = true;
     setReviewMoving(true);
@@ -1073,14 +1073,21 @@ export default function App() {
       if (apply) {
         const key = `${track.id}:${track.proposal?.id}`;
         const pending = pendingReviewWrites.current.get(key);
+        if (pending && pending.coverOnly !== coverOnly) {
+          setNotice("Эта версия уже записывается. Проверьте результат первоначального действия.");
+          return;
+        }
         const job =
           pending?.job ||
-          (await submitJob("apply", [track.id], { proposal_id: track.proposal?.id }));
+          (await submitJob("apply", [track.id], {
+            proposal_id: track.proposal?.id,
+            ...(coverOnly ? { cover_only: true } : {}),
+          }));
         if (!job) return;
         if (pending) {
           nextId = pending.nextId;
           nextPage = pending.nextPage;
-        } else pendingReviewWrites.current.set(key, { job, nextId, nextPage });
+        } else pendingReviewWrites.current.set(key, { job, nextId, nextPage, coverOnly });
         setNotice("");
         const result = await awaitReviewWrite(
           job,
@@ -1090,7 +1097,9 @@ export default function App() {
         if (result === "abandoned") return;
         if (result === "pending") {
           setNotice(
-            "Запись еще не завершена. Проверьте задачу в обработке или нажмите «Записать и дальше», чтобы проверить ее результат. Повторная задача не создается.",
+            coverOnly
+              ? "Запись обложки выполняется. Проверьте задачу в обработке или повторно откройте результат той же кнопкой."
+              : "Запись еще не завершена. Проверьте задачу в обработке или нажмите «Записать и дальше», чтобы проверить ее результат. Повторная задача не создается.",
           );
           return;
         }
@@ -1104,6 +1113,19 @@ export default function App() {
         }
         appliedKey = key;
         setWrittenTrack({ id: track.id, name: track.relative_path });
+        if (coverOnly) {
+          const fresh = await api<Track>(`/tracks/${encodeURIComponent(track.id)}`);
+          if (!authenticated.current || generation !== detailSequence.current) return;
+          setSelected(fresh);
+          pendingReviewWrites.current.delete(key);
+          setNotice(
+            fresh.proposal?.input_sha256 === fresh.sha256 && fresh.proposal.lrc
+              ? "Обложка записана. Черновик текста сохранён для отдельной проверки."
+              : "Обложка записана. Предыдущий черновик относится к прежней версии файла.",
+          );
+          void loadTracks();
+          return;
+        }
         if (nextId && nextPage !== pageNumber) {
           // Applying the last item of a filtered page can move the next item
           // onto that page. Keep the editor and the visible queue together.
@@ -1772,6 +1794,7 @@ export default function App() {
                           onPlay={() => selectPlayback(selected, true)}
                           onSkip={() => void advanceReview(selected)}
                           onApplyNext={() => advanceReview(selected, true)}
+                          onApplyCover={() => advanceReview(selected, true, true)}
                           moving={reviewMoving}
                           editingBlocked={policyDirty || reviewDirty}
                           audioRef={audioRef}
@@ -2252,6 +2275,7 @@ type EditorProps = {
   onPlay: () => void;
   onSkip: () => void;
   onApplyNext: () => Promise<void>;
+  onApplyCover: () => Promise<void>;
   moving: boolean;
   editingBlocked?: boolean;
   audioRef: React.RefObject<HTMLAudioElement | null>;
@@ -2273,6 +2297,7 @@ function TrackEditor({
   onPlay,
   onSkip,
   onApplyNext,
+  onApplyCover,
   moving,
   editingBlocked = false,
   audioRef,
@@ -2491,6 +2516,13 @@ function TrackEditor({
     !!lyricsInvalid ||
     busy ||
     saving;
+  const canWriteCoverSeparately =
+    !!activeProposal?.cover &&
+    !!activeProposal.lrc &&
+    !Object.keys(activeProposal.tags || {}).length &&
+    !track.possible_mix &&
+    !track.can_recover &&
+    track.review?.category !== "file";
   const nextAction = reviewNextAction({
     changed,
     savedProposal: !!activeProposal,
@@ -2645,6 +2677,22 @@ function TrackEditor({
                     </>
                   )}
                 </button>
+                {canWriteCoverSeparately && (
+                  <button
+                    className="button secondary"
+                    disabled={
+                      !writable ||
+                      !summary?.capabilities.apply ||
+                      changed ||
+                      busy ||
+                      saving ||
+                      moving
+                    }
+                    onClick={() => void onApplyCover()}
+                  >
+                    Записать только обложку
+                  </button>
+                )}
               </div>
             </div>
           </div>

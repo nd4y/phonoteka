@@ -245,6 +245,69 @@ def test_proposal_base_retains_cover_and_rejects_stale_draft(client, settings):
     assert client.post(f"/api/tracks/{tid}/proposal", json=body, headers=h).status_code == 412
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Durable mutation requires Linux")
+def test_write_only_cover_retains_current_lyrics_draft_after_recovery(settings, monkeypatch):
+    import base64
+    from test_media import cover_bytes
+
+    settings = replace(settings, read_only=False, storage_verified=True)
+    path = synthetic(settings)
+    before = media.sha256_file(path)
+    lrc = "[00:00.000]One\n[00:01.000]Two"
+    cover = "data:image/png;base64," + base64.b64encode(cover_bytes()).decode()
+    with TestClient(create_app(settings), base_url=settings.app_url) as client:
+        headers = authenticated(client, settings)
+        job(client, headers, "scan")
+        drain(settings)
+        track, = client.get("/api/tracks").json()["items"]
+        identity = track["id"]
+        route = f"/api/tracks/{identity}"
+        response = client.post(route + "/proposal", json={"cover": cover, "lrc": lrc},
+                               headers={**headers, "If-Match": before})
+        assert response.status_code == 201, response.text
+        original_id = response.json()["id"]
+        original = json.loads(db.fetchone(settings.db_path, "SELECT payload FROM proposals WHERE id=?",
+                                          (original_id,))["payload"])
+        params = {"proposal_id": original_id, "cover_only": True}
+        automatic = client.post("/api/jobs", json={"kind": "apply", "track_ids": [identity],
+                                "params": {**params, "acceptance_mode": "automatic"}},
+                                headers={**headers, "Idempotency-Key": "invalid-auto-cover"})
+        assert automatic.status_code == 422
+
+        queued = job(client, headers, "apply", [identity], params)
+        payload = json.loads(db.fetchone(settings.db_path, "SELECT payload FROM jobs WHERE id=?",
+                                        (queued["id"],))["payload"])
+        saved, = payload["items"]
+        assert saved["proposal"]["cover"] == cover and "lrc" not in saved["proposal"]
+        assert "lyrics_document" not in saved["proposal"]
+        assert "lrc" not in saved["proposal"].get("field_sources", {})
+
+        persist = Worker.persist_mutation
+        def fail_after_file(*args, **kwargs):
+            raise OSError("simulated commit recovery")
+        monkeypatch.setattr(Worker, "persist_mutation", fail_after_file)
+        drain(settings)
+        assert client.get("/api/jobs/" + queued["id"]).json()["state"] == "interrupted"
+        assert media.sha256_file(path) != before
+        monkeypatch.setattr(Worker, "persist_mutation", persist)
+        drain(settings)
+        assert client.get("/api/jobs/" + queued["id"]).json()["state"] == "succeeded"
+
+        current = client.get(route).json()
+        assert current["sha256"] == media.sha256_file(path)
+        assert current["has_art"] and not current.get("lrc")
+        draft = current["proposal"]
+        assert draft["input_sha256"] == current["sha256"]
+        assert draft["lrc"] == original["lrc"] and not draft.get("cover")
+        retained = json.loads(db.fetchone(settings.db_path, "SELECT payload FROM proposals WHERE id=?",
+                                          (draft["id"],))["payload"])
+        assert retained["lyrics_document"] == original["lyrics_document"]
+        assert retained["field_sources"]["lrc"] == original["field_sources"]["lrc"]
+        assert "cover" not in retained["field_sources"]
+        assert len(current["history"]) == 1
+        assert db.fetchone(settings.db_path, "SELECT count(*) AS n FROM proposals WHERE track_id=?", (identity,))["n"] == 2
+
+
 def test_filters_before_pagination_and_publication_revision(client, settings):
     headers = authenticated(client, settings)
     tid, sha = seed(settings, "one.mp3", art=True)

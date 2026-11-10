@@ -176,6 +176,32 @@ def exclude_selected_fields(payload, excluded):
     return _keep_selected_sources(payload)
 
 
+def cover_lyrics_draft_parts(payload):
+    """Partition a saved mixed draft without losing field-specific provenance."""
+    if set(payload_values(payload)) != {'cover', 'lrc'} or not payload.get('cover') or not payload.get('lrc'):
+        raise media.MediaError('mixed_cover_draft_required', 'В черновике должны быть обложка и текст')
+    origins = payload.get('field_sources', {})
+    assigned = {source.get('candidate_id') for source in origins.values() if isinstance(source, dict)}
+    selection = payload.get('slot_selection') or {}
+
+    def part(field, extra, slot_key):
+        value = {key: copy.deepcopy(payload[key]) for key in (field, *extra) if key in payload}
+        value['tags'] = {}
+        origin = origins.get(field)
+        if origin:
+            value['field_sources'] = {field: copy.deepcopy(origin)}
+        candidate = origin.get('candidate_id') if isinstance(origin, dict) else None
+        # A legacy source with no explicit field binding stays on both parts.
+        value['sources'] = [copy.deepcopy(source) for source in payload.get('sources', [])
+                            if source.get('id') == candidate or source.get('id') not in assigned]
+        if selection.get(slot_key):
+            value['slot_selection'] = {'inventory_sha256': selection['inventory_sha256'], slot_key: selection[slot_key]}
+        return value
+
+    return (part('cover', ('artwork_transform',), 'cover_slot_id'),
+            part('lrc', ('lyrics_document',), 'lyrics_slot_id'))
+
+
 class LocksInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     fields: list[str] = Field(max_length=len(FIELDS))
