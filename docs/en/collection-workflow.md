@@ -12,7 +12,7 @@ Only accepted, current Ready revisions enter the snapshot. LRC files stay beside
 
 When a search, filter or page changes, the previous results remain visible while the next list loads. Wait until the rows are enabled before opening a file. The draft confirmation includes the file path, which distinguishes recordings with the same title and artist.
 
-After confirming the Ready plan, the panel shows the state of that publication and the saved file count. Wait for the final count before opening the next record. If only some files were saved, check the reasons in **Processing** and use the updated plan for the remaining revisions.
+The Ready panel shows that it is checking files while it prepares the plan. After you confirm the list, it shows when the job is being submitted, followed by the publication status and saved file count. Wait for the final count before opening the next record. If only some files were saved, check the reasons in **Processing** and use the updated plan for the remaining revisions.
 
 Use the accepted revisions waiting for publication filter to batch the files still awaiting separate delivery. A retained source without a Ready revision stays in the full plan. The waiting filter drops it only when every derivative from the current source revision has a current Ready publication. A damaged source may still require replacement with a complete recording.
 

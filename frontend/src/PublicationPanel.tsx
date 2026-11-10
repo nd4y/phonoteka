@@ -1,6 +1,6 @@
 import { requestId } from "./api";
 import { useEffect, useRef, useState } from "react";
-import { ArchiveRestore, CircleAlert, RefreshCw, ShieldCheck } from "lucide-react";
+import { ArchiveRestore, CircleAlert, LoaderCircle, RefreshCw, ShieldCheck } from "lucide-react";
 import { api, messageFor } from "./api";
 import "./PublicationPanel.css";
 import { reasonNames } from "./publicationReasons";
@@ -87,11 +87,12 @@ export default function PublicationPanel({
     [generation, setGeneration] = useState(0);
   const [loading, setLoading] = useState(true),
     [verifying, setVerifying] = useState(""),
-    [saving, setSaving] = useState(false),
+    [operation, setOperation] = useState<"prepare" | "publish" | "rollback" | null>(null),
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
   const [pending, setPending] = useState<{ item: PlanItem; version: Version } | null>(null);
   const [submitted, setSubmitted] = useState<Job | null>(null);
+  const saving = operation !== null;
   const tracked =
     submitted && isActiveJob(submitted) ? jobs.find((job) => job.id === submitted.id) : null;
   const publication = tracked || submitted;
@@ -163,7 +164,7 @@ export default function PublicationPanel({
   }
   async function rollback() {
     if (!pending || !pending.item.ready_revision || saving) return;
-    setSaving(true);
+    setOperation("rollback");
     setError("");
     try {
       await api("/jobs", {
@@ -184,13 +185,13 @@ export default function PublicationPanel({
     } catch (err) {
       setError(messageFor(err));
     } finally {
-      setSaving(false);
+      setOperation(null);
     }
   }
   async function preview(rows: PlanItem[]) {
     if (lock.current || publicationPending || !rows.length) return;
     lock.current = true;
-    setSaving(true);
+    setOperation("prepare");
     setError("");
     setNotice("");
     setSubmitted(null);
@@ -227,13 +228,13 @@ export default function PublicationPanel({
       setError(messageFor(e));
     } finally {
       lock.current = false;
-      setSaving(false);
+      setOperation(null);
     }
   }
   async function publish() {
     if (!frozen || lock.current || publicationPending) return;
     lock.current = true;
-    setSaving(true);
+    setOperation("publish");
     setError("");
     try {
       const job = await api<Job>("/publications/" + frozen.id + "/commit", {
@@ -248,7 +249,7 @@ export default function PublicationPanel({
       setError(messageFor(e));
     } finally {
       lock.current = false;
-      setSaving(false);
+      setOperation(null);
     }
   }
   return (
@@ -310,6 +311,14 @@ export default function PublicationPanel({
               ? "Добавить в готовую коллекцию"
               : "Подготовить к сохранению с этой страницы (" + items.filter(eligible).length + ")"}
           </button>
+          <span role="status">
+            {operation === "prepare" && (
+              <span className="loading muted">
+                <LoaderCircle size={16} className="spin" aria-hidden="true" />
+                Сверяем файлы и готовим план…
+              </span>
+            )}
+          </span>
         </div>
       )}
       {frozen && (
@@ -332,6 +341,14 @@ export default function PublicationPanel({
               <button className="button subtle" disabled={saving} onClick={() => setFrozen(null)}>
                 Отмена
               </button>
+              <span role="status">
+                {operation === "publish" && (
+                  <span className="loading">
+                    <LoaderCircle size={16} className="spin" aria-hidden="true" />
+                    Отправляем задание на сохранение…
+                  </span>
+                )}
+              </span>
             </div>
           </div>
         </div>
