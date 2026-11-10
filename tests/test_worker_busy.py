@@ -289,6 +289,27 @@ def test_processing_lists_recoverable_job_after_active_even_outside_recent_page(
         assert all_started not in {item['id'] for item in processing}
 
 
+def test_processing_shows_recent_completion_of_an_old_job(settings):
+    with TestClient(create_app(settings), base_url=settings.app_url) as client:
+        owner = authenticated(client, settings)
+        old = job(client, owner, 'scan')['id']
+        active = job(client, owner, 'scan')['id']
+        recent = []
+        for index in range(55):
+            timestamp = f'2025-01-01T00:00:{index:02d}+00:00'
+            recent.append((f'later-start-{index}', timestamp, timestamp))
+        with db.transaction(settings.db_path) as conn:
+            conn.execute("""UPDATE jobs SET state='completed_with_errors',stage='completed_with_errors',
+                created_at='2020-01-01T00:00:00+00:00',updated_at='2026-01-01T00:00:00+00:00' WHERE id=?""", (old,))
+            conn.executemany("""INSERT INTO jobs(id,kind,state,stage,payload,created_at,updated_at)
+                VALUES(?,'scan','succeeded','succeeded','{}',?,?)""", recent)
+        default = client.get('/api/jobs?active_first=true').json()['items']
+        assert default[0]['id'] == active and old not in {item['id'] for item in default}
+        processing = client.get('/api/jobs?active_first=true&recoverable_first=true').json()['items']
+        assert [item['id'] for item in processing[:2]] == [active, old]
+        assert processing[1]['state'] == 'completed_with_errors'
+
+
 async def until(predicate, seconds=5):
     async def poll():
         while not predicate():

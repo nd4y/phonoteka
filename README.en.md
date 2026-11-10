@@ -10,6 +10,7 @@ Write confirmed artwork separately and keep the lyrics draft for review.
 Collection actions can retry search and recognition within the selected music category.
 
 After an internal search or recognition failure, **Continue remaining files** in Processing continues the same task from files whose processing never started.
+Processing keeps recently updated results visible, including jobs that started much earlier.
 Tasks that can continue are listed before regular completed history.
 The missing-cover list explains whether the recording, album or exact edition still needs confirmation, or whether the cover search can run now. The missing-lyrics list shows its own reason in each row.
 
