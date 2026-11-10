@@ -32,6 +32,8 @@ The four main sections are **Overview**, **Collection**, **Processing**, and **R
 
 At the start of guided setup, select a directory inside the installed music mount and the desired quality profile. The one-time preparation scans, recognizes and searches for metadata. Disabled providers are skipped. The server retains progress across reloads. Open the resulting folder queue to review the files. Work-file writes, profile acceptance and publication each require an explicit action.
 
+Collection, Ready files, and the editor queue display an opening indicator beside the requested record. If the server is slow, you can select another row or change the filter. The latest action takes precedence.
+
 On narrow screens, each field retains its before/after pair, and write controls sit above the compact player. Back dismisses an open disclosure or the Sources tab before returning through application actions. Unsaved-change protection remains in place.
 
 The guide labels its input/output path example as illustrative, not a real rename result. This UI release does not alter available sources, formats, quality profiles, provider permissions, or the tracing architecture.

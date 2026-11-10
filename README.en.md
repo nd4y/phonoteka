@@ -93,6 +93,8 @@ Start with Overview for the next action, review proposals, check processing outc
 
 The saved-proposal count is narrower than the full review queue, which also includes errors and conflicts. An empty Ready files section explains how to publish reviewed revisions; an empty search suggests refining the query.
 
+The selected row indicates that its record is opening. Changing the search keeps a late response from opening the previous record over the new results.
+
 Record review offers one next action; the activity log provides search, a problems filter and scroll pause. Settings are above the account in the left menu. See the [collection workflow](docs/en/collection-workflow.md).
 
 Sign-in is controlled by AUTH_ENABLED (enabled by default). [Configuration and restoring authentication](docs/en/authentication.md).
