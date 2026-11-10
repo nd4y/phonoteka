@@ -155,7 +155,7 @@ function CandidateOption({
   sameLyricsAs,
   onChoose,
   trackId,
-  coverRelease,
+  releaseDetails,
   embeddedRelease,
 }: {
   candidate: Candidate;
@@ -166,15 +166,28 @@ function CandidateOption({
   sameLyricsAs?: number;
   onChoose: () => void;
   trackId: string;
-  coverRelease?: CandidateRelease;
+  releaseDetails?: CandidateRelease;
   embeddedRelease?: boolean;
 }) {
   const usageCandidate = candidate as PolicyCandidate;
   const provider = sourceNames[candidate.provider] || candidate.provider;
-  const coverLabel = coverRelease?.title || candidate.album || "Обложка альбома";
+  const coverLabel = releaseDetails?.title || candidate.album || "Обложка альбома";
   const label = `${candidate.kind === "lyrics" ? lyricsSummary(candidate.lrc || candidate.plain_lyrics) : candidate.kind === "cover" ? coverLabel : candidate.kind === "release" ? `Альбом: ${text(candidate.tags?.album) || candidate.title || "не указан"}` : text(candidate.tags?.title) || candidate.title || "Данные записи"}`;
   const identity = text(candidate.tags?.artist) || candidate.artist || "Исполнитель не указан";
-  const edition = [coverRelease?.date, coverRelease?.country].filter(Boolean).join(" · ");
+  const isRelease = candidate.kind === "release";
+  const edition = [
+    releaseDetails?.date || (isRelease ? text(candidate.tags?.date) : ""),
+    releaseDetails?.country,
+    isRelease && candidate.release_id ? `ID ${candidate.release_id.slice(0, 8)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const optionDetail =
+    candidate.kind === "cover"
+      ? edition || candidate.release_id || ""
+      : isRelease
+        ? edition || "Сведения об издании не указаны"
+        : identity;
   const delta = candidate.match.duration_delta;
   return (
     <article className={`source-option ${selected ? "selected" : ""}`}>
@@ -193,16 +206,14 @@ function CandidateOption({
           </span>
           <strong>{label}</strong>
           <span className="muted small">
-            {candidate.kind === "cover" ? edition || candidate.release_id || "" : identity}
+            {optionDetail}
             {candidate.kind === "lyrics" &&
               ` · ${text(candidate.tags?.title) || candidate.title || "Название не указано"}`}
           </span>
         </span>
       </label>
-      {candidate.kind === "cover" && embeddedRelease && (
-        <p className="muted small">ID издания совпадает с тегом файла.</p>
-      )}
-      {candidate.kind !== "cover" && (
+      {embeddedRelease && <p className="muted small">ID издания совпадает с тегом файла.</p>}
+      {candidate.kind !== "cover" && !isRelease && (
         <dl className="source-option-facts">
           <div>
             <dt>Альбом</dt>
@@ -233,7 +244,7 @@ function CandidateOption({
         <img
           className="candidate-cover"
           src={candidate.cover}
-          alt={coverRelease?.title ? `Обложка ${coverRelease.title}` : "Предлагаемая обложка"}
+          alt={releaseDetails?.title ? `Обложка ${releaseDetails.title}` : "Предлагаемая обложка"}
           loading="lazy"
         />
       )}
@@ -333,11 +344,12 @@ export function SourceCandidatePicker({
   }, []);
   const analysis = track.analysis!;
   const groups = groupCandidates(analysis.candidates);
-  const coverReleases = new Map<string, CandidateRelease>();
+  const releaseDetailsById = new Map<string, CandidateRelease>();
   for (const source of analysis.candidates) {
     if (source.provider !== "musicbrainz") continue;
     for (const release of source.releases || []) {
-      if (release.title && !coverReleases.has(release.id)) coverReleases.set(release.id, release);
+      if (release.title && !releaseDetailsById.has(release.id))
+        releaseDetailsById.set(release.id, release);
     }
   }
   const fileRelease = text(track.tags.musicbrainz_albumid).toLowerCase();
@@ -437,13 +449,14 @@ export function SourceCandidatePicker({
                 })()}
                 onChoose={() => choose(group.kind, candidate.id)}
                 trackId={track.id}
-                coverRelease={
-                  candidate.provider === "coverartarchive" && candidate.release_id
-                    ? coverReleases.get(candidate.release_id)
+                releaseDetails={
+                  (candidate.kind === "release" || candidate.provider === "coverartarchive") &&
+                  candidate.release_id
+                    ? releaseDetailsById.get(candidate.release_id)
                     : undefined
                 }
                 embeddedRelease={
-                  candidate.provider === "coverartarchive" &&
+                  (candidate.kind === "release" || candidate.provider === "coverartarchive") &&
                   !!fileRelease &&
                   candidate.release_id?.toLowerCase() === fileRelease
                 }
