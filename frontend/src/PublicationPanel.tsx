@@ -125,10 +125,12 @@ export default function PublicationPanel({
     setPending(null);
     setFrozen(null);
     const request = trackId
-      ? api<PlanItem>(`/tracks/${encodeURIComponent(trackId)}/publication`, options).then((item) => ({
-          items: [item],
-          total: 1,
-        }))
+      ? api<PlanItem>(`/tracks/${encodeURIComponent(trackId)}/publication`, options).then(
+          (item) => ({
+            items: [item],
+            total: 1,
+          }),
+        )
       : api<Page>(
           `/publication/plan?page=${page}&page_size=20&stale_only=${staleOnly}&accepted_only=${accepted}`,
           options,
