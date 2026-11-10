@@ -30,6 +30,60 @@ describe("authenticated API client", () => {
     expect(options.credentials).toBe("same-origin");
     expect(options.cache).toBe("no-store");
   });
+  it("refreshes a rejected open-mode token once without losing write guards", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('{"code":"csrf_invalid"}', { status: 403 }))
+      .mockResolvedValueOnce(
+        new Response('{"authenticated":true,"auth_enabled":false,"csrf_token":"fresh"}'),
+      )
+      .mockResolvedValueOnce(new Response('{"id":"job"}', { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    setSession({ authenticated: true, auth_enabled: false, csrf_token: "old" });
+    const body = '{"proposal_id":"one"}';
+    await expect(
+      api("/jobs", {
+        method: "POST",
+        headers: { "If-Match": '"revision"', "Idempotency-Key": "one-write" },
+        body,
+      }),
+    ).resolves.toEqual({ id: "job" });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/jobs",
+      "/api/auth/session",
+      "/api/jobs",
+    ]);
+    expect(fetchMock.mock.calls[0][1].headers.get("X-CSRF-Token")).toBe("old");
+    const retried = fetchMock.mock.calls[2][1];
+    expect(retried.headers.get("X-CSRF-Token")).toBe("fresh");
+    expect(retried.headers.get("If-Match")).toBe('"revision"');
+    expect(retried.headers.get("Idempotency-Key")).toBe("one-write");
+    expect(retried.body).toBe(body);
+  });
+  it("preserves rejection when login was re-enabled during the refresh", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('{"code":"csrf_invalid"}', { status: 403 }))
+      .mockResolvedValueOnce(
+        new Response('{"authenticated":true,"auth_enabled":true,"csrf_token":"owner"}'),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    setSession({ authenticated: true, auth_enabled: false, csrf_token: "old" });
+    await expect(api("/jobs", { method: "POST" })).rejects.toMatchObject({ code: "csrf_invalid" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("never retries origin failures or requests in login mode", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('{"code":"origin_denied"}', { status: 403 }))
+      .mockResolvedValueOnce(new Response('{"code":"csrf_invalid"}', { status: 403 }));
+    vi.stubGlobal("fetch", fetchMock);
+    setSession({ authenticated: true, auth_enabled: false, csrf_token: "old" });
+    await expect(api("/jobs", { method: "POST" })).rejects.toMatchObject({ code: "origin_denied" });
+    setSession({ authenticated: true, auth_enabled: true, csrf_token: "old" });
+    await expect(api("/jobs", { method: "POST" })).rejects.toMatchObject({ code: "csrf_invalid" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
   it("surfaces backend message and conflict guidance", async () => {
     vi.stubGlobal(
       "fetch",
