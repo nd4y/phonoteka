@@ -148,6 +148,11 @@ def selected_payload(settings, conn, row, chosen, retrieved_at):
     for field, choices in available.items():
         priority = config['priorities'].get(field, config['defaults'][field])
         candidate, value = min(choices, key=lambda item: (priority.index(item[0]['provider']) if item[0]['provider'] in priority else len(priority), len(item[0].get('match', {}).get('reasons', [])), item[0]['id']))
+        if field == 'lrc' and candidate['provider'] == 'lrclib' and candidate.get('lrc'):
+            cleaned = media.trim_candidate_lrc_end_marker(value, json.loads(row['metadata']).get('duration'))
+            if cleaned != value:
+                result['candidate_lyric_adjustment'] = 'empty_end_marker_removed'
+                value = cleaned
         if field in {'cover', 'lrc'}:
             result[field] = value
         else:
@@ -160,6 +165,8 @@ def selected_payload(settings, conn, row, chosen, retrieved_at):
                 provenance[key] = candidate[key]
         result['field_sources'][field] = provenance
     result = validate_payload(settings, conn, row, result, 'candidate')
+    if 'lrc' not in result:
+        result.pop('candidate_lyric_adjustment', None)
     return _keep_selected_sources(result)
 
 
@@ -179,6 +186,8 @@ def exclude_selected_fields(payload, excluded):
         else:
             payload['tags'].pop(field)
         payload['field_sources'].pop(field, None)
+    if 'lrc' in excluded:
+        payload.pop('candidate_lyric_adjustment', None)
     return _keep_selected_sources(payload)
 
 

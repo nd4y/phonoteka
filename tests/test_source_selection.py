@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from phonoteka import db, lyrics_document
+from phonoteka import db, lyrics_document, media, provider_policy
 from test_backend import settings, client, authenticated, seed
 from test_field_policy import analysis, locks
 from test_provider_policy import grant
@@ -112,8 +112,57 @@ def test_preview_reports_filtered_locks_and_invalid_lyrics(client, settings):
     assert response.json()['blocked_fields'] == ['title']
     # Invalid timing is omitted by the same document checks used for selection.
     assert response.json()['omitted_fields'] == ['lrc']
+    assert response.json()['lyric_error'] == 'invalid_timing'
     assert {field['field'] for field in response.json()['fields']} == {'album'}
     assert database_state(settings) == before
+
+
+def test_candidate_end_marker_is_trimmed_without_changing_words_or_audio(client, settings):
+    headers = authenticated(client, settings)
+    tid, sha = seed(settings)
+    source = candidates()[1]
+    source.pop('plain_lyrics')
+    source['tags'] = {}
+    source['lrc'] = '[offset:100]\n[00:01.100]First line\n[00:04.100]Last line\n[00:05.413]'
+    with db.transaction(settings.db_path) as conn:
+        grant(conn)
+        source['usage'] = provider_policy.candidate_usage(conn, source)
+        row = conn.execute('SELECT metadata FROM tracks WHERE id=?', (tid,)).fetchone()
+        metadata = json.loads(row['metadata'])
+        metadata['duration'] = 5
+        conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(metadata), tid))
+    analysis(settings, tid, sha, [source])
+    before = database_state(settings)
+    path = f'/api/tracks/{tid}/analysis/'
+    auth = {**headers, 'If-Match': sha}
+    params = {'candidate_ids': [source['id']]}
+    response = client.post(path + 'preview', headers=auth, json=params)
+    assert response.status_code == 200, response.text
+    assert database_state(settings) == before
+    preview = response.json()
+    assert preview['lyric_adjustment'] == 'empty_end_marker_removed'
+    assert preview['lyric_error'] is None and preview['omitted_fields'] == []
+    expected = '[00:01.000]First line\n[00:04.000]Last line'
+    assert preview['fields'][0]['after'] == expected
+    saved = client.post(path + 'select', headers=auth,
+                        json={**params, 'preview_revision': preview['preview_revision']})
+    assert saved.status_code == 201, saved.text
+    proposal = json.loads(db.fetchone(settings.db_path, 'SELECT payload FROM proposals WHERE id=?',
+                                      (saved.json()['id'],))['payload'])
+    assert proposal['lrc'] == expected and proposal['lyrics_document']['metadata']['offset'] == ['100']
+    assert proposal['field_sources']['lrc']['candidate_id'] == source['id']
+    assert (settings.work_root / 'a.mp3').read_bytes() == b'not really audio'
+
+
+@pytest.mark.parametrize('lrc', [
+    '[00:01]Word\n[00:05.313]More words',
+    '[00:01]Word\n[00:05.313]\n[00:02]More words',
+    '[00:01]Word\n[00:07]',
+    '[00:01]Word\n[00:04][00:05.313]',
+    '[00:01]Word\n[00:05]',
+])
+def test_candidate_marker_normalization_preserves_other_rows(lrc):
+    assert media.trim_candidate_lrc_end_marker(lrc, 5) == lrc
 
 
 @pytest.mark.parametrize('change', ['analysis', 'priorities', 'proposal', 'document', 'locks'])
