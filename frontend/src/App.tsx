@@ -182,6 +182,21 @@ const titleOf = (track: Track) =>
   track.filename ||
   track.relative_path.split("/").pop() ||
   "Без названия";
+const artistOf = (track: Track) => textTag(track.tags, "artist") || "Исполнитель не указан";
+function tracksWithMatchingLabels(items: Track[]) {
+  const firstByLabel = new Map<string, string>();
+  const matching = new Set<string>();
+  for (const track of items) {
+    const label = JSON.stringify([titleOf(track), artistOf(track)]);
+    const first = firstByLabel.get(label);
+    if (first === undefined) firstByLabel.set(label, track.id);
+    else {
+      matching.add(first);
+      matching.add(track.id);
+    }
+  }
+  return matching;
+}
 const durationOf = (value?: number) =>
   value && Number.isFinite(value)
     ? `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, "0")}`
@@ -1267,6 +1282,7 @@ export default function App() {
     ready: ["Готовые файлы", "Сохраненные версии и перенос музыки на устройство."],
     settings: ["Под вашим контролем", "Подключения, обработка и параметры приложения."],
   };
+  const matchingLabels = tracksWithMatchingLabels(tracks?.items ?? []);
   return (
     <AppBackContext.Provider value={navigationHistory.layers}>
       <div
@@ -1664,6 +1680,7 @@ export default function App() {
                   />
                   <TrackList
                     tracks={tracks}
+                    matchingLabels={matchingLabels}
                     loading={loading || search !== query}
                     selectionDisabled={resultsUpdating}
                     selectedId={selectedId}
@@ -1709,7 +1726,10 @@ export default function App() {
                         <Cover track={track} />
                         <span>
                           <strong>{titleOf(track)}</strong>
-                          <small>{textTag(track.tags, "artist") || "Исполнитель не указан"}</small>
+                          <small>{artistOf(track)}</small>
+                          {matchingLabels.has(track.id) && (
+                            <small className="track-path-hint">{track.relative_path}</small>
+                          )}
                           <span className="queue-meta">
                             {track.format.toUpperCase()}
                             {recordingLabel(track) && ` · ${recordingLabel(track)}`}
@@ -1999,6 +2019,7 @@ export default function App() {
                   />
                   <TrackList
                     tracks={tracks}
+                    matchingLabels={matchingLabels}
                     loading={loading || search !== query}
                     selectionDisabled={resultsUpdating}
                     selectedId=""
@@ -2165,6 +2186,7 @@ export default function App() {
 
 function TrackList({
   tracks,
+  matchingLabels,
   loading,
   selectionDisabled,
   selectedId,
@@ -2174,6 +2196,7 @@ function TrackList({
   emptyDescription = "Измените фильтр или запустите сканирование рабочей коллекции.",
 }: {
   tracks: TrackPage | null;
+  matchingLabels: ReadonlySet<string>;
   loading: boolean;
   selectionDisabled: boolean;
   selectedId: string;
@@ -2217,9 +2240,12 @@ function TrackList({
               <span>
                 <strong>{titleOf(track)}</strong>
                 <small>
-                  {textTag(track.tags, "artist") || "Исполнитель не указан"}
+                  {artistOf(track)}
                   {textTag(track.tags, "album") && ` · ${textTag(track.tags, "album")}`}
                 </small>
+                {matchingLabels.has(track.id) && (
+                  <small className="track-path-hint">{track.relative_path}</small>
+                )}
                 <span className="track-mobile-meta">
                   {track.format.toUpperCase()} · {durationOf(track.duration)}
                   {recordingLabel(track) && ` · ${recordingLabel(track)}`}

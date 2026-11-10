@@ -8,6 +8,12 @@
 .app-shell .sidebar .sidebar-utilities button {
   width: 100%;
 }
+.track-name .track-path-hint,
+.queue-track .track-path-hint {
+  margin-top: 4px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .app-shell .review-steps {
   display: flex;
   list-style: none;

@@ -1,5 +1,7 @@
 # Why a field is missing
 
+The catalog, review list and Ready list show relative paths when tracks on the same page share their title and artist. Use the path to choose the intended copy before opening it.
+
 The catalog shows a brief reason below the track name. Open the track to see “What remains to fill”: a separate explanation for each missing title, artist, album, cover and synchronized lyric field. Each row includes a next step, provider and analysis update time when known. This timestamp is not the time of each individual provider request.
 
 The page indicator shows a loading state and disables pagination until the requested page arrives.
