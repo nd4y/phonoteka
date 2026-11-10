@@ -1107,6 +1107,21 @@ class Worker:
                 return
         items=[i for i in items if i['track_id'] not in done]
         halted=False
+        async def checkpoint(key, state, result):
+            if job['kind'] not in {'analyze', 'recognize'}:
+                self.item_result(job['id'],key,state,result)
+                return
+            # Keep this SQLite wait off the async recognition loop. Reuse the
+            # exact local result on contention, never repeat provider calls.
+            for delay in (.5, 1.5):
+                try:
+                    await self.io(self.item_result,job['id'],key,state,result)
+                    return
+                except sqlite3.OperationalError as exc:
+                    if not sqlite_busy(exc):
+                        raise
+                    await asyncio.sleep(delay)
+            await self.io(self.item_result,job['id'],key,state,result)
         def stop_admission():
             nonlocal halted
             if not halted:
@@ -1121,7 +1136,7 @@ class Worker:
             if stop_admission():
                 return
             key = item["track_id"]
-            self.item_result(job["id"], key, "running", {})
+            await checkpoint(key, 'running', {})
             try:
                 if job['kind'] in {'transcribe','align'}:
                     result = await inference_client.process(self,job,item)
@@ -1130,8 +1145,9 @@ class Worker:
                     result = await self.analyze_item(job, item) if job['kind'] in {'analyze','recognize'} else await self.io(self.process_item, job, item)
                 if result.get('retry_at'):
                     retry_at=max(retry_at,result['retry_at'])
-                    self.item_result(job['id'],key,'deferred',result)
-                else:self.item_result(job["id"], key, "succeeded", result)
+                    await checkpoint(key,'deferred',result)
+                else:
+                    await checkpoint(key,'succeeded',result)
             except Exception as exc:
                 result = self.failure(exc)
                 journals = self.settings.state_dir / "backups" / key / job["id"]
@@ -1151,14 +1167,14 @@ class Worker:
                     # Only a failed reservation before any journal/effect may
                     # resume automatically. ENOSPC after intent stays recovery.
                     waiting_storage=True;retry_at=max(retry_at,time.time()+60)
-                    self.item_result(job['id'],key,'deferred',{**result,'retry_at':retry_at,'wait_reason':'storage'})
+                    await checkpoint(key,'deferred',{**result,'retry_at':retry_at,'wait_reason':'storage'})
                     return
                 state = "interrupted" if has_intent else "conflict" if result["code"] in {"conflict", "revision_conflict"} else "needs_review" if result["code"] in {"needs_review", "invalid_lyrics", "unsupported_format", "authorization_revoked", "publication_snapshot_required", "publication_review_stale", "lyrics_document_stale", "lyrics_line_locked", "lyrics_document_conflict", "partial_lyrics", "recognition_attempt_budget_exhausted", "recognition_identity_required", "possible_mix_requires_manual_review"} else "failed"
                 if has_intent:
                     with db.transaction(self.settings.db_path) as conn:
                         conn.execute("UPDATE tracks SET status='needs_review' WHERE id=?", (key,))
                     result["recovery_required"] = True
-                self.item_result(job["id"], key, state, result)
+                await checkpoint(key,state,result)
         async def one(item):
             if stop_admission(): return
             with context(track_id=opaque_id(item['track_id'])), processing_activity.attempt(

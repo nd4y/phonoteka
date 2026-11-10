@@ -57,3 +57,9 @@ An interrupted task on the processing screen offers **Cancel remaining files**. 
 The server permits cancellation only after operation journals have been reconciled and a fresh running-worker heartbeat confirms recovery has finished. Until then, the UI asks you to wait. Cancellation also remains blocked while a restored database requires acknowledgement. Completed operations and their history are retained.
 
 For parallel-processing failures, JSON logs include up to eight nested exception types and abbreviated stacks. Exception messages, audio paths, requests and secrets are not added to the log. OpenTelemetry settings remain unchanged.
+
+## Continue after a search failure
+
+After an internal search or recognition failure with unstarted files, **Continue remaining files** uses the original task and scope. Completed and failed results remain in its history. An admitted file whose outcome was lost is marked for review, since a provider request may have been sent already. Only files with no recorded start are admitted. The original authorization and provider budgets still apply.
+
+The worker retries the same local per-file checkpoint up to three times on SQLite contention. No provider request is repeated by this retry. The progress summary groups review cases and errors under **require attention**. File details show the individual reason.
