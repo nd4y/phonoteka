@@ -80,6 +80,8 @@ Other requests remain available while comparison or saving waits for the catalog
 
 If the catalog is temporarily busy after a verified Ready write, the worker retries saving the same receipt. A persistent lock leaves the journal available for recovery. Check the job status before submitting another publication.
 
+Provider cache maintenance releases the catalog writer between batches. Each batch checks the current permissions and payloads. Restrictions on embedding and exporting provider data continue to apply throughout cleanup.
+
 If LRCLIB places a single empty end marker up to one second past the audio, the comparison shows that it was removed. Timed words stay in the draft with their original timestamps. A timed line with words outside the audio still needs a different version or manual correction.
 
 Detailed fields and usage terms expand on demand. Embed/export restrictions remain visible and server provenance and permission checks remain enforced. `POST /api/tracks/{id}/analysis/preview` accepts the same `candidate_ids` and `If-Match` as selection. The UI submits its returned `preview_revision` when saving. Existing API clients can still create proposals directly. App Back first closes the comparison and returns to the retained choices.

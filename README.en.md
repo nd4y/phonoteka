@@ -61,6 +61,8 @@ If the catalog is briefly busy after ASR finishes, the worker retries storing th
 
 Recovered Ready publications retain a receipt that the Music relay can verify against committed history.
 
+Provider cache maintenance processes short catalog batches and skips unchanged provenance records so that editing and review can continue between batches.
+
 Recovery preserves the original audio file; invalid embedded artwork remains in that source and is explicitly recorded as omitted from the derivative.
 
 Scanning counts only validated JPEG/PNG artwork. HTML stored in an image frame and unsupported image formats produce a warning, do not increase the cover count, and do not prevent replacement lookup. Inspection preserves the original bytes.

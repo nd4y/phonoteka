@@ -127,7 +127,9 @@ def register_values(conn, candidate, usage):
         reference = {**usage, "value_sha256": value_hash}
         entries = [entry for entry in entries if (entry.get("provider"), entry.get("policy_version")) != (usage["provider"], usage["policy_version"])]
         entries.append(reference)
-        conn.execute("INSERT OR REPLACE INTO settings VALUES(?,?)", (key, db.encode({"entries": entries})))
+        encoded = db.encode({"entries": entries})
+        if not previous or previous["value"] != encoded:
+            conn.execute("INSERT OR REPLACE INTO settings VALUES(?,?)", (key, encoded))
 
 
 def _allowed(conn, usage, operation):
@@ -376,10 +378,18 @@ def sanitize_backup(conn):
 
 
 def _clean_release_reviews(conn):
-    from . import release_review
     for row in conn.execute("SELECT key,value FROM settings WHERE key LIKE 'release_review:%'").fetchall():
-        original=loads(row['value']);cleaned=release_review.redact(conn,original)
-        if original!=cleaned:conn.execute('UPDATE settings SET value=? WHERE key=?',(db.encode(cleaned),row['key']))
+        _clean_release_review(conn, row)
+
+
+def _clean_release_review(conn, row):
+    from . import release_review
+    original = loads(row["value"])
+    cleaned = release_review.redact(conn, original)
+    if original == cleaned:
+        return 0
+    conn.execute("UPDATE settings SET value=? WHERE key=?", (db.encode(cleaned), row["key"]))
+    return 1
 
 
 CONTENT_FIELDS = {"tags", "lrc", "plain_lyrics", "cover", "title", "artist", "album", "release", "releases"}
@@ -437,37 +447,81 @@ def public_analysis(settings, data):
         return prepare_analysis(conn, data, register=False)
 
 
+def _cleanup_table(settings, table, columns, condition, clean_row):
+    # Fix the scan boundary, but read each batch under the writer transaction.
+    # A concurrent policy or payload update is then checked against fresh rows.
+    high_water = db.fetchone(
+        settings.db_path, f"SELECT MAX(rowid) AS id FROM {table} WHERE {condition}"
+    )["id"]
+    cursor = 0
+    changed = 0
+    while high_water is not None and cursor < high_water:
+        with db.transaction(settings.db_path) as conn:
+            rows = conn.execute(
+                f"SELECT rowid AS cleanup_id, {columns} FROM {table} "
+                f"WHERE rowid>? AND rowid<=? AND ({condition}) ORDER BY rowid LIMIT 16",
+                (cursor, high_water),
+            ).fetchall()
+            if not rows:
+                break
+            changed += sum(clean_row(conn, row) for row in rows)
+            cursor = rows[-1]["cleanup_id"]
+    return changed
+
+
+def _clean_cached_analysis(conn, row):
+    original = loads(row["payload"])
+    cleaned = prepare_analysis(conn, original, register=True)
+    if original == cleaned:
+        return 0
+    conn.execute("UPDATE analyses SET payload=? WHERE track_id=?", (db.encode(cleaned), row["track_id"]))
+    return 1
+
+
+def _clean_cached_proposal(conn, row):
+    original = loads(row["payload"])
+    cleaned = redact_payload(conn, original)
+    if original == cleaned:
+        return 0
+    conn.execute("UPDATE proposals SET payload=? WHERE id=?", (db.encode(cleaned), row["id"]))
+    return 1
+
+
+def _clean_cached_job(conn, row):
+    original = loads(row["payload"])
+    cleaned = deepcopy(original)
+    omitted = False
+    for item in cleaned.get("items", []):
+        if item.get("proposal"):
+            item["proposal"] = redact_payload(conn, item["proposal"])
+            omitted = omitted or bool(item["proposal"].get("policy_omitted_fields"))
+        if item.get("reference_text"):
+            reference = redact_payload(conn, {"lrc": item["reference_text"], "field_sources": item.get("reference_sources", {})})
+            if "lrc" not in reference:
+                item.pop("reference_text", None)
+                omitted = True
+    if original == cleaned:
+        return 0
+    conn.execute("UPDATE jobs SET payload=? WHERE id=?", (db.encode(cleaned), row["id"]))
+    if omitted and row["state"] in {"queued", "paused", "waiting_authorization"}:
+        state = "cancelled_partial" if row["completed"] else "cancelled"
+        conn.execute("UPDATE jobs SET state=?,stage='cancelled',cancel_requested=1,error='provider_policy_expired',updated_at=? WHERE id=?",
+                     (state, db.utcnow(), row["id"]))
+        db.event(conn, "job_cancel_requested", {"job_id": row["id"], "code": "provider_policy_expired"})
+    return 1
+
+
 def cleanup_cache(settings):
     """Forget expired/transient provider responses; never delete music or backups."""
-    changed = 0
     with db.transaction(settings.db_path) as conn:
         conn.execute("DELETE FROM provider_cache WHERE expires<=?", (time.time(),))
         for provider in TERMS:
             if not any(rule(conn, provider, kind).get("allow_cache") for kind in DATA_TYPES):
                 conn.execute("DELETE FROM provider_cache WHERE provider=?", (provider,))
-        for row in conn.execute("SELECT track_id,payload FROM analyses").fetchall():
-            original = loads(row["payload"])
-            cleaned = prepare_analysis(conn, original, register=True)
-            if cleaned != original:
-                conn.execute("UPDATE analyses SET payload=? WHERE track_id=?", (db.encode(cleaned), row["track_id"]))
-                changed += 1
-        for row in conn.execute('SELECT id,payload FROM proposals').fetchall():
-            original=loads(row['payload']);cleaned=redact_payload(conn,original)
-            if original!=cleaned:conn.execute('UPDATE proposals SET payload=? WHERE id=?',(db.encode(cleaned),row['id']))
-        for row in conn.execute("SELECT id,payload,state,completed FROM jobs WHERE state!='running'").fetchall():
-            original=loads(row['payload']);cleaned=deepcopy(original);omitted=False
-            for item in cleaned.get('items',[]):
-                if item.get('proposal'):
-                    item['proposal']=redact_payload(conn,item['proposal']);omitted=omitted or bool(item['proposal'].get('policy_omitted_fields'))
-                if item.get('reference_text'):
-                    reference=redact_payload(conn,{'lrc':item['reference_text'],'field_sources':item.get('reference_sources',{})})
-                    if 'lrc' not in reference:item.pop('reference_text',None);omitted=True
-            if original!=cleaned:
-                conn.execute('UPDATE jobs SET payload=? WHERE id=?',(db.encode(cleaned),row['id']))
-                if omitted and row['state'] in {'queued','paused','waiting_authorization'}:
-                    conn.execute("UPDATE jobs SET state=?,stage='cancelled',cancel_requested=1,error='provider_policy_expired',updated_at=? WHERE id=?",('cancelled_partial' if row['completed'] else 'cancelled',db.utcnow(),row['id']))
-                    db.event(conn,'job_cancel_requested',{'job_id':row['id'],'code':'provider_policy_expired'})
-        _clean_release_reviews(conn)
+    changed = _cleanup_table(settings, "analyses", "track_id,payload", "1", _clean_cached_analysis)
+    _cleanup_table(settings, "proposals", "id,payload", "1", _clean_cached_proposal)
+    _cleanup_table(settings, "jobs", "id,payload,state,completed", "state!='running'", _clean_cached_job)
+    _cleanup_table(settings, "settings", "key,value", "key LIKE 'release_review:%'", _clean_release_review)
     return {"analyses_cleaned": changed, "music_deleted": False, "rollback_versions_deleted": False}
 
 
