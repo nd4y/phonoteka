@@ -13,6 +13,7 @@ After an internal search or recognition failure, **Continue remaining files** in
 Processing keeps recently updated results visible, including jobs that started much earlier.
 Tasks that can continue are listed before regular completed history.
 The missing-cover list explains whether the recording, album or exact edition still needs confirmation, or whether the cover search can run now. The missing-lyrics list shows its own reason in each row.
+The collection list refreshes when the query, filter or page changes and when processing finishes.
 
 If the album is known, refine its release and cover search by title in the track sources.
 
