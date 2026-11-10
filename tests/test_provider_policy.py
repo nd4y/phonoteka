@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import contextmanager
 from dataclasses import replace
 import json
 import time
@@ -23,6 +24,51 @@ def grant(conn, provider='lrclib', kind='lyrics', **changes):
 def lyrics():
     return {'id': 'lrclib:123', 'provider': 'lrclib', 'kind': 'lyrics', 'lrc': '[00:01]Known provider words',
             'source_url': 'https://lrclib.net/api/get/123', 'match': {'state': 'needs_review', 'reasons': []}}
+
+
+def test_cleanup_releases_writer_between_batches_and_skips_unchanged_usage(client, settings, monkeypatch):
+    with db.transaction(settings.db_path) as conn:
+        grant(conn)
+        for index in range(40):
+            identity = f"cleanup-{index}"
+            revision = "a" * 64
+            now = db.utcnow()
+            conn.execute(
+                "INSERT INTO tracks(id,relative_path,sha256,metadata,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                (identity, f"{identity}.wav", revision, "{}", now, now),
+            )
+            candidate = {**lyrics(), "id": identity, "lrc": f"[00:01]Fixture {index}"}
+            candidate["usage"] = policy.candidate_usage(
+                conn, candidate, time.time() - 7200 if index < 35 else time.time()
+            )
+            policy.register_values(conn, candidate, candidate["usage"])
+            conn.execute(
+                "INSERT INTO analyses(track_id,input_sha256,payload,updated_at) VALUES(?,?,?,?)",
+                (identity, revision, db.encode({"candidates": [candidate]}), now),
+            )
+
+    original_transaction = db.transaction
+    writes = []
+
+    @contextmanager
+    def observe_writes(path):
+        with original_transaction(path) as conn:
+            before = conn.total_changes
+            yield conn
+            writes.append(conn.total_changes - before)
+
+    monkeypatch.setattr(db, "transaction", observe_writes)
+    assert policy.cleanup_cache(settings)["analyses_cleaned"] == 35
+    assert sorted(count for count in writes if count) == [3, 16, 16]
+    with db.connect(settings.db_path) as conn:
+        rows = conn.execute("SELECT track_id,payload FROM analyses").fetchall()
+        for row in rows:
+            candidate, = json.loads(row["payload"])["candidates"]
+            assert ("lrc" in candidate) == (int(row["track_id"].split("-")[-1]) >= 35)
+
+    writes.clear()
+    assert policy.cleanup_cache(settings)["analyses_cleaned"] == 0
+    assert writes and not any(writes)
 
 
 def test_unknown_capabilities_fail_closed_and_core_metadata_does_not_claim_content_license(client, settings):
