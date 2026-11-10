@@ -2319,6 +2319,7 @@ function TrackEditor({
   const [classificationDirty, setClassificationDirty] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const lyricsEditorContainer = useRef<HTMLDivElement>(null);
+  const mediaSlotsContainer = useRef<HTMLDetailsElement>(null);
   const [showAllFields, setShowAllFields] = useState(false);
   useBackLayer(sourcesOpen, () => setSourcesOpen(false));
   useEffect(() => {
@@ -2885,6 +2886,23 @@ function TrackEditor({
                         setArtworkReceipt(receipt);
                       }}
                     />
+                    {!slotSelection?.cover_slot_id && (
+                      <button
+                        className="button subtle"
+                        disabled={!writable || saving}
+                        onClick={() => {
+                          const section = mediaSlotsContainer.current;
+                          const inventory =
+                            section?.querySelector<HTMLDetailsElement>("details.media-slots");
+                          if (!section || !inventory) return;
+                          section.open = true;
+                          inventory.open = true;
+                          inventory.querySelector("summary")?.focus();
+                        }}
+                      >
+                        Выбрать слот для обложки
+                      </button>
+                    )}
                   </div>
                 </details>
                 <div className="notice info">
@@ -2896,7 +2914,7 @@ function TrackEditor({
                 </div>
               </div>
             )}
-            <details className="workflow-slots">
+            <details className="workflow-slots" ref={mediaSlotsContainer}>
               <summary>Куда записывать обложку и текст</summary>
               <MediaSlotsPanel
                 trackId={track.id}
