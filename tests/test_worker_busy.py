@@ -142,6 +142,50 @@ def test_busy_commit_progress_keeps_final_publication_guard(settings, monkeypatc
         worker.pool.shutdown()
 
 
+@pytest.mark.skipif(sys.platform != 'linux', reason='Durable publication requires Linux')
+@pytest.mark.parametrize('blocked_state', ['running', 'succeeded'])
+def test_busy_publication_checkpoint_retries_without_copying_twice(settings, monkeypatch, blocked_state):
+    short_busy_timeout(monkeypatch)
+    cfg = replace(settings, read_only=False, storage_verified=True, file_workers=2)
+    paths = [synthetic(cfg, ext) for ext in ('flac', 'mp3')]
+    versions = {path.name: media.sha256_file(path) for path in paths}
+    worker = Worker(cfg)
+    try:
+        with TestClient(create_app(cfg), base_url=cfg.app_url) as client:
+            owner = authenticated(client, cfg)
+            job(client, owner, 'scan')
+            asyncio.run(worker.process(worker.claim_job()))
+            tracks = client.get('/api/tracks').json()['items']
+            track_ids = [track['id'] for track in tracks]
+            for track_id in track_ids:
+                accept_publication_review(client, owner, track_id)
+            identity = job(client, owner, 'publish', track_ids)['id']
+            save = worker.item_result
+            attempts = []
+
+            def contended(job_id, key, state, result):
+                if key == track_ids[0] and state == blocked_state:
+                    attempts.append(dict(result))
+                    if len(attempts) == 1:
+                        with db.transaction(cfg.db_path):
+                            return save(job_id, key, state, result)
+                return save(job_id, key, state, result)
+
+            monkeypatch.setattr(worker, 'item_result', contended)
+            asyncio.run(worker.process(worker.claim_job()))
+            detail = client.get('/api/jobs/' + identity).json()
+            assert detail['state'] == 'succeeded' and detail['completed'] == 2
+            assert 2 <= len(attempts) <= 3 and all(attempt == attempts[0] for attempt in attempts)
+            history = db.fetchall(cfg.db_path, 'SELECT track_id,after_sha256 FROM history WHERE job_id=?', (identity,))
+            assert len(history) == 2 and {row['track_id'] for row in history} == set(track_ids)
+            assert {row['after_sha256'] for row in history} == set(versions.values())
+            for path in paths:
+                assert media.sha256_file(path) == versions[path.name]
+                assert media.sha256_file(cfg.publication_root / 'Ready' / path.name) == versions[path.name]
+    finally:
+        worker.pool.shutdown()
+
+
 def test_recognition_checkpoint_retries_without_repeating_search(settings, monkeypatch):
     short_busy_timeout(monkeypatch)
     cfg = replace(settings, external_fingerprints=True, file_workers=2)

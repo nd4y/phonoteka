@@ -270,11 +270,12 @@ class Worker:
             with db.transaction(self.settings.db_path) as conn:
                 db.event(conn,'job_action',{'job_id':job['id'],'track_id':item['track_id'],'action':action})
         except sqlite3.OperationalError as exc:
-            if action != 'commit' or not sqlite_busy(exc):
+            if not sqlite_busy(exc):
                 raise
-            # This event is progress only. The durable file journal and the
-            # final authorization below still gate the filesystem change.
-            log('worker_database_busy', logging.WARNING, operation='commit_progress', job_id=job['id'])
+            # Progress is advisory. Authorization and the durable file journal
+            # still gate every filesystem change.
+            log('worker_database_busy', logging.WARNING, operation='item_progress',
+                job_id=job['id'], action=action)
         log('item_action',job_id=job['id'],track_id=opaque_id(item['track_id']),kind=job['kind'],action=action)
 
     def finish(self, job_id, state, error=None):
@@ -489,7 +490,11 @@ class Worker:
             return {"code": exc.code, "message": exc.message, "retryable": exc.retryable}
         if isinstance(exc, OSError):
             return {"code": "storage_error", "message": "Ошибка доступа к хранилищу", "retryable": True}
-        LOG.exception('Unexpected file operation failure',extra={'event':'file_operation_failed'})
+        cause = exc
+        while isinstance(cause, ExceptionGroup) and len(cause.exceptions) == 1:
+            cause = cause.exceptions[0]
+        LOG.error('Unexpected file operation failure', exc_info=(type(cause), cause, cause.__traceback__),
+                  extra={'event': 'file_operation_failed'})
         return {"code": "internal_error", "message": "Ошибка обработки файла", "retryable": False}
 
     def retain_lyrics_draft(self, conn, current, old, metadata, item, result):
@@ -1115,11 +1120,8 @@ class Worker:
         items=[i for i in items if i['track_id'] not in done]
         halted=False
         async def checkpoint(key, state, result):
-            if job['kind'] not in {'analyze', 'recognize'}:
-                self.item_result(job['id'],key,state,result)
-                return
-            # Keep this SQLite wait off the async recognition loop. Reuse the
-            # exact local result on contention, never repeat provider calls.
+            # Retry only the rolled-back catalog transaction. The same local
+            # outcome is reused without repeating a media or provider operation.
             for delay in (.5, 1.5):
                 try:
                     await self.io(self.item_result,job['id'],key,state,result)
@@ -1127,6 +1129,8 @@ class Worker:
                 except sqlite3.OperationalError as exc:
                     if not sqlite_busy(exc):
                         raise
+                    log('worker_database_busy', logging.WARNING, operation='item_checkpoint',
+                        job_id=job['id'], state=state)
                     await asyncio.sleep(delay)
             await self.io(self.item_result,job['id'],key,state,result)
         def stop_admission():
