@@ -396,7 +396,7 @@ export function AlbumBatchPanel({
               />
             </label>
             <label>
-              Обложка из найденного источника
+              Обложка пакета
               <select
                 value={source}
                 disabled={busy}
@@ -406,7 +406,7 @@ export function AlbumBatchPanel({
                   invalidate();
                 }}
               >
-                <option value="">Сохранить текущие обложки</option>
+                <option value="">{cover ? "Загруженный файл" : "Сохранить текущие обложки"}</option>
                 {choices.map((choice) => (
                   <option
                     key={`${choice.track_id}|${choice.candidate_id}`}

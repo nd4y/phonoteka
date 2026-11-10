@@ -148,7 +148,8 @@ def run(snapshot, ui_only=False):
     uid = f'{os.getuid()}:{os.getgid()}'
     logged(DOCKER + ['run', '--rm', '--no-healthcheck', '--name', 'phonoteka-build01-tests', '--label', f'{LABEL}=build01',
            '--cpus', '2', '--memory', '1536m', '--user', uid, '--env', 'HOME=/tmp',
-           '--tmpfs', '/tmp:size=1g,mode=1777',
+           # Codec fixtures execute temporary command shims inside this disposable test container.
+           '--tmpfs', '/tmp:exec,nosuid,nodev,size=1g,mode=1777',
            '--volume', f'{reports}:/reports', image, 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
            '/app/tests', '--junitxml=/reports/backend.xml'], 'backend-test', reports, 600)
     launch_demo(snapshot, source, manifest, image, reports, baseline, reports)

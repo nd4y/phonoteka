@@ -2,6 +2,7 @@ import { requestId } from "./api";
 import { reviewNextAction } from "./reviewNextAction";
 import { ReviewQueuePanel, reviewLabels } from "./ReviewQueuePanel";
 import { EnrichmentGaps, GapSummary } from "./EnrichmentGaps";
+import { musicGapFilters } from "./musicGapFilters";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
@@ -369,6 +370,7 @@ export default function App() {
   const [search, setSearch] = useState(initialView.query);
   const [query, setQuery] = useState(initialView.query);
   const [filter, setFilter] = useState(initialView.filter);
+  const retryScope = Object.hasOwn(musicGapFilters, filter) ? filter : "pending";
   const [pageNumber, setPageNumber] = useState(initialView.pageNumber);
   const [selected, setSelected] = useState<Track | null>(null);
   const [selectedId, setSelectedId] = useState(initialView.selectedId);
@@ -1504,6 +1506,12 @@ export default function App() {
               <>
                 <details className="workflow-library-tools">
                   <summary>Действия с коллекцией</summary>
+                  {retryScope !== "pending" && (
+                    <p className="muted small">
+                      В задание войдут записи выбранной категории, для которых этап ещё не завершён.
+                      Текстовый поиск сужает только список. Результаты требуют проверки.
+                    </p>
+                  )}
                   <div className="button-row">
                     <button className="button secondary" onClick={() => navigate("guide")}>
                       Подключение папки и поиск данных
@@ -1516,9 +1524,11 @@ export default function App() {
                         !summary?.capabilities.metadata_search ||
                         activeJobs.some((job) => job.kind === "analyze")
                       }
-                      onClick={() => void submitJob("analyze", [], { scope: "pending" })}
+                      onClick={() => void submitJob("analyze", [], { scope: retryScope })}
                     >
-                      Повторить незавершенный поиск
+                      {retryScope === "pending"
+                        ? "Повторить незавершенный поиск"
+                        : "Повторить поиск по выбранной категории"}
                     </button>
                     <button
                       className="button subtle"
@@ -1527,9 +1537,11 @@ export default function App() {
                         !summary?.capabilities.recognition ||
                         activeJobs.some((job) => job.kind === "recognize")
                       }
-                      onClick={() => void submitJob("recognize", [], { scope: "pending" })}
+                      onClick={() => void submitJob("recognize", [], { scope: retryScope })}
                     >
-                      Продолжить распознавание
+                      {retryScope === "pending"
+                        ? "Продолжить распознавание"
+                        : "Продолжить распознавание в выбранной категории"}
                     </button>
                   </div>
                   <details>
