@@ -891,6 +891,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     field_policy.require_payload(settings, conn, track, item['proposal'], 'apply')
                     item['proposal']=provider_policy.api_payload(conn,track,item['proposal'],'embed')
                     try:
+                        field_policy.require_writable_fields(item['proposal'])
                         album_gain_policy.payload(settings, conn, track, item['proposal'])
                     except media.MediaError as exc:
                         raise security.error(409, exc.code, exc.message) from exc
