@@ -166,6 +166,7 @@ const activeStates = [
   "waiting_authorization",
   "deferred",
 ];
+const detailAnalysisKinds = new Set(["analyze", "recognize", "align", "transcribe"]);
 const fields = [
   { key: "title", title: "Название" },
   { key: "artist", title: "Исполнитель" },
@@ -460,6 +461,12 @@ export default function App() {
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailAnalysisJob, setDetailAnalysisJob] = useState<{
+    id: string;
+    trackId: string;
+    revision: string;
+  } | null>(null);
+  const [sourceSelectionActive, setSourceSelectionActive] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -899,6 +906,65 @@ export default function App() {
   useEffect(() => {
     void loadTracks();
   }, [completedJobs, loadTracks]);
+  const detailAnalysisFinished =
+    !!detailAnalysisJob &&
+    jobs.some((job) => job.id === detailAnalysisJob.id && !activeStates.includes(job.state));
+  useEffect(() => {
+    if (
+      !detailAnalysisFinished ||
+      !detailAnalysisJob ||
+      !selected ||
+      detailAnalysisJob.trackId !== selected.id ||
+      detailAnalysisJob.revision !== selected.sha256 ||
+      (page !== "review" && page !== "lyrics") ||
+      !session?.authenticated ||
+      detailLoading ||
+      busy ||
+      dirty ||
+      sourceSelectionActive ||
+      policyDirty ||
+      reviewDirty
+    )
+      return;
+
+    const { id, trackId, revision } = detailAnalysisJob;
+    const controller = new AbortController();
+    const detailRequest = detailSequence.current;
+    void api<Track>(`/tracks/${encodeURIComponent(trackId)}`, { signal: controller.signal })
+      .then((track) => {
+        if (
+          !controller.signal.aborted &&
+          detailRequest === detailSequence.current &&
+          track.id === trackId &&
+          track.sha256 === revision
+        ) {
+          setSelected((previous) =>
+            previous?.id === trackId && previous.sha256 === revision ? track : previous,
+          );
+        }
+      })
+      .catch(() => {
+        // The card keeps its data and the manual refresh remains available.
+      })
+      .finally(() => {
+        if (!controller.signal.aborted)
+          setDetailAnalysisJob((previous) => (previous?.id === id ? null : previous));
+      });
+    return () => controller.abort();
+  }, [
+    detailAnalysisFinished,
+    detailAnalysisJob,
+    selected?.id,
+    selected?.sha256,
+    page,
+    session?.authenticated,
+    detailLoading,
+    busy,
+    dirty,
+    sourceSelectionActive,
+    policyDirty,
+    reviewDirty,
+  ]);
   const clearDirty = () =>
     !(dirty || policyDirty || reviewDirty || settingsDirty) ||
     window.confirm("Есть несохраненные изменения. Перейти и потерять этот черновик?");
@@ -1858,11 +1924,19 @@ export default function App() {
                           onJob={async (kind, params) => {
                             const job = await submitJob(kind, [selected.id], params);
                             if (job) {
+                              if (detailAnalysisKinds.has(kind)) {
+                                setDetailAnalysisJob({
+                                  id: job.id,
+                                  trackId: selected.id,
+                                  revision: selected.sha256,
+                                });
+                              }
                               setNotice(
                                 `${jobNames[kind]}: задача принята. Результат появится в разделе «Обработка».`,
                               );
                             }
                           }}
+                          onSourceSelectionActive={setSourceSelectionActive}
                         />
                         <details className="panel policy-details">
                           <summary>Закрепленные поля и источники</summary>
@@ -2321,6 +2395,7 @@ type EditorProps = {
   summary: Summary | null;
   busy: boolean;
   onDirty: (value: boolean) => void;
+  onSourceSelectionActive: (value: boolean) => void;
   onTab: (page: Page, preserveScroll?: boolean) => void;
   onBack: () => void;
   onRefresh: () => void;
@@ -2343,6 +2418,7 @@ function TrackEditor({
   summary,
   busy,
   onDirty,
+  onSourceSelectionActive,
   onTab,
   onBack,
   onRefresh,
@@ -2863,6 +2939,7 @@ function TrackEditor({
                 changed={changed}
                 onJob={onJob}
                 onRefresh={onRefresh}
+                onSourceSelectionActive={onSourceSelectionActive}
               />
             </div>
           )}

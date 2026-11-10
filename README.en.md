@@ -38,6 +38,8 @@ The catalog and track editor explain each missing tag, cover and synchronized ly
 
 A saved timed draft opens the Lyrics tab for a check against the vocals. The status summary sorts only format names, so larger track metadata does not enlarge that sort.
 
+Search and ASR started from a track card refresh that card after the job finishes. The refresh waits while you edit or choose sources.
+
 After configuring AcoustID, an unfinished search can continue without resending conclusively checked fragments to Shazam. Historical recording IDs are retained as evidence, while expired tags are not reused. The existing attempt allowance and current-file evidence requirements remain in force.
 
 Full reports read metadata sequentially without retaining the collection's cached artwork and drafts: [report memory](docs/en/report-memory.md).
