@@ -76,6 +76,8 @@ When publishing from a track card, wait for its submission receipt. Switching tr
 
 Select **Compare changes** to see the actual current-file versus proposed values after source priorities, including tags supplied by a lyrics provider. Locked and omitted fields are explicit. Comparison does not modify the file, previous proposal, lyrics document, or alignment. **Save as proposal** is a separate action that replaces the previous proposal in full without writing audio. Then open Tags and artwork or Lyrics to review and write the proposal. Changed search results, priorities, locks, or draft state require another comparison before saving.
 
+Other requests remain available while comparison or saving waits for the catalog. If the catalog reports that it is busy, check the proposal state before retrying.
+
 If LRCLIB places a single empty end marker up to one second past the audio, the comparison shows that it was removed. Timed words stay in the draft with their original timestamps. A timed line with words outside the audio still needs a different version or manual correction.
 
 Detailed fields and usage terms expand on demand. Embed/export restrictions remain visible and server provenance and permission checks remain enforced. `POST /api/tracks/{id}/analysis/preview` accepts the same `candidate_ids` and `If-Match` as selection. The UI submits its returned `preview_revision` when saving. Existing API clients can still create proposals directly. App Back first closes the comparison and returns to the retained choices.
