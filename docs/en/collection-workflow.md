@@ -54,6 +54,8 @@ Choose one candidate only in the groups you need: song tags, album/release, lyri
 
 When preparing an album batch, read the additional-fields line for each file. For example, a cover-only batch may keep a previously saved lyrics proposal. Verify that draft in the track editor before writing, or exclude the file from the batch and review it separately.
 
+The file name and thumbnail confirm that the browser has read the shared artwork. Preview is disabled while the file is loading.
+
 To select a few files from a large album, open the individual exclusions, exclude all files, then clear the exclusion for the files you want. The counter shows how many files will be included in the preview.
 
 Use the Albums section of the detailed report to search the collection by album and artist. Refine the query if only part of the matching groups is shown. Searching leaves the files untouched.

@@ -82,7 +82,7 @@ export function AlbumBatchPanel({
   const [enabled, setEnabled] = useState<string[]>([]);
   const [releaseFields, setReleaseFields] = useState<string[]>([]);
   const [exceptions, setExceptions] = useState<Record<string, Exception>>({});
-  const [cover, setCover] = useState<string | null>(null);
+  const [cover, setCover] = useState<{ name: string; dataUrl: string } | null>(null);
   const [source, setSource] = useState("");
   const [lockMode, setLockMode] = useState("skip");
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -179,19 +179,25 @@ export function AlbumBatchPanel({
       return;
     }
     const current = serial.current;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (current === serial.current) {
-        setCover(String(reader.result));
-        setSource("");
-        setError("");
-        invalidate();
-      }
-    };
-    reader.onerror = () => {
+    setBusy(true);
+    setError("");
+    invalidate();
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = reject;
+        reader.onabort = reject;
+        reader.readAsDataURL(file);
+      });
+      if (current !== serial.current) return;
+      setCover({ name: file.name, dataUrl });
+      setSource("");
+    } catch {
       if (current === serial.current) setError("Не удалось прочитать изображение.");
-    };
-    reader.readAsDataURL(file);
+    } finally {
+      if (current === serial.current) setBusy(false);
+    }
   }
   function exception(id: string, change: Partial<Exception>) {
     setExceptions((current) => ({ ...current, [id]: { ...current[id], ...change } }));
@@ -226,7 +232,7 @@ export function AlbumBatchPanel({
       release_fields: enabled.filter((field) => releaseFields.includes(field)),
       release_review_id: reviewId || null,
       release_review_version: reviewVersion || null,
-      cover,
+      cover: cover?.dataUrl ?? null,
       cover_source: chosenSource
         ? {
             track_id: chosenSource.track_id,
@@ -415,9 +421,14 @@ export function AlbumBatchPanel({
             </label>
             {(cover || chosenSource) && (
               <>
+                {cover && (
+                  <p className="muted small break-word" role="status">
+                    Выбран файл обложки: {cover.name}
+                  </p>
+                )}
                 <img
                   src={
-                    cover ||
+                    cover?.dataUrl ||
                     "/api/album-batches/cover?" +
                       new URLSearchParams({
                         track_id: chosenSource!.track_id,
