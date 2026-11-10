@@ -36,4 +36,6 @@ def compare(settings, conn, row, payload, token):
     return {'preview_revision': token, 'fields': fields,
             'blocked_fields': proposed.get('field_policy', {}).get('blocked_fields', []),
             'omitted_fields': proposed.get('policy_omitted_fields', []),
+            'lyric_error': proposed.get('candidate_lyric_error'),
+            'lyric_adjustment': proposed.get('candidate_lyric_adjustment'),
             'replaces_proposal': bool(previous)}

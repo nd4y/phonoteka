@@ -49,6 +49,8 @@ export type SelectionPreview = {
   fields: PreviewField[];
   blocked_fields: string[];
   omitted_fields: string[];
+  lyric_error?: string | null;
+  lyric_adjustment?: string | null;
   replaces_proposal: boolean;
 };
 
@@ -132,8 +134,17 @@ export function SourceSelectionComparison({
       {!!preview.omitted_fields.length && (
         <p className="warning-text">
           Не войдут в предложение:{" "}
-          {preview.omitted_fields.map((field) => fieldLabels[field] || field).join(", ")}. Проверьте
-          формат текста, таймкоды и закреплённые строки.
+          {preview.omitted_fields.map((field) => fieldLabels[field] || field).join(", ")}.{" "}
+          {preview.lyric_error === "invalid_timing"
+            ? "Одна или несколько меток выходят за границы аудио. Выберите другую версию текста."
+            : preview.lyric_error === "lyrics_line_locked"
+              ? "Вариант меняет закреплённые слова или время строки."
+              : "Проверьте формат текста и таймкоды."}
+        </p>
+      )}
+      {preview.lyric_adjustment === "empty_end_marker_removed" && !excluded.includes("lrc") && (
+        <p className="notice info">
+          Убрана пустая конечная метка за пределами аудио. Слова и их таймкоды сохранены.
         </p>
       )}
       {preview.replaces_proposal && (

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import Query, Request
 
-from . import db, intake, lyrics_review, media, provider_policy, security
+from . import catalog_sources, db, intake, lyrics_review, media, provider_policy, security
 
 
 def ready_target(settings, relative, *, write=False, missing=False):
@@ -221,13 +221,28 @@ def install(app, settings):
              stale_only: bool = False, accepted_only: bool = False):
         security.require_session(request, settings, owner_only=True)
         where = "json_extract(metadata,'$.publication.sha256') IS NOT NULL AND (is_current=0 OR json_extract(metadata,'$.publication.sha256')<>sha256)" if stale_only else "(is_current=1 OR json_extract(metadata,'$.publication.sha256') IS NOT NULL)"
-        if accepted_only:
-            where += """ AND is_current=1 AND EXISTS(SELECT 1 FROM settings s WHERE s.key='lyrics_review:'||tracks.id
-                AND json_extract(s.value,'$.accepted_revision')=tracks.sha256
-                AND (json_extract(metadata,'$.publication.sha256') IS NOT tracks.sha256 OR
-                     json_extract(metadata,'$.publication.review_version') IS NOT json_extract(s.value,'$.version')))"""
-        total = db.fetchone(settings.db_path, 'SELECT COUNT(*) AS count FROM tracks WHERE ' + where)['count']
-        rows = db.fetchall(settings.db_path, 'SELECT * FROM tracks WHERE ' + where + ' ORDER BY relative_path,id LIMIT ? OFFSET ?', (page_size, (page - 1) * page_size))
+        params = ()
+        with db.connect(settings.db_path) as conn:
+            conn.execute('BEGIN')
+            if accepted_only:
+                where += """ AND is_current=1 AND EXISTS(SELECT 1 FROM settings s WHERE s.key='lyrics_review:'||tracks.id
+                    AND json_extract(s.value,'$.accepted_revision')=tracks.sha256
+                    AND (json_extract(metadata,'$.publication.sha256') IS NOT tracks.sha256 OR
+                         json_extract(metadata,'$.publication.review_version') IS NOT json_extract(s.value,'$.version')))"""
+                retained = catalog_sources.completed_sources(conn)
+                if retained:
+                    children = set().union(*retained.values())
+                    published = {row['id'] for row in conn.execute("""SELECT id FROM tracks
+                        WHERE is_current=1 AND status NOT IN ('missing','error','conflict')
+                        AND json_extract(metadata,'$.publication.sha256')=sha256
+                        AND id IN (SELECT value FROM json_each(?))""", (json.dumps(sorted(children)),))}
+                    replaced = [parent for parent, outputs in retained.items() if published.issuperset(outputs)]
+                    where += """ AND (json_extract(metadata,'$.publication.sha256') IS NOT NULL
+                        OR id NOT IN (SELECT value FROM json_each(?)))"""
+                    params = (json.dumps(replaced),)
+            total = conn.execute('SELECT COUNT(*) AS count FROM tracks WHERE ' + where, params).fetchone()['count']
+            rows = [dict(row) for row in conn.execute('SELECT * FROM tracks WHERE ' + where + ' ORDER BY relative_path,id LIMIT ? OFFSET ?',
+                                                      (*params, page_size, (page - 1) * page_size))]
         return {'items': [plan_item(settings, row) for row in rows], 'page': page, 'page_size': page_size, 'total': total,
                 'automatic_deletion': False, 'phone_changes': False, 'integrity_verified': False}
 

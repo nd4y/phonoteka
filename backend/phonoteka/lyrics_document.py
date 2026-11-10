@@ -197,12 +197,13 @@ def check_payload(conn, row, payload, mode='manual'):
     result = deepcopy(payload)
     try:
         document = payload_document(conn, row, result)
-    except media.MediaError:
+    except media.MediaError as exc:
         if mode != 'candidate':
             raise
         result.pop('lrc', None); result.pop('lyrics_document', None)
         result.get('field_sources', {}).pop('lrc', None)
         result.setdefault('policy_omitted_fields', []).append('lrc')
+        result['candidate_lyric_error'] = exc.code
         return result
     if result.get('lyrics_document') and render(document['lines']) != result['lrc']:
         raise media.MediaError('lyrics_document_mismatch', 'LRC и структурированные строки отличаются')

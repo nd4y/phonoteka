@@ -123,6 +123,30 @@ def parse_lrc(text: str) -> dict[str, Any]:
             "complete": bool(timed) and not untimed, "needs_placement": bool(timed and untimed)}
 
 
+def trim_candidate_lrc_end_marker(text: str, duration: float | None) -> str:
+    """Discard a single empty provider end marker just beyond the audio."""
+    if type(duration) not in (int, float) or not duration > 0:
+        return text
+    try:
+        parsed = parse_lrc(text)
+    except MediaError:
+        return text  # Keep malformed input for normal validation and reporting.
+    lines = parsed["lines"]
+    if not parsed["complete"] or len(lines) < 2:
+        return text
+    marker = lines[-1]
+    if marker["text"].strip() or not 0 < marker["start_ms"] - duration * 1000 <= 1000:
+        return text
+    raw_line = marker["raw_line"]
+    words = [line for line in lines[:-1] if line["text"].strip()]
+    if (not words or any(line["raw_line"] == raw_line for line in lines[:-1])
+            or raw_line <= max(line["raw_line"] for line in words)):
+        return text
+    rows = text.splitlines(keepends=True)
+    del rows[raw_line]
+    return "".join(rows)
+
+
 def serialize_lrc(lines: list[dict[str, Any]] | dict[str, Any], *, allow_partial: bool = False) -> str:
     if isinstance(lines, dict):
         lines = lines["lines"]
