@@ -266,8 +266,15 @@ class Worker:
 
     def item_action(self,job,item,action):
         processing_activity.action(action)
-        with db.transaction(self.settings.db_path) as conn:
-            db.event(conn,'job_action',{'job_id':job['id'],'track_id':item['track_id'],'action':action})
+        try:
+            with db.transaction(self.settings.db_path) as conn:
+                db.event(conn,'job_action',{'job_id':job['id'],'track_id':item['track_id'],'action':action})
+        except sqlite3.OperationalError as exc:
+            if action != 'commit' or not sqlite_busy(exc):
+                raise
+            # This event is progress only. The durable file journal and the
+            # final authorization below still gate the filesystem change.
+            log('worker_database_busy', logging.WARNING, operation='commit_progress', job_id=job['id'])
         log('item_action',job_id=job['id'],track_id=opaque_id(item['track_id']),kind=job['kind'],action=action)
 
     def finish(self, job_id, state, error=None):
@@ -676,6 +683,8 @@ class Worker:
         commit_announced=False
         def authorize():
             nonlocal commit_announced
+            if not commit_announced:
+                self.item_action(job,item,'commit');commit_announced=True
             self.authorize(job)
             if job['kind'] in {'apply','publish'}:
                 latest=db.fetchone(self.settings.db_path,'SELECT sha256,metadata FROM tracks WHERE id=? AND is_current=1',(item['track_id'],))
@@ -706,8 +715,6 @@ class Worker:
                 comparison.assert_publish_allowed(self.settings,item['track_id'])
                 lyrics_review.assert_publish_allowed(self.settings,fresh,audit=audit,frozen=item.get('publication_review'))
                 publication.assert_target(self.settings, fresh, item.get('publication_target'))
-            if not commit_announced:
-                self.item_action(job,item,'commit');commit_announced=True
         if job["kind"] == "apply":
             from . import automatic_quality
             automatic_quality.assert_frozen(self.settings, current, item, job)
