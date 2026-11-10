@@ -58,6 +58,38 @@ def test_recovered_input_is_preserved_but_not_an_outstanding_deliverable(client,
     assert not exported[children[0]]['published_current_revision']
 
 
+@pytest.mark.parametrize('cue', [False, True])
+def test_ready_waiting_does_not_repeat_inputs_with_current_published_outputs(client, settings, cue):
+    authenticated(client, settings)
+    source, _, children = prepared(settings, cue=cue)
+    with db.transaction(settings.db_path) as conn:
+        revision = conn.execute('SELECT sha256 FROM tracks WHERE id=?', (source,)).fetchone()['sha256']
+        review = {'accepted_revision': revision, 'profile': 'relaxed', 'version': 1}
+        conn.execute('INSERT INTO settings VALUES(?,?)', ('lyrics_review:' + source, db.encode(review)))
+
+    def waiting():
+        response = client.get('/api/publication/plan?accepted_only=true')
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    assert waiting()['total'] == 1
+    for child in children:
+        with db.transaction(settings.db_path) as conn:
+            row = conn.execute('SELECT sha256,relative_path,metadata FROM tracks WHERE id=?', (child,)).fetchone()
+            meta = json.loads(row['metadata'])
+            meta['publication'] = {'sha256': row['sha256'], 'relative_path': row['relative_path']}
+            conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), child))
+        assert waiting()['total'] == int(child != children[-1])
+
+    assert waiting()['items'] == []
+    full = client.get('/api/publication/plan').json()
+    assert source in [row['track_id'] for row in full['items']]
+    with db.transaction(settings.db_path) as conn:
+        conn.execute('UPDATE tracks SET sha256=? WHERE id=?', ('0' * 64, children[-1]))
+    restored = waiting()
+    assert restored['total'] == 1 and restored['items'][0]['track_id'] == source
+
+
 @pytest.mark.parametrize('broken',['missing','superseded','parent_revision','export_identity','different_parent'])
 def test_unproven_outputs_do_not_hide_unfinished_input(client,settings,broken):
     authenticated(client,settings)
