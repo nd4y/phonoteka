@@ -386,7 +386,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
           COALESCE(SUM(fmt<>'cue' AND COALESCE(json_extract(metadata,'$.lrc'),'')=''),0) AS missing_lyrics,
           COALESCE(SUM(fmt<>'cue' AND COALESCE(json_extract(metadata,'$.publication.sha256')=sha256,0)),0) AS published
           FROM catalog""")
-        formats = {row['format']:row['n'] for row in db.fetchall(settings.db_path,"SELECT COALESCE(json_extract(metadata,'$.format'),'unknown') AS format,COUNT(*) AS n FROM tracks WHERE is_current=1 GROUP BY format")}
+        # Materialize only the format before grouping so SQLite never spills
+        # full metadata documents into the temporary sorter on status polls.
+        formats = {row['format']: row['n'] for row in db.fetchall(settings.db_path, """WITH formats AS MATERIALIZED (
+            SELECT COALESCE(json_extract(metadata,'$.format'),'unknown') AS format FROM tracks WHERE is_current=1
+        ) SELECT format,COUNT(*) AS n FROM formats GROUP BY format""")}
         active = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs WHERE state IN ('queued','running','paused','waiting_authorization','waiting','waiting_provider','deferred','interrupted')")["n"]
         heartbeat = json.loads(db.setting(settings.db_path, "worker_heartbeat", "{}"))
         recovery=db.setting(settings.db_path,'recovery_required','false')=='true';writable=settings.writable and not recovery

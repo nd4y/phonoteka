@@ -34,7 +34,8 @@ def project(conn, ids):
         return {}
     query = '''SELECT a.track_id,a.input_sha256,a.updated_at,
         json_extract(a.payload,'$.sources') AS sources,
-        json_extract(a.payload,'$.alignment.coverage') AS alignment_coverage,
+        CASE WHEN NOT COALESCE(json_extract(a.payload,'$.alignment.stale'),0)
+             THEN json_extract(a.payload,'$.alignment.coverage') END AS alignment_coverage,
         (SELECT json_group_array(json_object(
             'provider',json_extract(c.value,'$.provider'),
             'kind',json_extract(c.value,'$.kind'),
@@ -139,7 +140,7 @@ def describe(conn, settings, row, *, analysis=None, proposal=None, connection=No
                            'next_step': next_step, 'provider': provider,
                            'checked_at': checked_at, 'analysis_current': current,
                            'candidate_count': count})
-            coverage = analysis.get('alignment_coverage') if analysis else None
+            coverage = analysis.get('alignment_coverage') if current else None
             if field == 'synced_lyrics' and type(coverage) in (int, float) and 0 <= coverage <= 1:
                 result[-1]['last_alignment_coverage'] = coverage
 
@@ -162,7 +163,11 @@ def describe(conn, settings, row, *, analysis=None, proposal=None, connection=No
             except media.MediaError:
                 draft_value = False
         if draft_value:
-            add('proposal_ready', 'Есть сохранённый вариант, ещё не записанный в файл.', 'review', 'Проверьте предложение и запишите изменения.')
+            if field == 'synced_lyrics':
+                add('lyrics_draft_needs_review', 'Черновик с таймкодами ожидает проверки по аудио.', 'lyrics',
+                    'Сверьте слова и начало каждой строки с вокалом. Запишите текст после проверки.')
+            else:
+                add('proposal_ready', 'Есть сохранённый вариант, ещё не записанный в файл.', 'review', 'Проверьте предложение и запишите изменения.')
             continue
         failed_search = analysis.get('last_failed_search') if analysis else None
         if failed_search:

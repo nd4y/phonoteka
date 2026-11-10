@@ -36,6 +36,8 @@ Temporary SQLite contention while updating the export counter no longer aborts a
 
 The catalog and track editor explain each missing tag, cover and synchronized lyric field. Reasons distinguish an unattempted search, stale results, temporary provider failures and candidates awaiting review or writing. A failed new search is shown separately from its retained earlier results. Matching MusicBrainz editions are selectable album candidates. After an interrupted task is recovered, its remaining files can be cancelled while preserving completed changes. [Continue enrichment](docs/en/enrichment-gaps.md).
 
+A saved timed draft opens the Lyrics tab for a check against the vocals. The status summary sorts only format names, so larger track metadata does not enlarge that sort.
+
 After configuring AcoustID, an unfinished search can continue without resending conclusively checked fragments to Shazam. Historical recording IDs are retained as evidence, while expired tags are not reused. The existing attempt allowance and current-file evidence requirements remain in force.
 
 Full reports read metadata sequentially without retaining the collection's cached artwork and drafts: [report memory](docs/en/report-memory.md).
