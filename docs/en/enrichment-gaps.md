@@ -7,7 +7,7 @@ The page indicator shows a loading state and disables pagination until the reque
 In Sources, open the album search refinement when the track title, artist and album are known and the file lacks an album or cover. The search finds MusicBrainz releases with the given album title and their covers. Earlier lyric results remain available. Review the edition and select the fields before writing.
 
 - An unattempted or stale search offers a search against the current file revision.
-- An unattempted separate cover search does not mean artwork is unavailable online. Check the album and release candidates first.
+- Artwork gaps explain whether the title or artist, album, or exact release is still needed. When a suitable release is known, the catalog shows whether its artwork has been requested.
 - Candidates require review; a saved proposal still needs writing to the file. A draft for one field does not explain other missing fields.
 - Temporary provider errors or throttling mean the search is incomplete. Retries respect provider cooldowns; IP rotation and quota resets are not used.
 - If a new search or recognition attempt for the current file fails, the track shows that failure instead of an earlier gap explanation. Previous analysis and saved proposals remain available. The timestamp is the job update time, not an individual request time; processing contains error details. A successfully refreshed analysis supersedes the old failure explanation. Recognition is never retried automatically and its attempt allowance is not reset.
@@ -22,6 +22,8 @@ When an ASR result is retained, the missing-lyrics explanation includes the frac
 When a source policy blocks saving manual changes, choose **Restore saved values and open sources**. This discards unsaved changes. Select an available source and compare the fields before saving.
 
 ## Finding gaps in music
+
+When uploading a cover, select the embedded slot and apply the artwork preview to the draft. A slot selection by itself does not create a change to write.
 
 Choose **Music gaps** in the collection or select a specific field in the **Gaps in individual music recordings** group. These filters skip possible mixes, CUE sheets and album images, and entries explicitly tagged as speech, audiobooks or podcasts. Entries with no genre remain visible for review. The filter sets the list and playback order. In **Collection actions**, retrying search or recognition covers all eligible records in the selected music category, including those outside the current text search. Review the results before writing them.
 

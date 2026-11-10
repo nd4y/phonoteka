@@ -105,7 +105,13 @@ def validate_payload(settings, conn, row, payload, mode='manual'):
     return result
 
 
+def require_writable_fields(payload):
+    if not (payload.get('tags') or payload.get('cover') or payload.get('lrc') is not None):
+        raise media.MediaError('proposal_empty', 'В предложении нет тегов, обложки или текста для записи')
+
+
 def assert_apply(settings, row, payload, conn=None):
+    require_writable_fields(payload)
     if conn is not None:
         validate_payload(settings, conn, row, payload, 'apply')
     else:

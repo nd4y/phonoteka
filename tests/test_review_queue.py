@@ -40,7 +40,8 @@ def enqueue(client, headers, kind, items):
 def test_same_review_population_for_summary_filter_and_plan(client, settings):
     authenticated(client, settings)
     plain, sha = seed(settings, 'plain.mp3'); proposal(settings, plain, sha, {'tags': {}, 'lrc': 'Проверить слова\nЕщё строка'})
-    empty, sha = seed(settings, 'empty.mp3'); proposal(settings, empty, sha, {'tags': {}})
+    empty, sha = seed(settings, 'empty.mp3'); proposal(settings, empty, sha, {'tags': {}, 'slot_selection': {
+        'inventory_sha256': '0'*64, 'cover_slot_id': 'new'}})
     stale, sha = seed(settings, 'stale.mp3'); proposal(settings, stale, '0'*64, {'tags': {'title': 'old'}})
     mixed, sha = seed(settings, 'mix.mp3'); mix(settings, mixed, sha)
     error, sha = seed(settings, 'broken.mp3')

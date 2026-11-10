@@ -22,6 +22,20 @@ def analysis(settings, track_id, sha, candidates):
         conn.execute('INSERT INTO analyses VALUES(?,?,?,?)', (track_id, sha, db.encode({'input_sha256': sha, 'candidates': candidates, 'sources': [], 'state': 'needs_review'}), db.utcnow()))
 
 
+def test_slot_only_proposal_cannot_queue_audio_write(settings):
+    cfg = replace(settings, read_only=False, storage_verified=True)
+    with TestClient(create_app(cfg), base_url=cfg.app_url) as owner:
+        headers = authenticated(owner, cfg)
+        track_id, sha = seed(cfg)
+        proposal = owner.post(f'/api/tracks/{track_id}/proposal', headers={**headers, 'If-Match': sha},
+            json={'tags': {}, 'slot_selection': {'inventory_sha256': '0'*64, 'cover_slot_id': 'new'}})
+        assert proposal.status_code == 201, proposal.text
+        apply = owner.post('/api/jobs', headers={**headers, 'Idempotency-Key': 'slot-only'},
+            json={'kind': 'apply', 'track_ids': [track_id], 'params': {'proposal_id': proposal.json()['id']}})
+        assert apply.status_code == 409 and apply.json()['code'] == 'proposal_empty'
+        assert not db.fetchone(cfg.db_path, "SELECT id FROM jobs WHERE kind='apply'")
+
+
 def test_field_policy_owner_revision_and_compare_and_swap(client, settings):
     track_id, sha = seed(settings)
     path = f'/api/tracks/{track_id}/policy'
