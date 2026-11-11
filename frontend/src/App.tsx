@@ -205,7 +205,10 @@ const durationOf = (value?: number) =>
     : "-";
 const dateOf = (value?: string | null) =>
   value
-    ? new Date(value).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" })
+    ? new Date(value).toLocaleString("ru-RU", {
+        dateStyle: "short",
+        timeStyle: "short",
+      })
     : "Нет данных";
 const countOf = (value?: number) => (value == null ? "-" : value.toLocaleString("ru-RU"));
 
@@ -271,7 +274,10 @@ function Login({ onLogin, initialError }: { onLogin: () => Promise<void>; initia
     setBusy(true);
     setError("");
     try {
-      await api("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) });
+      await api("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ username, password }),
+      });
       setPassword("");
       await onLogin();
     } catch (err) {
@@ -382,7 +388,10 @@ export default function App() {
     if (session?.authenticated) saveGuideState({ step: guideStep, history: [] });
   }, [guideStep, session?.authenticated]);
   const [summary, setSummary] = useState<Summary | null>(null);
-  const [trackPage, setTrackPage] = useState<{ key: string; data: TrackPage } | null>(null);
+  const [trackPage, setTrackPage] = useState<{
+    key: string;
+    data: TrackPage;
+  } | null>(null);
   const [catalogError, setCatalogError] = useState("");
   const tracks = trackPage?.data ?? null;
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -399,10 +408,14 @@ export default function App() {
   const [dirty, setDirty] = useState(false);
   const [policyDirty, setPolicyDirty] = useState(false);
   const [showReports, setShowReports] = useState(false);
-  const [writtenTrack, setWrittenTrack] = useState<{ id: string; name: string } | null>(null);
-  const [focusSection, setFocusSection] = useState<{ id: string; kind: "quality" | "plan" } | null>(
-    null,
-  );
+  const [writtenTrack, setWrittenTrack] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [focusSection, setFocusSection] = useState<{
+    id: string;
+    kind: "quality" | "plan";
+  } | null>(null);
   const [reviewVersion, setReviewVersion] = useState(0);
   const qualityElement = useRef<HTMLDetailsElement>(null),
     planElement = useRef<HTMLDetailsElement>(null);
@@ -438,7 +451,11 @@ export default function App() {
     setFocusSection({ kind: "plan", id: "" });
   }
   async function fixTrack(id: string, reason = "accepted_file_revision_required") {
-    if (await openTrack({ id }, "review", { context: { search: "", filter: "all" } })) {
+    if (
+      await openTrack({ id }, "review", {
+        context: { search: "", filter: "all" },
+      })
+    ) {
       setWrittenTrack((current) => (current?.id === id ? null : current));
       if (
         ![
@@ -457,7 +474,8 @@ export default function App() {
   const pendingReviewWrites = useRef(
     new Map<string, { job: Job; nextId: string | null; nextPage: number; coverOnly: boolean }>(),
   );
-  const [reviewMoving, setReviewMoving] = useState(false);
+  const [reviewMoveAction, setReviewMoveAction] = useState<"write" | "skip" | null>(null);
+  const reviewMoving = reviewMoveAction !== null;
   const reviewLock = useRef(false);
   const [reviewDirty, setReviewDirty] = useState(false);
   const [settingsDirty, setSettingsDirty] = useState(false);
@@ -627,7 +645,12 @@ export default function App() {
     setPageNumber(1);
   }
   function changeFilter(value: string) {
-    recordCatalogStep({ filter: value, pageNumber: 1, scroll: 0, queueScroll: 0 });
+    recordCatalogStep({
+      filter: value,
+      pageNumber: 1,
+      scroll: 0,
+      queueScroll: 0,
+    });
     setFilter(value);
     setPageNumber(1);
   }
@@ -770,7 +793,10 @@ export default function App() {
       !disposed && authenticated.current && current === playbackRequests.current;
     void restorePlaybackSession(
       saved,
-      (id) => api<Track>(`/tracks/${encodeURIComponent(id)}`, { signal: controller.signal }),
+      (id) =>
+        api<Track>(`/tracks/${encodeURIComponent(id)}`, {
+          signal: controller.signal,
+        }),
       isCurrent,
     )
       .then((value) => {
@@ -967,7 +993,9 @@ export default function App() {
     }
     const controller = new AbortController();
     const detailRequest = detailSequence.current;
-    void api<Track>(`/tracks/${encodeURIComponent(trackId)}`, { signal: controller.signal })
+    void api<Track>(`/tracks/${encodeURIComponent(trackId)}`, {
+      signal: controller.signal,
+    })
       .then((track) => {
         if (
           !controller.signal.aborted &&
@@ -1172,7 +1200,7 @@ export default function App() {
     if (reviewLock.current || busy || loading || resultsUpdating || !tracks || !clearDirty())
       return;
     reviewLock.current = true;
-    setReviewMoving(true);
+    setReviewMoveAction(apply ? "write" : "skip");
     setError("");
     const generation = detailSequence.current;
     let appliedKey: string | null = null;
@@ -1213,8 +1241,19 @@ export default function App() {
         if (pending) {
           nextId = pending.nextId;
           nextPage = pending.nextPage;
-        } else pendingReviewWrites.current.set(key, { job, nextId, nextPage, coverOnly });
-        setDetailJob({ id: job.id, trackId: track.id, revision: track.sha256, writeKey: key });
+        } else
+          pendingReviewWrites.current.set(key, {
+            job,
+            nextId,
+            nextPage,
+            coverOnly,
+          });
+        setDetailJob({
+          id: job.id,
+          trackId: track.id,
+          revision: track.sha256,
+          writeKey: key,
+        });
         setNotice("");
         const result = await awaitReviewWrite(
           job,
@@ -1287,7 +1326,7 @@ export default function App() {
       if (authenticated.current) setError(messageFor(problem));
     } finally {
       reviewLock.current = false;
-      setReviewMoving(false);
+      setReviewMoveAction(null);
     }
   }
   async function submitJob(kind: string, ids: string[] = [], params: Record<string, unknown> = {}) {
@@ -1945,7 +1984,7 @@ export default function App() {
                           onSkip={() => void advanceReview(selected)}
                           onApplyNext={() => advanceReview(selected, true)}
                           onApplyCover={() => advanceReview(selected, true, true)}
-                          moving={reviewMoving}
+                          moveAction={reviewMoveAction}
                           editingBlocked={policyDirty || reviewDirty}
                           audioRef={audioRef}
                           audioTime={audioTime}
@@ -2092,12 +2131,16 @@ export default function App() {
             {page === "jobs" && (
               <JobsView
                 onOpenTrack={(id) =>
-                  void openTrack({ id }, "review", { context: { search: "", filter: "all" } })
+                  void openTrack({ id }, "review", {
+                    context: { search: "", filter: "all" },
+                  })
                 }
                 jobs={jobs}
                 refresh={loadStatus}
                 onCancel={async (id) => {
-                  await api(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+                  await api(`/jobs/${encodeURIComponent(id)}/cancel`, {
+                    method: "POST",
+                  });
                   setNotice(
                     "Запрошена отмена. Текущая запись файла завершится безопасно. Уже завершенные изменения сохранятся.",
                   );
@@ -2221,7 +2264,10 @@ export default function App() {
                         void api<Track>(`/tracks/${encodeURIComponent(id)}`)
                           .then((track) => {
                             if (current !== playbackRequests.current) return;
-                            selectPlayback(track, true, undefined, { search: "", filter: "all" });
+                            selectPlayback(track, true, undefined, {
+                              search: "",
+                              filter: "all",
+                            });
                             setPlayback((previous) =>
                               previous
                                 ? {
@@ -2312,7 +2358,10 @@ export default function App() {
             onNext={nextAvailable ? (keepPlaying) => void movePlayback(1, keepPlaying) : undefined}
             onOpen={() => {
               if (selectedId === playback.track.id && selected) navigate("review");
-              else void openTrack(playback.track, "review", { preservePlayback: true });
+              else
+                void openTrack(playback.track, "review", {
+                  preservePlayback: true,
+                });
             }}
             onClose={forgetPlayback}
           />
@@ -2460,7 +2509,7 @@ type EditorProps = {
   onSkip: () => void;
   onApplyNext: () => Promise<void>;
   onApplyCover: () => Promise<void>;
-  moving: boolean;
+  moveAction: "write" | "skip" | null;
   editingBlocked?: boolean;
   audioRef: React.RefObject<HTMLAudioElement | null>;
   audioTime: number;
@@ -2483,7 +2532,7 @@ function TrackEditor({
   onSkip,
   onApplyNext,
   onApplyCover,
-  moving,
+  moveAction,
   editingBlocked = false,
   audioRef,
   audioTime,
@@ -2501,6 +2550,7 @@ function TrackEditor({
   onSave,
   onJob,
 }: EditorProps) {
+  const moving = moveAction !== null;
   const activeProposal = (
     track.review
       ? track.review.proposal_state === "pending"
@@ -2809,20 +2859,27 @@ function TrackEditor({
                     if (nextAction === "save") void save();
                     else if (nextAction === "prepare" && track.review?.action)
                       void onJob(track.review.action.kind, {
-                        review_tokens: { [track.id]: track.review.action.token },
+                        review_tokens: {
+                          [track.id]: track.review.action.token,
+                        },
                       });
                     else if (nextAction === "recording") {
                       const heading = document.getElementById(`recording-type-${track.id}`);
                       const details = heading?.closest("details");
                       if (details) details.open = true;
-                      heading?.scrollIntoView({ block: "center", behavior: "auto" });
+                      heading?.scrollIntoView({
+                        block: "center",
+                        behavior: "auto",
+                      });
                     } else if (nextAction === "file") setSourcesOpen(true);
                     else if (nextAction === "write") void onApplyNext();
                     else if (nextAction === "recover") void onJob("normalize_audio");
                     else if (nextAction === "lyrics") {
                       onTab("lyrics", true);
                       window.requestAnimationFrame(() => {
-                        lyricsEditorContainer.current?.focus({ preventScroll: true });
+                        lyricsEditorContainer.current?.focus({
+                          preventScroll: true,
+                        });
                         lyricsEditorContainer.current?.scrollIntoView({
                           block: "start",
                           behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -2855,7 +2912,7 @@ function TrackEditor({
                             : nextAction === "save"
                               ? "Сохранить черновик"
                               : nextAction === "write"
-                                ? moving
+                                ? moveAction === "write"
                                   ? "Записываем..."
                                   : "Записать и дальше"
                                 : nextAction === "recover"
@@ -2914,8 +2971,12 @@ function TrackEditor({
               <AudioLines size={18} />
               Прослушать эту запись
             </button>
-            <button className="button subtle" onClick={onSkip} disabled={busy || saving || changed}>
-              Пропустить и дальше
+            <button
+              className="button subtle"
+              onClick={onSkip}
+              disabled={busy || saving || changed || moving}
+            >
+              {moveAction === "skip" ? "Открываем следующую запись…" : "Пропустить и дальше"}
               <ArrowRight size={17} />
             </button>
           </div>
@@ -3077,7 +3138,10 @@ function TrackEditor({
                               value={draft[field.key]}
                               disabled={!writable || saving}
                               onChange={(event) =>
-                                setDraft({ ...draft, [field.key]: event.target.value })
+                                setDraft({
+                                  ...draft,
+                                  [field.key]: event.target.value,
+                                })
                               }
                             />
                           </div>
@@ -3087,7 +3151,10 @@ function TrackEditor({
                             className="text-button"
                             disabled={!writable || saving}
                             onClick={() => {
-                              setDraft({ ...draft, [field.key]: textTag(track.tags, field.key) });
+                              setDraft({
+                                ...draft,
+                                [field.key]: textTag(track.tags, field.key),
+                              });
                               setShowAllFields(true);
                             }}
                           >
@@ -3403,7 +3470,11 @@ function LyricsEditor({
   onSeek: (seconds: number) => void;
 }) {
   const lastEmitted = useRef(value);
-  const initial = useRef<{ lines: LyricLine[]; warnings: string[]; error: string } | null>(null);
+  const initial = useRef<{
+    lines: LyricLine[];
+    warnings: string[];
+    error: string;
+  } | null>(null);
   if (!initial.current) {
     try {
       initial.current = { ...parseLyrics(value), error: "" };
@@ -3840,16 +3911,34 @@ function SettingsView({
         <h2>Возможности</h2>
         <div className="capability-list">
           {[
-            { label: "Каталог и проверка аудио", ready: summary?.capabilities.audit },
-            { label: "Ручные предложения тегов и LRC", ready: summary?.capabilities.edit },
+            {
+              label: "Каталог и проверка аудио",
+              ready: summary?.capabilities.audit,
+            },
+            {
+              label: "Ручные предложения тегов и LRC",
+              ready: summary?.capabilities.edit,
+            },
             {
               label: "Запись MP3 / FLAC / M4A / OGG / OPUS / WAV / AIFF",
               ready: summary?.capabilities.apply,
             },
-            { label: "Публикация готовой коллекции", ready: summary?.capabilities.publish },
-            { label: "Поиск метаданных и текстов", ready: summary?.capabilities.metadata_search },
-            { label: "Распознавание по аудиоотпечатку", ready: summary?.capabilities.recognition },
-            { label: "ASR и выравнивание текста", ready: summary?.capabilities.asr },
+            {
+              label: "Публикация готовой коллекции",
+              ready: summary?.capabilities.publish,
+            },
+            {
+              label: "Поиск метаданных и текстов",
+              ready: summary?.capabilities.metadata_search,
+            },
+            {
+              label: "Распознавание по аудиоотпечатку",
+              ready: summary?.capabilities.recognition,
+            },
+            {
+              label: "ASR и выравнивание текста",
+              ready: summary?.capabilities.asr,
+            },
           ].map((item) => (
             <div key={item.label}>
               <span>{item.label}</span>
