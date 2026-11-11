@@ -382,6 +382,7 @@ export default function App() {
   }, [guideStep, session?.authenticated]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [trackPage, setTrackPage] = useState<{ key: string; data: TrackPage } | null>(null);
+  const [catalogError, setCatalogError] = useState("");
   const tracks = trackPage?.data ?? null;
   const [jobs, setJobs] = useState<Job[]>([]);
   const [search, setSearch] = useState(initialView.query);
@@ -535,6 +536,8 @@ export default function App() {
   );
   function resetNavigation() {
     ++requestSequence.current;
+    catalogRead.current?.abort();
+    setCatalogError("");
     statusSequence.current.committed = ++statusSequence.current.issued;
     ++detailSequence.current;
     setLoading(false);
@@ -727,6 +730,7 @@ export default function App() {
     }));
   }
   const requestSequence = useRef(0);
+  const catalogRead = useRef<AbortController | null>(null);
   const detailSequence = useRef(0);
   const statusSequence = useRef({ issued: 0, committed: 0 });
   const refreshSession = useCallback(async () => {
@@ -870,14 +874,29 @@ export default function App() {
   }, [dirty, policyDirty, reviewDirty, settingsDirty, pwaReloadGuard]);
   const loadTracks = useCallback(async () => {
     if (!session?.authenticated) return;
+    catalogRead.current?.abort();
+    const controller = new AbortController();
+    catalogRead.current = controller;
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 25_000);
     setLoading(true);
-    await loadLatestResult(
-      requestSequence,
-      () => api<TrackPage>(trackRequest),
-      (data) => setTrackPage({ key: trackRequest, data }),
-      (err) => setError(messageFor(err)),
-      () => setLoading(false),
-    );
+    setCatalogError("");
+    try {
+      await loadLatestResult(
+        requestSequence,
+        () => api<TrackPage>(trackRequest, { signal: controller.signal }),
+        (data) => setTrackPage({ key: trackRequest, data }),
+        (err) =>
+          setCatalogError(timedOut ? "Каталог не загрузился за 25 секунд." : messageFor(err)),
+        () => setLoading(false),
+      );
+    } finally {
+      window.clearTimeout(timeout);
+      if (catalogRead.current === controller) catalogRead.current = null;
+    }
   }, [session?.authenticated, trackRequest]);
   const loadStatus = useCallback(async () => {
     if (!session?.authenticated) return;
@@ -1765,6 +1784,9 @@ export default function App() {
                     filter={filter}
                     onFilter={changeFilter}
                   />
+                  {catalogError && (
+                    <ErrorBox message={catalogError} retry={() => void loadTracks()} />
+                  )}
                   <TrackList
                     tracks={tracks}
                     matchingLabels={matchingLabels}
@@ -1803,6 +1825,9 @@ export default function App() {
                     filter={filter}
                     onFilter={changeFilter}
                   />
+                  {catalogError && (
+                    <ErrorBox message={catalogError} retry={() => void loadTracks()} />
+                  )}
                   <div className="queue-tracks" aria-busy={loading || search !== query}>
                     {tracks?.items.map((track) => (
                       <button
@@ -2115,6 +2140,9 @@ export default function App() {
                     onSearch={changeSearch}
                     onPage={setPageNumber}
                   />
+                  {catalogError && (
+                    <ErrorBox message={catalogError} retry={() => void loadTracks()} />
+                  )}
                   <TrackList
                     tracks={tracks}
                     matchingLabels={matchingLabels}

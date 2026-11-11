@@ -95,6 +95,8 @@ The saved-proposal count is narrower than the full review queue, which also incl
 
 The selected row indicates that its record is opening. Changing the search keeps a late response from opening the previous record over the new results.
 
+If the list takes more than 25 seconds to load, use **Retry** beside the search. The query and filters are preserved.
+
 Record review offers one next action; the activity log provides search, a problems filter and scroll pause. Settings are above the account in the left menu. See the [collection workflow](docs/en/collection-workflow.md).
 
 Sign-in is controlled by AUTH_ENABLED (enabled by default). [Configuration and restoring authentication](docs/en/authentication.md).
