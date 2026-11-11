@@ -99,6 +99,7 @@ import LyricsImport from "./LyricsImport";
 import MediaSlotsPanel from "./MediaSlotsPanel";
 import type { SlotSelection } from "./MediaSlotsPanel";
 import ArtworkImport from "./ArtworkImport";
+import SavedArtwork from "./SavedArtwork";
 import type { ArtworkReceipt } from "./ArtworkImport";
 import { reconcileImportedLines } from "./lyrics-document";
 import { Pagination } from "./Pagination";
@@ -3109,13 +3110,33 @@ function TrackEditor({
                         {cover
                           ? "Новое изображение добавлено к черновику."
                           : activeProposal?.cover
-                            ? "В предложении сохранена новая обложка. Ниже показана обложка текущего файла."
+                            ? "Ниже показана сохранённая обложка. Она попадёт в аудиофайл после записи изменений."
                             : track.has_art
                               ? "Изображение уже встроено в файл."
                               : "В файле нет обложки."}{" "}
                         Исходник JPEG или PNG до 20 МиБ и 25 мегапикселей.
                       </p>
                     </div>
+                    {!cover && activeProposal?.cover && (
+                      <div className="artwork-comparison">
+                        <SavedArtwork
+                          key={activeProposal.id}
+                          trackId={track.id}
+                          proposalId={activeProposal.id}
+                        />
+                        <figure>
+                          {track.has_art ? (
+                            <img
+                              src={`/api/tracks/${encodeURIComponent(track.id)}/art?v=${track.sha256}`}
+                              alt="Обложка текущего аудиофайла"
+                            />
+                          ) : (
+                            <p className="muted">В текущем файле нет обложки.</p>
+                          )}
+                          <figcaption>Сейчас в аудиофайле</figcaption>
+                        </figure>
+                      </div>
+                    )}
                     <ArtworkImport
                       trackId={track.id}
                       sha256={track.sha256}

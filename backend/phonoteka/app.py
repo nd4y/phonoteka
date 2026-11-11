@@ -593,6 +593,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         data, mime = content
         return Response(data, media_type=mime, headers={"Cache-Control": "private, no-store"})
 
+    @app.get('/api/tracks/{track_id}/proposals/{proposal_id}/art')
+    def proposed_art(request: Request, track_id: str, proposal_id: str):
+        security.require_session(request, settings)
+        row = _track_row(settings, track_id)
+        proposal = db.fetchone(settings.db_path,
+            'SELECT * FROM proposals WHERE id=? AND track_id=?', (proposal_id, track_id))
+        if not proposal:
+            raise security.error(404, 'proposal_not_found', 'Предложение не найдено')
+        if proposal['input_sha256'] != row['sha256']:
+            raise security.error(412, 'revision_conflict', 'Предложение относится к прежней версии файла')
+        payload = json.loads(proposal['payload'])
+        cover = payload.get('cover')
+        if not cover:
+            raise security.error(404, 'art_not_found', 'В предложении нет обложки')
+        origin = payload.get('field_sources', {}).get('cover', {})
+        sources = [source for source in payload.get('sources', [])
+                   if not origin.get('candidate_id') or source.get('id') == origin['candidate_id']]
+        with db.connect(settings.db_path) as conn:
+            provider_policy.api_payload(conn, row,
+                {'cover': cover, 'field_sources': {'cover': origin}, 'sources': sources}, 'cache')
+        try:
+            header, encoded = cover.split(',', 1)
+            mime = {'data:image/jpeg;base64': 'image/jpeg', 'data:image/png;base64': 'image/png'}[header]
+            if len(encoded) > 14 * 1024 * 1024:
+                raise ValueError('cover exceeds proposal limit')
+            data = base64.b64decode(encoded, validate=True)
+            signature = b'\xff\xd8\xff' if mime == 'image/jpeg' else b'\x89PNG\r\n\x1a\n'
+            if not data.startswith(signature):
+                raise ValueError('cover signature does not match MIME')
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise security.error(409, 'invalid_cover', 'Обложка предложения недоступна') from None
+        return Response(data, media_type=mime, headers={'Cache-Control': 'private, no-store'})
+
     @app.get("/api/jobs")
     def jobs(request: Request, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
              active_only: bool = False, active_first: bool = False, kind: str = Query('', max_length=64),

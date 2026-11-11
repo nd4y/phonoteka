@@ -1,5 +1,7 @@
 # phonoteka
 
+A saved proposal shows its cover beside the current file's cover before writing the audio. [Record review](docs/en/review-preparation.md).
+
 **Needs review** groups tracks by the next action: prepare data, choose a candidate, listen, or fix a file. Open the queue from the Overview, guide or collection menu. **Prepare available** queues bounded recording rechecks and lyric alignment drafts; disputed results remain pending. The summary, category counters and list use the same rules. [Review workflow](docs/en/review-preparation.md).
 
 **Music gaps** narrows the collection to individual recordings with missing tags, cover art or timed lyrics. The detailed report opens these gaps for each field. [Find gaps in music](docs/en/enrichment-gaps.md#finding-gaps-in-music).
