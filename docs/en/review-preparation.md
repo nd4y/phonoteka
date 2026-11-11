@@ -1,5 +1,9 @@
 # Review queue preparation
 
+## Reviewing saved artwork
+
+Under Tags and artwork, a saved proposal shows its own image beside the current file's cover. Saving the proposal does not change the audio. The image is bound to the proposal ID and current file revision; a changed file, logout or revoked source permission prevents serving an unsuitable preview. An image error is not replaced with the current cover.
+
 Navigation and Back also work in a direct LAN test UI: history initialization does not require `crypto.randomUUID`. Production retains HTTPS and its existing authentication and mutation protections.
 
 Open **Collection → Needs review**. **Open review queue** on the Overview and the guide's general review action open this same preparation panel. Select a track to enter its editor; the separate last-prepared-folder action retains its own filter. Categories are exclusive: file problems take priority, then composite recordings, then proposals. Counts cover the entire collection; search further narrows the list. These are tracks requiring a decision, not collection completion percentages.
