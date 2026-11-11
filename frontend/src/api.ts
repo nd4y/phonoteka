@@ -15,6 +15,36 @@ export class ApiError extends Error {
   }
 }
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const method = (options.method || "GET").toUpperCase();
+  if (!["GET", "HEAD"].includes(method)) return request<T>(path, options);
+  // A half-open connection must not pin the status/activity polling promise.
+  // Include response-body reads and preserve the caller's cancellation.
+  const controller = new AbortController();
+  const parent = options.signal;
+  const abort = () => controller.abort(parent?.reason);
+  if (parent?.aborted) abort();
+  else parent?.addEventListener("abort", abort, { once: true });
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 25_000);
+  try {
+    return await request<T>(path, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (timedOut)
+      throw new ApiError(
+        "Сервер не ответил за 25 секунд. Проверьте соединение и обновите состояние.",
+        408,
+        "read_timeout",
+      );
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    parent?.removeEventListener("abort", abort);
+  }
+}
+async function request<T>(path: string, options: RequestInit): Promise<T> {
   const headers = new Headers(options.headers);
   if (options.body && !(options.body instanceof FormData))
     headers.set("Content-Type", "application/json");
@@ -54,7 +84,11 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
         ? detail
         : detail
           ? JSON.stringify(detail)
-          : `Сервер вернул ошибку ${response.status}`;
+          : response.status === 404 && payload === null
+            ? mutation
+              ? "Сервис недоступен. Перед повтором записи проверьте результат в разделе «Обработка»."
+              : "Сервис недоступен. Обновите состояние после восстановления соединения."
+            : `Сервер вернул ошибку ${response.status}`;
     if (response.status === 401 && !path.startsWith("/auth/"))
       window.dispatchEvent(new Event("session-expired"));
     throw new ApiError(
@@ -63,7 +97,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
       typeof payload?.code === "string" ? payload.code : undefined,
     );
   }
-  return response.status === 204 ? (undefined as T) : response.json();
+  return response.status === 204 ? (undefined as T) : await response.json();
 }
 export function messageFor(error: unknown): string {
   if (error instanceof ApiError && error.code === "owner_session_required")
