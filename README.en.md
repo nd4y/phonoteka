@@ -2,6 +2,8 @@
 
 Status and job activity recover after a stalled server read. Failed updates are shown separately from task results and clear after recovery. [Connection recovery](docs/en/ui-connection-recovery.md).
 
+Skipping a record shows a next-record transition, without claiming that the file is being written. [Review feedback](docs/en/review-queue-feedback.md).
+
 A saved proposal shows its cover beside the current file's cover before writing the audio. [Record review](docs/en/review-preparation.md).
 
 **Needs review** groups tracks by the next action: prepare data, choose a candidate, listen, or fix a file. Open the queue from the Overview, guide or collection menu. **Prepare available** queues bounded recording rechecks and lyric alignment drafts; disputed results remain pending. The summary, category counters and list use the same rules. [Review workflow](docs/en/review-preparation.md).
