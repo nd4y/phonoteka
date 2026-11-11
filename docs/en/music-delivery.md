@@ -10,6 +10,8 @@ Legacy `[device_number, inode]` values retain their original strict comparison. 
 
 ## Recovery from a legacy root mismatch
 
+The existing NAS-side notifier is also versioned as `phonoteka.drive_notify`. It uses the same identity format as the ledger and retains exact-revision hashing, conflict handling and duplicate-notice protection. Its standalone Python source uses only the standard library; the NAS scheduler supplies `--music`, `--ledger` and `--state` paths and retains the existing service UID/GID. Install this compatible notifier before changing the ledger identity. Neither optional process is enabled by application startup.
+
 1. Stop only this delivery service and ensure no file transaction is pending. Preserve protected copies of its Compose, configuration and ledger.
 2. Independently verify the actual mount, directory, filesystem and complete manifest of previously delivered files. Every expected file hash must match. An unavailable or mismatched file blocks rebinding; never overwrite it to make the audit pass.
 3. With no intervening changes, explicitly set the same persistent identity in both configuration and ledger, preserving every other field. Keep rollback copies and before/after hashes. This is an operator migration, not a startup side effect.
