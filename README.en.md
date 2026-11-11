@@ -72,6 +72,8 @@ After a worker crash, unfinished read jobs pause while retaining completed resul
 If the catalog is briefly busy after ASR finishes, the worker retries storing the result without sending another request to the engine.
 
 Recovered Ready publications retain a receipt that the Music relay can verify against committed history.
+The optional delivery process ships as `python -m phonoteka.music_sync`. Persistent directory identity tolerates device renumbering while a replaced root or external file edit blocks delivery. See [Music setup and recovery](docs/en/music-delivery.md).
+The existing Drive notifier supports both ledger formats and must be upgraded with delivery before identity migration.
 
 Provider cache maintenance processes short catalog batches and skips unchanged provenance records so that editing and review can continue between batches.
 
