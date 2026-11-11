@@ -1,10 +1,88 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, messageFor, requestId, setSession } from "./api";
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   setSession({ authenticated: false });
 });
 describe("authenticated API client", () => {
+  it("releases a hung read and allows the next status refresh", async () => {
+    vi.useFakeTimers();
+    let signal!: AbortSignal;
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce((_url, options) => {
+        signal = options.signal;
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      })
+      .mockResolvedValueOnce(new Response('{"state":"succeeded"}'));
+    vi.stubGlobal("fetch", fetchMock);
+    const failed = expect(api("/summary")).rejects.toMatchObject({
+      code: "read_timeout",
+      status: 408,
+    });
+    await vi.advanceTimersByTimeAsync(25_000);
+    await failed;
+    expect(signal.aborted).toBe(true);
+    await expect(api("/summary")).resolves.toEqual({ state: "succeeded" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("bounds a stalled response body even when the caller has a cancellation signal", async () => {
+    vi.useFakeTimers();
+    const parent = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url, options) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            new Promise((_resolve, reject) => {
+              options.signal.addEventListener("abort", () => reject(options.signal.reason), {
+                once: true,
+              });
+            }),
+        }),
+      ),
+    );
+    const failed = expect(
+      api("/jobs/one/activity", { signal: parent.signal }),
+    ).rejects.toMatchObject({ code: "read_timeout" });
+    await vi.advanceTimersByTimeAsync(25_000);
+    await failed;
+    expect(parent.signal.aborted).toBe(false);
+  });
+  it("preserves caller cancellation and clears the read deadline", async () => {
+    vi.useFakeTimers();
+    const parent = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        (_url, options) =>
+          new Promise((_resolve, reject) => {
+            options.signal.addEventListener("abort", () => reject(options.signal.reason), {
+              once: true,
+            });
+          }),
+      ),
+    );
+    const error = new DOMException("caller stopped", "AbortError");
+    const failed = expect(api("/summary", { signal: parent.signal })).rejects.toBe(error);
+    parent.abort(error);
+    await failed;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("does not retry a write when the reverse proxy cannot route the request", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("404 page not found", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(api("/jobs", { method: "POST" })).rejects.toThrow("Перед повтором записи");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
   it("generates a random UUID on a direct LAN origin without randomUUID", () => {
     const getRandomValues = vi.fn((bytes: Uint8Array) => bytes.fill(255));
     vi.stubGlobal("crypto", { getRandomValues });

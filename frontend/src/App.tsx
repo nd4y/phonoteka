@@ -472,6 +472,7 @@ export default function App() {
   } | null>(null);
   const [sourceSelectionActive, setSourceSelectionActive] = useState(false);
   const [error, setError] = useState("");
+  const [statusError, setStatusError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [theme, setTheme] = useState(() => {
@@ -558,6 +559,7 @@ export default function App() {
     setTrackPage(null);
     setSummary(null);
     setJobs([]);
+    setStatusError("");
     setDirty(false);
     setPolicyDirty(false);
     setReviewDirty(false);
@@ -910,11 +912,13 @@ export default function App() {
         ]),
       (results) => {
         if (results[0].status === "fulfilled") setSummary(results[0].value);
-        else setError(messageFor(results[0].reason));
         if (results[1].status === "fulfilled") setJobs(results[1].value.items);
-        else setError(messageFor(results[1].reason));
+        const failures = results.flatMap((result) =>
+          result.status === "rejected" ? [messageFor(result.reason)] : [],
+        );
+        setStatusError([...new Set(failures)].join(" "));
       },
-      (err) => setError(messageFor(err)),
+      (err) => setStatusError(messageFor(err)),
     );
   }, [session?.authenticated]);
   useEffect(() => {
@@ -1576,6 +1580,12 @@ export default function App() {
                   void loadTracks();
                   void loadStatus();
                 }}
+              />
+            )}
+            {statusError && (
+              <ErrorBox
+                message={`Статус не обновлён: ${statusError}`}
+                retry={() => void loadStatus()}
               />
             )}
             {notice && (
