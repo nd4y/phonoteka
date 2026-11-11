@@ -121,6 +121,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y espeak
           python3 tests/inference_smoke.py
+      - name: Generic Russian recognition word-time contract
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --cpus 1 --memory 256m --pids-limit 64 --tmpfs /tmp:size=32m \
+            -e OPENBLAS_NUM_THREADS=1 -e OMP_NUM_THREADS=1 \
+            -v "$PWD/integrations/pc2_asr:/engine:ro" --entrypoint python \
+            phonoteka-inference:ci /engine/test_gigaam_worker.py
       - name: Push exact tested inference candidate
         if: github.event_name != 'pull_request'
         id: candidate

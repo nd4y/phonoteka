@@ -222,10 +222,17 @@ export function AnalysisPanel({
             Независимая расшифровка. Ошибки слов и пропуски вокала возможны; автоматическая запись
             выключена.
           </p>
-          {!!analysis.asr.segments?.some((s) => s.uncertain) && (
+          {analysis.asr.confidence_available === false ? (
             <p className="warning-text small">
-              Есть фрагменты с низкой уверенностью. Проверьте их по аудио.
+              Движок не предоставляет оценку уверенности слов. Таймкоды выравниваются отдельно;
+              результат требует проверки по аудио.
             </p>
+          ) : (
+            !!analysis.asr.segments?.some((s) => s.uncertain) && (
+              <p className="warning-text small">
+                Есть фрагменты с низкой уверенностью. Проверьте их по аудио.
+              </p>
+            )
           )}
           <pre>
             {analysis.asr.text ||

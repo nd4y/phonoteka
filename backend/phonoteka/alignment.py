@@ -6,7 +6,7 @@ from .media import parse_lrc, serialize_lrc
 from .providers import normalized
 
 
-def align_lines(text, words, duration):
+def align_lines(text, words, duration, *, unscored_words=False):
     if re.search(r'\[\d+:\d+',text):
         original=parse_lrc(text)['lines']
     else: original=[{'text':x,'start_ms':None} for x in text.splitlines() if x.strip()]
@@ -15,7 +15,10 @@ def align_lines(text, words, duration):
         for token in normalized(line['text']).split(): tokens.append(token);owners.append(index)
     spoken=[];positions=[]
     for word in words:
-        if word.get('probability',0)<.5 or word.get('start',-1)<0 or word.get('end',duration+1)>duration+.1: continue
+        # Unscored independent recognition is only a lexical anchor. The final
+        # forced-alignment likelihood/timeline gates still apply separately.
+        if ('probability' in word or not unscored_words) and word.get('probability',0)<.5:continue
+        if word.get('start',-1)<0 or word.get('end',duration+1)>duration+.1: continue
         for token in normalized(word.get('word','')).split(): spoken.append(token);positions.append(word)
     if len(tokens)>20000 or len(spoken)>20000: raise ValueError('Alignment text exceeds limit')
     mapped={}

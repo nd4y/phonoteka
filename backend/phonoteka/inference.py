@@ -101,8 +101,11 @@ def execute(body, on_model_loaded=None):
             result=engine.transcribe(pcm,body.get('language'),pcm_duration)
             alignment=None
             if body.get('reference_text'):
-                alignment=align_with_provider(samples,body['reference_text'],result['words'],pcm_duration,lambda clip,text:engine.align_window(clip,text,result['language']))
+                alignment=align_with_provider(samples,body['reference_text'],result['words'],pcm_duration,
+                    lambda clip,text:engine.align_window(clip,text,result['language']),
+                    unscored_words=result.get('engine')=='gigaam' and result.get('word_probabilities') is False)
                 alignment['engine_device']='pc2_cuda'
+                alignment['recognition_model']=result['model']
         media._expect(source,body['sha256'])
         return {**result,'duration':pcm_duration,'duration_evidence':duration_evidence,'alignment':alignment,'state':'draft','input_sha256':body['sha256']}
     from .inference_budget import require_cpu_capacity
