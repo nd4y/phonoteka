@@ -38,6 +38,8 @@ class Scenario:
                        "api_url": settings.app_url,
                        "music_identity": (sync.music_root_identity(self.music) if identity_kind == "persistent"
                                           else [info.st_dev, info.st_ino])}
+        # Root-identity tests need every other configured mount to exist first.
+        (settings.publication_root / "Ready").mkdir(parents=True, exist_ok=True)
         (self.state / "state.json").write_text(json.dumps({"schema": 1, "music_identity": self.config["music_identity"],
                                                            "tracks": {}, "conflicts": {}, "pending": None,
                                                            "delivered_count": 0, "queue": {}, "seen_jobs": []}), encoding="utf-8")
