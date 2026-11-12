@@ -1,5 +1,9 @@
 # phonoteka
 
+If the Work filesystem device changes, the review UI offers an explicit whole-catalogue
+SHA-256 reconciliation. Only a complete match can rebind the known directory; audio,
+tags and review decisions remain unchanged. See [confirmed fields](docs/en/confirmed-fields.md).
+
 **Needs review** offers bulk filling of independently confirmed tags and artwork, separately
 from lyric acceptance. Preview changes and remaining reasons before submitting; disputed fields
 stay pending. [Rules and workflow](docs/en/confirmed-fields.md).

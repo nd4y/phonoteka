@@ -38,6 +38,7 @@ ACTIONS = {
     "publish_sidecars": "Публикация LRC и обложек рядом с аудио",
 }
 PHASES = {
+    'root_sha256':'Сверка полного SHA-256 файла с каталогом',
     'preflight':'Проверка версии файла и разрешений', 'fingerprint_sample':'Подготовка аудиоотпечатка',
     'fingerprint_lookup':'Поиск совпадения Shazam', 'metadata_lookup':'Запрос тегов, обложки и текста',
     'decode':'Проверка декодирования и сигнала', 'write_tags':'Подготовка резервной версии и запись тегов',
@@ -206,6 +207,8 @@ def action_for(row):
         return "Обработка приостановлена"
     if payload.get("pause_requested"):
         return "Завершение текущих файлов перед паузой"
+    if payload.get('params', {}).get('reconcile_root') is True:
+        return 'Сверка подключения: SHA-256 всех учтённых файлов'
     if row["stage"] == "waiting_storage":
         return "Ожидание свободного места в хранилище"
     if row["stage"] == "waiting_provider":

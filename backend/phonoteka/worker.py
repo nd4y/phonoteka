@@ -453,6 +453,9 @@ class Worker:
 
     async def scan(self, job):
         from . import metadata_preparation
+        if json.loads(job['payload']).get('params', {}).get('reconcile_root') is True:
+            from . import work_reconciliation
+            return await work_reconciliation.run(self, job)
         if json.loads(job['payload']).get('trigger') == metadata_preparation.CONTRACT:
             return await metadata_preparation.scan(self, job)
         identity = await self.io(root_identity, self.settings.work_root)
