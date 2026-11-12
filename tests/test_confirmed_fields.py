@@ -335,7 +335,7 @@ def test_parent_cancel_does_not_publish_already_written_work(library, monkeypatc
     assert media.sha256_file(path) != sha
     assert not (cfg.publication_root/'Ready'/path.name).exists()
     child, = db.fetchall(cfg.db_path, "SELECT * FROM jobs WHERE kind='publish'")
-    assert child['state'] != 'succeeded'
+    assert child['state'] == 'cancelled' and child['cancel_requested']
 
 
 def test_publish_permission_is_checked_separately(library):

@@ -218,6 +218,8 @@ class Worker:
         if parent:
             previous = db.fetchone(self.settings.db_path, 'SELECT cancel_requested,state FROM jobs WHERE id=?', (parent,))
             if not previous or previous['cancel_requested'] or previous['state'] in {'cancelled', 'cancelled_partial'}:
+                with db.transaction(self.settings.db_path) as conn:
+                    conn.execute('UPDATE jobs SET cancel_requested=1,updated_at=? WHERE id=?', (db.utcnow(), job['id']))
                 raise media.MediaError('cancelled', 'Публикация остановлена вместе с заполнением полей')
         if self.user_cancelled(job['id']):
             raise media.MediaError('cancelled','Job was cancelled before its next effect')
