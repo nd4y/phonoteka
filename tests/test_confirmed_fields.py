@@ -390,7 +390,8 @@ def test_incomplete_or_conflicting_proof_stays_pending(library, change):
     assert media.sha256_file(path) == sha
 
 
-@pytest.mark.parametrize('mutation', [None, 'offset', 'profile', 'provider', 'sample', 'identity', 'expired'])
+@pytest.mark.parametrize('mutation', [None, 'offset', 'profile', 'provider', 'sample', 'identity', 'expired',
+    'acoustid_conflict', 'acoustid_disagrees', 'shazam_conflict', 'isrc', 'candidate_isrc'])
 def test_shazam_consensus_requires_real_separated_bound_samples_and_current_usage(library, mutation):
     # Pure proof-policy cases, not a claim that the two-second native fixture
     # contains these longer synthetic recognition samples.
@@ -401,6 +402,7 @@ def test_shazam_consensus_requires_real_separated_bound_samples_and_current_usag
         row = conn.execute('SELECT metadata FROM tracks WHERE id=?', (tid,)).fetchone()
         metadata = json.loads(row['metadata']); metadata['duration'] = 60
         data = json.loads(conn.execute('SELECT payload FROM analyses WHERE track_id=?', (tid,)).fetchone()['payload'])
+        acoustic = next(c for c in data['candidates'] if c['provider'] == 'acoustid')
         data['candidates'] = [c for c in data['candidates'] if c['provider'] != 'acoustid']
         data['candidates'][0]['duration'] = 60
         fingerprint = {'id': 'shazam:synthetic', 'provider': 'shazam', 'kind': 'metadata',
@@ -420,6 +422,18 @@ def test_shazam_consensus_requires_real_separated_bound_samples_and_current_usag
         elif mutation == 'sample': fingerprint['sample_sha256'] = 'c'*64
         elif mutation == 'identity': data['recognition_segments'][0]['provider_recording_id'] = 'other'
         elif mutation == 'expired': fingerprint['usage']['acquired_at'] = 0
+        elif mutation == 'acoustid_conflict':
+            data['candidates'].extend([{**acoustic, 'recording_id': RID}, {**acoustic, 'recording_id': R2}])
+        elif mutation == 'acoustid_disagrees':
+            data['candidates'].append({**acoustic, 'score': .95, 'tags': {'title': 'Conflicting recording', 'artist': 'Artist'}})
+        elif mutation == 'shazam_conflict':
+            data['candidates'].append({**fingerprint, 'id': 'shazam:other', 'provider_recording_id': 'other'})
+        elif mutation == 'isrc':
+            data['recognition_segments'][0]['isrc'] = 'USXXX0000001'
+            data['recognition_segments'][1]['isrc'] = 'USXXX0000002'
+        elif mutation == 'candidate_isrc':
+            data['recognition_segments'][0]['isrc'] = 'USXXX0000001'
+            fingerprint['isrc'] = 'USXXX0000002'
         matches, fingerprints, reason = confirmed_fields.recording(conn, data, metadata)
         assert bool(matches) is (mutation is None)
         assert bool(reason) is (mutation is not None)

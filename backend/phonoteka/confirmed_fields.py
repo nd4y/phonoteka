@@ -66,6 +66,11 @@ def recording(conn, analysis, metadata):
            and c.get('match', {}).get('state') == 'fingerprint_match'
            and permitted(conn, c, ('cache', 'derived_analysis'))]
     acoustid = [c for c in fps if c.get('provider') == 'acoustid' and number(c.get('score'))]
+    credible_acoustid = [c for c in acoustid if c['score'] >= .9 and UUID.fullmatch(str(c.get('recording_id', '')))]
+    credible_ids = {c['recording_id'] for c in credible_acoustid}
+    credible_shazam = [c for c in fps if c.get('provider') == 'shazam' and c.get('provider_recording_id')]
+    if len(credible_ids) > 1 or len({c['provider_recording_id'] for c in credible_shazam}) > 1:
+        return [], [], 'recording_conflict'
     high = [c for c in acoustid if c['score'] >= .98]
     aid_ids = {c.get('recording_id') for c in high}
     acoustic = []
@@ -82,6 +87,9 @@ def recording(conn, analysis, metadata):
                     and HASH.fullmatch(str(s.get('sample_sha256', ''))) for s in segments)
             and max(s['offset'] for s in segments) - min(s['offset'] for s in segments) >= 5
             and len({s['sample_sha256'] for s in segments}) == len(segments)):
+        isrcs = {s['isrc'] for s in segments if s.get('isrc')} | {c['isrc'] for c in credible_shazam if c.get('isrc')}
+        if len(isrcs) > 1:
+            return [], [], 'recording_conflict'
         for c in fps:
             if c.get('provider') != 'shazam' or c.get('extractor_profile') != recognition.POLICY: continue
             ids = [(s.get('candidate') or {}).get('provider_recording_id') or s.get('provider_recording_id') for s in segments]
@@ -90,7 +98,8 @@ def recording(conn, analysis, metadata):
                 shazam.append(c)
     fingerprints = acoustic + shazam
     if not fingerprints: return [], [], 'recording_unconfirmed'
-    identities = {(normalized(scalar(c.get('tags', {}), 'title')), normalized(scalar(c.get('tags', {}), 'artist'))) for c in fingerprints}
+    identities = {(normalized(scalar(c.get('tags', {}), 'title')), normalized(scalar(c.get('tags', {}), 'artist')))
+                  for c in fingerprints + credible_acoustid + credible_shazam}
     if len(identities) != 1 or any(not title or not artist for title, artist in identities):
         return [], [], 'recording_conflict'
     title, artist = next(iter(identities))
@@ -104,7 +113,7 @@ def recording(conn, analysis, metadata):
                and normalized(scalar(c.get('tags', {}), 'artist')) == artist
                and number(duration) and number(c.get('duration')) and duration > 0 and c['duration'] > 0
                and abs(duration - c['duration']) <= 2
-               and (not acoustic or c['recording_id'] in aid_ids)]
+                and (not credible_ids or c['recording_id'] in credible_ids)]
     if not matches: return [], fingerprints, 'recording_unconfirmed'
     return matches, fingerprints, None
 
