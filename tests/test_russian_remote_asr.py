@@ -126,3 +126,29 @@ def test_gigaam_anchors_still_require_real_alignment_confidence(russian):
     def forbidden(*args):raise AssertionError('No independent matching words')
     mismatch=align_with_provider([0]*16000,'синий автобус',words,1,forbidden,unscored_words=True)
     assert mismatch['coverage']==0 and mismatch['lrc'] is None
+
+def test_russian_inference_wiring_keeps_decoded_duration_and_explicit_anchor_type(tmp_path,monkeypatch):
+    from phonoteka import inference,forced_alignment
+    monkeypatch.setattr(inference,'BACKEND','pc2');monkeypatch.setattr(inference,'ROOT',tmp_path)
+    monkeypatch.setattr(media,'_expect',lambda *args:None)
+    monkeypatch.setattr(media,'probe_audio',lambda *args:{'duration':9,'codec':'mp3','container':'mp3',
+        'audio_stream_count':1,'channels':2,'sample_rate':44100})
+    (tmp_path/'input.mp3').write_bytes(b'fixture')
+    def decode(source,executable,arguments,**kwargs):
+        with wave.open(arguments[-1],'wb') as audio:
+            audio.setparams((1,2,16000,0,'NONE','NONE'));audio.writeframes(b'\0\0'*48000)
+    monkeypatch.setattr(media,'_process',decode)
+    class Engine:
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+        def transcribe(self,pcm,language,duration):
+            assert language=='ru' and duration==3
+            return {'words':[],'language':'ru','engine':'gigaam','model':remote_asr.RUSSIAN_MODEL,'word_probabilities':False}
+    def align(samples,text,words,duration,provider,**options):
+        assert len(samples)==48000 and duration==3 and options=={'unscored_words':True}
+        return {'coverage':0,'lrc':None}
+    monkeypatch.setattr(remote_asr,'Engine',Engine);monkeypatch.setattr(forced_alignment,'align_with_provider',align)
+    result=inference.execute({'relative_path':'input.mp3','sha256':'a'*64,'language':'ru',
+        'reference_text':'fixture words','_scratch_root':tmp_path})
+    assert result['state']=='draft' and result['duration']==3
+    assert result['alignment']['recognition_model']==remote_asr.RUSSIAN_MODEL
