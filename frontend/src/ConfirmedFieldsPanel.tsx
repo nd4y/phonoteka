@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, messageFor, requestId } from "./api";
+import { ApiError, api, messageFor, requestId } from "./api";
 import type { Job } from "./types";
 import { preparationBatch, type EvidencePreparation } from "./preparationBatch";
 import "./ConfirmedFieldsPanel.css";
@@ -20,6 +20,7 @@ type Entry = {
   preparation?: EvidencePreparation | null;
 };
 type Preparation = {
+  root_reconciliation_required?: boolean;
   id?: string;
   state?: "active" | "stopped" | "review";
   stage?: string;
@@ -67,6 +68,9 @@ export function ConfirmedFieldsPanel({
     [notice, setNotice] = useState("");
   const [preparation, setPreparation] = useState<Preparation>({});
   const [preparing, setPreparing] = useState(false);
+  const [reconcileNeeded, setReconcileNeeded] = useState(false);
+  const reconcileKey = useRef("");
+  const rootProblem = reconcileNeeded || preparation.root_reconciliation_required;
   const prepKey = useRef({ body: "", key: "" });
   const prepVersion = useRef(0);
   useEffect(() => {
@@ -154,7 +158,8 @@ export function ConfirmedFieldsPanel({
   }
 
   async function prepare() {
-    if (lock.current || preparing || preparation.state === "active" || !complete) return;
+    if (lock.current || preparing || rootProblem || preparation.state === "active" || !complete)
+      return;
     const chosen = preparationBatch(items);
     if (!chosen.length) return;
     lock.current = true;
@@ -176,6 +181,31 @@ export function ConfirmedFieldsPanel({
       setNotice(
         "Подготовка запущена. После завершения обновите план и заполните подтверждённые поля.",
       );
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "root_identity_changed") setReconcileNeeded(true);
+      setError(messageFor(err));
+    } finally {
+      lock.current = false;
+      setPreparing(false);
+    }
+  }
+
+  async function reconcileWork() {
+    if (lock.current || preparing) return;
+    lock.current = true;
+    setPreparing(true);
+    setError("");
+    if (!reconcileKey.current) reconcileKey.current = requestId();
+    try {
+      await api<Job>("/jobs", {
+        method: "POST",
+        headers: { "Idempotency-Key": reconcileKey.current },
+        body: JSON.stringify({ kind: "scan", track_ids: [], params: { reconcile_root: true } }),
+      });
+      setReconcileNeeded(false);
+      setComplete(false);
+      setNotice("Сверка подключения запущена. После её завершения снова проверьте коллекцию.");
+      onJobs();
     } catch (err) {
       setError(messageFor(err));
     } finally {
@@ -287,6 +317,18 @@ export function ConfirmedFieldsPanel({
           {scanning ? "Проверяем коллекцию…" : "Проверить коллекцию"}
         </button>
       </div>
+      {rootProblem && (
+        <div role="region" aria-label="Сверка подключения рабочей папки">
+          <strong>Сначала подтвердите подключение рабочей папки</strong>
+          <p>
+            Проверим SHA-256 всех учтённых файлов. Подключение подтвердится только при полном
+            совпадении. Файлы, теги и решения не изменяются.
+          </p>
+          <button className="button" disabled={preparing} onClick={() => void reconcileWork()}>
+            {preparing ? "Запускаем сверку…" : "Сверить рабочую папку"}
+          </button>
+        </div>
+      )}
       {preparation.id && (
         <div className="confirmed-preparation" role="status">
           <strong>
@@ -372,7 +414,7 @@ export function ConfirmedFieldsPanel({
               </p>
               <button
                 className="button secondary"
-                disabled={busy || preparing || preparation.state === "active"}
+                disabled={busy || preparing || !!rootProblem || preparation.state === "active"}
                 onClick={() => void prepare()}
               >
                 Подготовить данные · {nextBatch.length}

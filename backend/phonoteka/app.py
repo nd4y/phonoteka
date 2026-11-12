@@ -167,7 +167,7 @@ def public_job(settings: Settings, row: dict, detail=False, activity=None):
     result["progress"] = round(100 * (row["completed"] + row["failed"]) / total) if total else 0
     result["cancel_requested"] = bool(row["cancel_requested"])
     payload=json.loads(row['payload'])
-    if payload.get('trigger') == 'metadata-preparation-v1':
+    if payload.get('trigger') == 'metadata-preparation-v1' or payload.get('params', {}).get('reconcile_root') is True:
         result['skipped'] = db.fetchone(settings.db_path,
             "SELECT count(*) AS n FROM job_items WHERE job_id=? AND state='succeeded' AND json_extract(result,'$.skipped')=1",
             (row['id'],))['n']
@@ -735,8 +735,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     raise security.error(409, 'idempotency_conflict', 'Этот ключ уже использован для другого запроса')
                 existing = dict(conn.execute('SELECT * FROM jobs WHERE id=?', (previous['job_id'],)).fetchone())
                 return public_job(settings, existing)
-        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout", "review_tokens", "release_search", "cover_only", "field_tokens", "publish_confirmed"}:
+        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout", "review_tokens", "release_search", "cover_only", "field_tokens", "publish_confirmed", "reconcile_root"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
+        if 'reconcile_root' in body.params:
+            security.require_session(request, settings, True, owner_only=True)
+            if body.kind != 'scan' or body.track_ids or body.params != {'reconcile_root': True} or body.params.get('reconcile_root') is not True:
+                raise security.error(422, 'invalid_params', 'Сверка подключения проверяет весь рабочий каталог отдельной задачей')
+            if db.setting(settings.db_path, 'recovery_required', 'false') == 'true':
+                raise security.error(409, 'recovery_required', 'Сначала завершите восстановление состояния')
         if 'cover_only' in body.params and (
                 body.params['cover_only'] is not True or body.kind != 'apply' or len(body.track_ids) != 1
                 or not isinstance(body.params.get('proposal_id'), str) or not body.params['proposal_id']

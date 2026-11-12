@@ -3036,6 +3036,8 @@ UI-REVIEW-15 уточнение: причины пропусков видны т
 
 ### UI-REVIEW-16 - Подготовка недостающих доказательств / Missing-evidence preparation
 
+UI-REVIEW-16 приёмка на st1 выявила старый номер устройства Work после миграции. Предусмотреть отдельную явную сверку из ошибки подготовки: весь текущий каталог по SHA-256, неизменные путь/inode, версии, состав и права, только ранее известные пропуски. Отмена/несовпадение не меняет привязку; не принимать новый каталог по одному inode или выборке. Не менять аудио, решения, readiness или выполнять обычный scan под видом сверки. / An explicit owner-only whole-catalogue SHA-256 reconciliation rebinds only a completely matching known Work directory after a volatile device change. All guards and missing-file distinctions remain enforced.
+
 Прямое поручение 2026-11-12: дорабатывать и внедрять автоматизацию с проверкой через UI.
 Ограниченная явная партия до 50 существующих отдельных музыкальных записей: реальные два
 прохода стабильности при необходимости и штатный recognize/analyze. Заморозить ID/path/SHA,

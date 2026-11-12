@@ -248,8 +248,15 @@ def install(app, settings):
     @app.get('/api/metadata-preparation')
     def current(request: Request):
         security.require_session(request, settings, owner_only=True)
+        from .worker import root_identity
         with db.connect(settings.db_path) as conn:
-            return public(load(conn), conn)
+            result = public(load(conn), conn)
+            stored = conn.execute("SELECT value FROM settings WHERE key='work_root_identity'").fetchone()
+            try:
+                result['root_reconciliation_required'] = bool(stored and json.loads(stored[0]) != root_identity(settings.work_root))
+            except (media.MediaError, OSError):
+                result['root_reconciliation_required'] = bool(stored)
+            return result
 
     @app.post('/api/metadata-preparation', status_code=202)
     def start(request: Request, body: Start):

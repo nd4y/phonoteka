@@ -1,5 +1,7 @@
 # Fill confirmed fields in bulk
 
+If preparation reports a changed Work device, choose **Reconcile Work folder**. The owner-only scan mode verifies SHA-256 across the entire frozen current catalogue, including CUE and excluded recordings. Only previously missing files may remain absent. The saved path/inode, file signatures, catalogue and authorization must remain unchanged until commit, and at least one existing file must match. A mismatch, cancellation or partial mount leaves the previous binding intact. No audio, proposals, acceptance or scan readiness changes. After success, rebuild the preparation plan. Ordinary scans still reject an unreconciled root.
+
 Open **Needs review → Fill confirmed fields** and run **Check collection**.
 This reads saved results without new music-service requests or file writes. The plan shows
 before/after values, each field's source, and reasons for remaining gaps. Select records and
