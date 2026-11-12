@@ -115,6 +115,47 @@ export const jobStates: Record<string, string> = {
   pending: "Ожидание",
   conflict: "Конфликт версий",
 };
+// Native commit receipts can survive an interrupted outer operation.
+// Only a completed item may be presented as a successful file write.
+export function jobResultLabel(row: Record<string, unknown>): string {
+  const state = String(row.state || row.item_state || "");
+  if (state === "committed") {
+    if (row.item_state !== "succeeded")
+      return jobStates[String(row.item_state)] || "Запись требует проверки";
+    const proof = row.confirmed_fields;
+    const labels: Record<string, string> = {
+      title: "название",
+      artist: "исполнитель",
+      album: "альбом",
+      cover: "обложка",
+    };
+    const fields =
+      row.acceptance_mode === "confirmed_fields" &&
+      proof &&
+      typeof proof === "object" &&
+      "fields" in proof &&
+      Array.isArray(proof.fields)
+        ? [...new Set(proof.fields)].filter(
+            (f): f is string => typeof f === "string" && !!labels[f],
+          )
+        : [];
+    return fields.length
+      ? `Записано в файл: ${fields.map((f) => labels[f]).join(", ")}`
+      : "Изменения записаны в файл";
+  }
+  return (
+    (
+      {
+        no_match: "Совпадений нет",
+        candidates: "Найдены варианты",
+        needs_review: "Требует проверки",
+      } as Record<string, string>
+    )[state] ||
+    jobStates[state] ||
+    state
+  );
+}
+
 export const isActiveJob = (job: Job) =>
   [
     "queued",

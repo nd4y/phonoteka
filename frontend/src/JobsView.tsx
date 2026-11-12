@@ -26,6 +26,7 @@ import {
   jobTone,
   needsJobAuthorization,
   jobErrorMessage,
+  jobResultLabel,
 } from "./jobs";
 import { emptyActivityFeed, subscribeJobActivity } from "./jobActivityFeed";
 import {
@@ -154,7 +155,6 @@ function JobResults({ job, onOpenTrack }: { job: Job; onOpenTrack?: (id: string)
           <ul className="job-active-files">
             {rows.slice(0, limit).map((row, index) => {
               const id = typeof row.catalog_id === "string" ? row.catalog_id : "";
-              const state = String(row.state || row.item_state);
               const reason =
                 typeof row.message === "string"
                   ? row.message
@@ -171,15 +171,7 @@ function JobResults({ job, onOpenTrack }: { job: Job; onOpenTrack?: (id: string)
                       )}
                     </strong>
                     <small>
-                      {(
-                        {
-                          no_match: "Совпадений нет",
-                          candidates: "Найдены варианты",
-                          needs_review: "Требует проверки",
-                        } as Record<string, string>
-                      )[state] ||
-                        jobStates[state] ||
-                        state}
+                      {jobResultLabel(row)}
                       {reason ? " · " + reason : ""}
                     </small>
                   </div>
