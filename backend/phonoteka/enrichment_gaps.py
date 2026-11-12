@@ -35,6 +35,7 @@ def project(conn, ids):
     query = '''SELECT a.track_id,a.input_sha256,a.updated_at,
         json_extract(a.payload,'$.sources') AS sources,
         CASE WHEN NOT COALESCE(json_extract(a.payload,'$.alignment.stale'),0)
+                  AND json_type(a.payload,'$.alignment.coverage') IN ('integer','real')
              THEN json_extract(a.payload,'$.alignment.coverage') END AS alignment_coverage,
         (SELECT json_group_array(json_object(
             'provider',json_extract(c.value,'$.provider'),
@@ -276,6 +277,12 @@ def describe(conn, settings, row, *, analysis=None, proposal=None, connection=No
             continue
         if any(sources.get(p) == 'no_match' for p in providers):
             add('no_result_for_query', 'Последний поиск не дал подходящих данных для этого поля.', 'sources', 'Проверьте название и исполнителя, попробуйте другой вариант или источник.')
+            continue
+        coverage = analysis.get('alignment_coverage')
+        if field == 'synced_lyrics' and type(coverage) in (int, float) and 0 <= coverage < 1:
+            add('alignment_incomplete', 'Текст выровнен с аудио только частично.' if coverage else
+                'Надёжные таймкоды пока не получены.', 'lyrics',
+                'Откройте текст и проверьте несопоставленные строки по аудио. Неполный результат не записывается автоматически.')
             continue
         add('field_not_returned', 'Поиск не дал значения для этого поля; причина не установлена.', 'sources', 'Откройте результаты источников и проверьте исходные данные.')
     return result
