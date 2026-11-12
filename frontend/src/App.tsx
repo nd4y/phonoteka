@@ -69,7 +69,7 @@ import { acceptDetailNavigation, loadLatestResult, loadOrderedResult } from "./d
 import { startStatusPolling } from "./statusPolling";
 import { useOwnerActivity } from "./ownerActivity";
 import { JobsView } from "./JobsView";
-import { clearView, readView } from "./viewState";
+import { clearView, readSourcesOpen, readView, saveSourcesOpen } from "./viewState";
 import { AppBackContext, useAppHistory, useBackLayer } from "./useAppHistory";
 import { navigationKey } from "./appHistory";
 import type { Page, ViewState } from "./viewState";
@@ -2591,11 +2591,14 @@ function TrackEditor({
   const lyricsTouched = lyricsDraftChanged(baseline, currentDraft);
   const changed = editorDraftChanged(baseline, currentDraft, activeProposal);
   const [classificationDirty, setClassificationDirty] = useState(false);
-  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [sourcesOpen, setSourcesOpen] = useState(readSourcesOpen);
   const lyricsEditorContainer = useRef<HTMLDivElement>(null);
   const mediaSlotsContainer = useRef<HTMLDetailsElement>(null);
   const [showAllFields, setShowAllFields] = useState(false);
   useBackLayer(sourcesOpen, () => setSourcesOpen(false));
+  useEffect(() => {
+    saveSourcesOpen(sourcesOpen);
+  }, [sourcesOpen]);
   useEffect(() => {
     onDirty(changed || classificationDirty);
   }, [changed, classificationDirty, onDirty]);
