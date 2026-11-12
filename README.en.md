@@ -159,3 +159,7 @@ When Shazam's allowance is exhausted, preparation also checks valid AcoustID cac
 Check file opens the file details while preserving the current tab. Saved scan size and an explanation for failed 0-1-byte WebM inputs distinguish a missing usable source from a tagging task.
 
 The Sources tab is restored after a reload in the current window. Back closes it first, and logout clears the saved view preferences.
+
+### Preparation stop explanation
+
+When recording data or settings change, or a file is busy, both processing and preparation explain the stop and ask you to refresh the fill plan. Completed results remain available; the plan recalculates actions from current evidence.

@@ -4,9 +4,11 @@ import {
   isActiveJob,
   jobTone,
   jobResultLabel,
+  jobErrorMessage,
   mergeActivityEvents,
   needsJobAuthorization,
   readyPublicationStatus,
+  preparationStopMessage,
 } from "./jobs";
 import type { ActivityEvent, LiveJob } from "./jobs";
 
@@ -28,6 +30,44 @@ const event = (id: number): ActivityEvent => ({
   kind: "job_progress",
   created_at: "",
   message: `Event ${id}`,
+});
+
+describe("preparation stop explanations", () => {
+  it("explains the actual stale scan through the same message used by the preparation panel", () => {
+    const message = preparationStopMessage("preparation_stale");
+    expect(message).toBe(
+      "Данные или настройки записи изменились либо запись занята другой задачей. Обновите план заполнения и проверьте доступные действия.",
+    );
+    expect(
+      jobErrorMessage({
+        ...job,
+        kind: "scan",
+        state: "failed",
+        stage: "failed",
+        total: 33,
+        completed: 27,
+        failed: 6,
+        error: "preparation_stale",
+      }),
+    ).toBe(message);
+    expect(message).not.toMatch(/TTL|кэш|истёк|истек|автоматически|повторно/);
+  });
+
+  it.each(["canceled", "cancelled", "cancelled_partial"])(
+    "keeps the existing %s cancellation message suppression",
+    (state) => {
+      expect(jobErrorMessage({ ...job, state, error: "cancelled" })).toBe("");
+      expect(preparationStopMessage("cancelled")).toBe("");
+    },
+  );
+
+  it.each(["future_preparation_reason", "root_identity_changed", "", null, undefined])(
+    "preserves the existing unknown-reason fallback for %s",
+    (error) => {
+      expect(preparationStopMessage(error)).toBe("");
+      expect(jobErrorMessage({ ...job, state: "failed", error })).toBe(error || "");
+    },
+  );
 });
 
 describe("job progress presentation", () => {

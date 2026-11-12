@@ -193,13 +193,18 @@ export function readyPublicationStatus(job: Job): {
     text: `В Ready сохранено ${job.completed} из ${job.total}. ${job.state === "succeeded" ? "Сохранение выполнено не полностью." : state} Подробности в обработке.`,
   };
 }
+export function preparationStopMessage(reason?: string | null): string {
+  return reason === "preparation_stale"
+    ? "Данные или настройки записи изменились либо запись занята другой задачей. Обновите план заполнения и проверьте доступные действия."
+    : "";
+}
 export function jobErrorMessage(job: Job): string {
   if (
     ["canceled", "cancelled", "cancelled_partial"].includes(job.state) &&
     job.error === "cancelled"
   )
     return "";
-  return job.error || "";
+  return preparationStopMessage(job.error) || job.error || "";
 }
 export function jobTone(
   job: Job,
