@@ -149,3 +149,5 @@ Confirmed-field batches show per-record gap reasons and the fields actually writ
 Confirmed-field filling can prepare missing evidence in a bounded batch of stability checks and source searches without writing audio files. Refresh the plan afterwards; disputed candidates remain pending. [Workflow and limits](docs/en/confirmed-fields.md#preparing-missing-evidence).
 
 Preparation prioritizes metadata searches before remaining recognition capacity. Exhausted inputs can check reusable cached fingerprints without resetting limits; missing confirmation remains visible in results.
+
+The preparation card shows its current state. Pausing log scrolling leaves the job's actual state, shown above the log, unchanged.

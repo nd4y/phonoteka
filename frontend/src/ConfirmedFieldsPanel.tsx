@@ -178,9 +178,6 @@ export function ConfirmedFieldsPanel({
       prepVersion.current++;
       setPreparation(value);
       setComplete(false);
-      setNotice(
-        "Подготовка запущена. После завершения обновите план и заполните подтверждённые поля.",
-      );
     } catch (err) {
       if (err instanceof ApiError && err.code === "root_identity_changed") setReconcileNeeded(true);
       setError(messageFor(err));
