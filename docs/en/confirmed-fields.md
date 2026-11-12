@@ -72,3 +72,9 @@ Batches prioritize metadata searches using existing evidence, recognition with r
 The preparation card shows its current stage and completion without a stale duplicate launch message. Pausing log scrolling affects the event view; the job's actual state is shown above the log.
 
 If fallback recognition spends the last available fingerprint allowance, preparation retains the search evidence for review and reports the exhausted budget instead of waiting for another send. Metadata-only retries and existing cache rules remain unchanged. Input changes, audit failures and revoked authorization still stop continuation.
+
+When Shazam reports an exhausted allowance, preparation may check only the valid AcoustID cache under its existing permissions and expiry. A missing or expired entry neither reserves an attempt nor sends a request. Unknown outcomes, invalid identities, mixes and conflicts do not become matches. Returned candidates retain the ordinary review requirements.
+
+Previously exhausted inputs receive a capability-specific receipt version for this newly available cache check. It permits one UI preparation while retaining old receipts and send counters; cancellation or failure does not automatically replay that check. Metadata searches and inputs with remaining send capacity are not replayed by this change.
+
+A temporary plan-read timeout retries the same page once while retaining earlier pages. Cancellation or a superseding scan prevents retry admission. Authorization and changed-Work errors are not retried; each read retains its 25-second deadline. This rule never retries task submission or file writes.

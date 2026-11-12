@@ -14,6 +14,7 @@ LIMIT = 50
 STAGES = ('scan_first', 'scan_second', 'search')
 WAITING = {'queued', 'running', 'paused', 'waiting_authorization', 'waiting', 'deferred', 'waiting_provider', 'waiting_storage'}
 SAFE_BLOCKS = {'input_stabilizing', 'analysis_missing', 'analysis_stale', 'audio_audit_required'}
+CACHE_FALLBACK_PROFILE = 'exhausted-acoustid-cache-v1'
 
 
 def load(conn, identity=None):
@@ -51,17 +52,20 @@ def candidate(settings, conn, row, active, result):
     kind = 'analyze' if matches or fingerprints else 'recognize'
     if not settings.external_metadata or kind == 'recognize' and not settings.external_fingerprints:
         return None
-    # A durable receipt, including a failed/cancelled run, prevents repeating the
-    # same search automatically. New source evidence/explicit per-file retries
-    # remain visible through the existing recording workflow.
-    signature = fields.digest([CONTRACT, row['id'], row['sha256'], kind, guards(conn, row)])
-    receipt = conn.execute('SELECT 1 FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone()
-    if receipt:
-        return None
     identity = (metadata.get('audit') or {}).get('audio_identity')
     usage = conn.execute('SELECT value FROM settings WHERE key=?', (provider_attempts.RECOGNITION_PREFIX + str(identity),)).fetchone()
     calls = json.loads(usage[0]).get('calls', 0) if usage else 0
     remaining = max(0, provider_attempts.RECOGNITION_CALL_LIMIT - calls) if identity else None
+    # Preserve old receipts. Only the newly supported exhausted-cache path gets
+    # one capability-specific evaluation; it cannot reserve or send AcoustID.
+    # Failed/cancelled receipts for this profile still prevent automatic replay.
+    dependency = [CONTRACT, row['id'], row['sha256'], kind, guards(conn, row)]
+    if kind == 'recognize' and remaining == 0:
+        dependency.append(CACHE_FALLBACK_PROFILE)
+    signature = fields.digest(dependency)
+    receipt = conn.execute('SELECT 1 FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone()
+    if receipt:
+        return None
     stable = input_readiness.describe(metadata, grace_seconds=settings.input_grace_seconds)['state'] == 'ready'
     return {'token': fields.digest([signature, result['token'], remaining]), 'receipt': signature,
             'fingerprint_requests_remaining': remaining if kind == 'recognize' else None,

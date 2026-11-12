@@ -1,16 +1,18 @@
 import asyncio
 from dataclasses import replace
+import hashlib
 import json
 import os
 from pathlib import Path
 import stat
 import subprocess
+import time
 from urllib.parse import parse_qs
 
 import httpx
 import pytest
 
-from phonoteka import acoustid, db, media, provider_attempts, reports
+from phonoteka import acoustid, db, media, provider_attempts, provider_policy, reports
 from phonoteka.providers import Providers, ProviderError
 from test_backend import authenticated, client, settings, seed
 from test_providers import settings as provider_settings
@@ -30,6 +32,23 @@ def configured(tmp_path):
     cfg = replace(provider_settings(tmp_path), external_fingerprints=True)
     acoustid.save_connection(cfg, 'initial', True, CLIENT)
     return cfg
+
+
+def cache_result(cfg, rows, *, seconds=3600, signature=SIGNATURE, duration=240):
+    usage=provider_policy.get_rule(cfg,'acoustid','metadata')
+    key=hashlib.sha256(db.encode([acoustid.PROFILE,usage['policy_version'],signature,round(duration)]).encode()).hexdigest()
+    with db.transaction(cfg.db_path) as conn:
+        conn.execute('INSERT INTO provider_cache VALUES(?,?,?,?)',(key,'acoustid',db.encode(rows),time.time()+seconds))
+    return key
+
+
+def exhausted(cfg, identity='a'*64):
+    db.set_setting(cfg.db_path,provider_attempts.RECOGNITION_PREFIX+identity,db.encode({'calls':3,'limit':3}))
+    db.set_setting(cfg.db_path,'provider_breaker:acoustid',db.encode({'until':time.time()+3600,'reason':'provider_unavailable','failures':5}))
+
+
+def forbidden(*args, **kwargs):
+    pytest.fail('Cache-only lookup must not reserve, pace or send a request')
 
 
 def test_owner_connection_secrecy_conflict_delete_and_csrf(client, settings):
@@ -185,3 +204,90 @@ def test_report_legacy_configuration_placeholder_is_not_a_recognition_attempt(cl
         conn.execute('INSERT INTO analyses VALUES(?,?,?,?)',(identity,sha,db.encode(payload),db.utcnow()))
     counts=reports.summary(settings)['counts']
     assert tuple(counts[key] for key in ('fingerprint_matches','fingerprint_no_match','fingerprint_unavailable'))==expected
+
+
+@pytest.mark.parametrize('rows',[result()['results'],[]])
+def test_cache_only_returns_exact_valid_rows_before_breaker_without_spending(tmp_path,monkeypatch,rows):
+    cfg=configured(tmp_path);key=cache_result(cfg,rows);exhausted(cfg)
+    before={t:[dict(r) for r in db.fetchall(cfg.db_path,'SELECT * FROM '+t)] for t in ('provider_cache','provider_calls','settings')}
+    async def run():
+        providers=Providers(cfg,httpx.MockTransport(forbidden))
+        monkeypatch.setattr(providers,'request',forbidden)
+        monkeypatch.setattr(providers,'throttle',forbidden)
+        monkeypatch.setattr(providers,'reserve',forbidden)
+        with provider_attempts.recognition_scope('a'*64):
+            assert await acoustid.lookup(providers,SIGNATURE,240,cache_only=True)==rows
+            assert await acoustid.identify(providers,SIGNATURE,240,cache_only=True)==acoustid.candidates(rows,240)
+        await providers.close()
+    asyncio.run(run())
+    assert {t:[dict(r) for r in db.fetchall(cfg.db_path,'SELECT * FROM '+t)] for t in before}==before
+
+
+@pytest.mark.parametrize('present,seconds',[(False,3600),(True,-1)])
+def test_cache_only_miss_or_expiry_never_falls_through_to_breaker_or_transport(tmp_path,monkeypatch,present,seconds):
+    cfg=configured(tmp_path);exhausted(cfg)
+    if present:cache_result(cfg,result()['results'],seconds=seconds)
+    old_cache=[dict(r) for r in db.fetchall(cfg.db_path,'SELECT * FROM provider_cache')]
+    async def run():
+        providers=Providers(cfg,httpx.MockTransport(forbidden))
+        monkeypatch.setattr(providers,'request',forbidden)
+        monkeypatch.setattr(providers,'throttle',forbidden)
+        monkeypatch.setattr(providers,'reserve',forbidden)
+        with pytest.raises(ProviderError) as error:await acoustid.identify(providers,SIGNATURE,240,cache_only=True)
+        assert error.value.code=='recognition_attempt_budget_exhausted'
+        await providers.close()
+    asyncio.run(run())
+    assert [dict(r) for r in db.fetchall(cfg.db_path,'SELECT * FROM provider_cache')]==old_cache
+    assert not db.fetchall(cfg.db_path,'SELECT * FROM provider_calls')
+    assert json.loads(db.setting(cfg.db_path,provider_attempts.RECOGNITION_PREFIX+'a'*64))['calls']==3
+
+
+@pytest.mark.parametrize('operation',['fetch','cache'])
+def test_cache_only_obeys_current_policy_even_when_response_exists(tmp_path,operation):
+    cfg=configured(tmp_path);cache_result(cfg,result()['results']);exhausted(cfg)
+    db.set_setting(cfg.db_path,'provider_usage:acoustid:metadata',db.encode({'allow_'+operation:False}))
+    async def run():
+        providers=Providers(cfg,httpx.MockTransport(forbidden))
+        with pytest.raises(media.MediaError) as error:await acoustid.identify(providers,SIGNATURE,240,cache_only=True)
+        assert error.value.code=='provider_policy_denied'
+        await providers.close()
+    asyncio.run(run())
+    assert not db.fetchall(cfg.db_path,'SELECT * FROM provider_calls')
+
+
+def test_cache_only_rechecks_authorization_before_returning_response(tmp_path):
+    cfg=configured(tmp_path);cache_result(cfg,result()['results']);exhausted(cfg);calls=0
+    def revoked():
+        nonlocal calls
+        calls+=1
+        if calls==2:raise media.MediaError('authorization_revoked','Synthetic revoked grant')
+    async def run():
+        providers=Providers(cfg,httpx.MockTransport(forbidden))
+        with pytest.raises(media.MediaError) as error:await acoustid.identify(providers,SIGNATURE,240,revoked,cache_only=True)
+        assert error.value.code=='authorization_revoked'
+        await providers.close()
+    asyncio.run(run())
+    assert calls==2 and not db.fetchall(cfg.db_path,'SELECT * FROM provider_calls')
+
+
+@pytest.mark.parametrize('rows',[{'status':'error'},[{'id':TRACK,'score':'bad'}],result()['results']*101])
+def test_cache_only_invalid_saved_payload_is_not_a_result_or_a_request(tmp_path,rows):
+    cfg=configured(tmp_path);cache_result(cfg,rows);exhausted(cfg)
+    async def run():
+        providers=Providers(cfg,httpx.MockTransport(forbidden))
+        with pytest.raises(ProviderError) as error:await acoustid.identify(providers,SIGNATURE,240,cache_only=True)
+        assert error.value.code=='provider_unavailable' and CLIENT not in str(error.value)
+        await providers.close()
+    asyncio.run(run())
+    assert not db.fetchall(cfg.db_path,'SELECT * FROM provider_calls')
+
+
+@pytest.mark.parametrize('signature,duration',[('invalid!',240),(SIGNATURE,0),(SIGNATURE,float('inf'))])
+def test_cache_only_validates_lookup_input_before_access_or_sending(tmp_path,signature,duration):
+    cfg=configured(tmp_path);cache_result(cfg,result()['results']);exhausted(cfg)
+    async def run():
+        providers=Providers(cfg,httpx.MockTransport(forbidden))
+        with pytest.raises(ProviderError) as error:await acoustid.identify(providers,signature,duration,cache_only=True)
+        assert error.value.code=='invalid_fingerprint'
+        await providers.close()
+    asyncio.run(run())

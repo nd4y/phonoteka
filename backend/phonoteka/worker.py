@@ -842,6 +842,7 @@ class Worker:
         authorized()
         identified=None; recognition_source=None; segment_result=None
         acoustid_candidates=[]; acoustid_source=None
+        acoustid_cache_only_completed=False; acoustid_cache_only_error=None
         if fingerprint:
             def current_audit(value):
                 return (isinstance(value,dict) and value.get('state')=='passed'
@@ -894,13 +895,14 @@ class Worker:
             matches=[entry['candidate'] for entry in segment_result['segments'] if entry.get('candidate')]
             identified=matches[0] if matches and not segment_result['possible_mix'] else None
             failures=[entry['state'] for entry in segment_result['segments'] if entry['state'] not in {'match','no_match'}]
+            cache_only_fallback=bool(failures) and set(failures)=={'recognition_attempt_budget_exhausted'}
             recognition_source={'provider':'shazam','state':failures[0] if failures else 'needs_review' if segment_result['possible_mix'] else 'fingerprint_match' if identified else 'no_match'}
             if segment_result.get('reused_for_acoustid'):recognition_source['reused_for_acoustid']=True
             if segment_result.get('historical_match'):
                 recognition_source.update(state='fingerprint_match',historical_result=True)
             if (configured['configured'] and not identified and not segment_result['possible_mix']
                     and not recording_review.possible_mix(meta,item['sha256'])
-                    and not any(state in {'unknown_outcome','recognition_attempt_budget_exhausted','recognition_identity_required','budget_exhausted'} for state in failures)):
+                    and (cache_only_fallback or not any(state in {'unknown_outcome','recognition_attempt_budget_exhausted','recognition_identity_required','budget_exhausted'} for state in failures))):
                 try:
                     authorized()
                     await self.io(self.item_action,job,item,'fingerprint_sample')
@@ -909,11 +911,15 @@ class Worker:
                     await self.io(media._expect,path,item['sha256'])
                     await self.io(self.item_action,job,item,'fingerprint_lookup')
                     with provider_attempts.recognition_scope(audio_identity,job['id']), provider_attempts.input_revision(item['sha256']):
-                        acoustid_candidates=await acoustid.identify(self.providers,signature,float(meta['duration']),authorized)
+                        acoustid_candidates=await acoustid.identify(self.providers,signature,float(meta['duration']),authorized,
+                            **({'cache_only':True} if cache_only_fallback else {}))
+                    acoustid_cache_only_completed=cache_only_fallback
                     if len(acoustid_candidates)==1:identified=acoustid_candidates[0]
-                    acoustid_source={'provider':'acoustid','state':'fingerprint_match' if acoustid_candidates else 'no_match','count':len(acoustid_candidates)}
+                    acoustid_source={'provider':'acoustid','state':'needs_review' if cache_only_fallback and len(acoustid_candidates)>1 else 'fingerprint_match' if acoustid_candidates else 'no_match','count':len(acoustid_candidates)}
+                    if cache_only_fallback:acoustid_source['cache_only']=True
                 except ProviderError as exc:
                     acoustid_source={'provider':'acoustid','state':exc.code}
+                    if cache_only_fallback and exc.code!='recognition_attempt_budget_exhausted':acoustid_cache_only_error=exc
         else:
             previous=await self.io(db.fetchone,self.settings.db_path,'SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256']))
             if previous:
@@ -991,12 +997,16 @@ class Worker:
             result=provider_policy.prepare_analysis(conn,result)
             conn.execute('INSERT OR REPLACE INTO analyses VALUES(?,?,?,?)',(item['track_id'],item['sha256'],db.encode(result),db.utcnow()))
             db.event(conn,'analysis_completed',{'track_id':item['track_id'],'state':result['state']})
+        if acoustid_cache_only_error:
+            raise media.MediaError(acoustid_cache_only_error.code,str(acoustid_cache_only_error)) from acoustid_cache_only_error
         retry=[]
         searched = {'shazam','acoustid'} if fingerprint else {'musicbrainz','coverartarchive'}
         if not fingerprint and not album_hint: searched.add('lrclib')
         for source in result['sources']:
             if source['provider'] not in searched:continue
             if source.get('state') in {'recognition_attempt_budget_exhausted','recognition_identity_required'}:
+                if (acoustid_cache_only_completed and source['provider']=='shazam'
+                        and source['state']=='recognition_attempt_budget_exhausted'):continue
                 raise media.MediaError(source['state'],'Бюджет распознавания этой аудиозаписи исчерпан или не подтверждена аудиоревизия; требуется ручное решение')
             if source['state'] not in {'rate_limited','provider_cooldown','provider_unavailable','budget_exhausted'}:continue
             breaker=json.loads(db.setting(self.settings.db_path,'provider_breaker:'+source['provider'],'{}'))
