@@ -87,6 +87,24 @@ def test_full_current_inventory_success_preserves_all_rows_and_bytes(raw):
         assert missing['skipped'] is True and missing['hashed'] is False
 
 
+def test_current_file_is_visible_while_its_bytes_are_being_read(raw, monkeypatch):
+    from phonoteka import job_activity
+    cfg = raw; job, old, current = start(cfg)
+    original = reconciliation._verify_one
+    seen = []
+    def verify(*args):
+        with db.connect(cfg.db_path) as conn:
+            current_job = dict(conn.execute('SELECT * FROM jobs WHERE id=?', (job['id'],)).fetchone())
+        activity = job_activity.snapshot(cfg, current_job)
+        seen.extend(activity['active_items'])
+        assert activity['active_items'][0]['filename'] == 'a.flac'
+        assert activity['active_items'][0]['action'] == 'Сверка полного SHA-256 файла с каталогом'
+        return original(*args)
+    monkeypatch.setattr(reconciliation, '_verify_one', verify)
+    run(cfg, job)
+    assert len(seen) == 1
+
+
 def test_native_library_keeps_real_two_scan_readiness_and_existing_drafts(library):
     cfg, client, headers, tid, sha, path = library
     before = rows(cfg); job, old, current = start(cfg)

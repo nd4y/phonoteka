@@ -169,6 +169,7 @@ async def run(worker, job):
     physical = set()
     for row in snapshot:
         try:
+            worker.item_result(job['id'], row['id'], 'running', {'track_id': row['id']})
             worker.item_action(job, {'track_id': row['id']}, 'root_sha256')
             observation = await worker.io(_verify_one, settings, row, current, lambda: _authorize(worker, job))
             if observation['exists']:
