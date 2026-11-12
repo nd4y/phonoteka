@@ -3,6 +3,7 @@ import { ApiError, api, messageFor, requestId } from "./api";
 import type { Job } from "./types";
 import { preparationBatch, type EvidencePreparation } from "./preparationBatch";
 import { readPlanPage } from "./readPlanPage";
+import { preparationStopMessage } from "./jobs";
 import "./ConfirmedFieldsPanel.css";
 
 type Change = {
@@ -313,6 +314,8 @@ export function ConfirmedFieldsPanel({
 
   const ready = items.filter((i) => i.ready);
   const nextBatch = preparationBatch(items);
+  const stoppedMessage =
+    preparation.state === "stopped" ? preparationStopMessage(preparation.reason) : "";
   const pending = new Map<string, { field: string; message: string; count: number }>();
   for (const item of items)
     for (const reason of item.remaining) {
@@ -367,8 +370,11 @@ export function ConfirmedFieldsPanel({
                 ? complete
                   ? "Подготовка завершена. Результаты учтены в плане."
                   : "Данные подготовлены. Обновите план заполнения."
-                : "Подготовка остановлена. Проверьте причину в обработке."}
+                : stoppedMessage
+                  ? "Подготовка остановлена."
+                  : "Подготовка остановлена. Проверьте причину в обработке."}
           </strong>
+          {stoppedMessage && <p>{stoppedMessage}</p>}
           <p className="muted small">
             Записей: {preparation.total}. Аудиофайлы и сохранённые предложения не изменяются.
           </p>

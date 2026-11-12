@@ -86,3 +86,7 @@ Check file opens and focuses the file details while preserving the current tab. 
 A WebM input with `invalid_audio` and a saved size of 0-1 bytes explains that an original file or a new download is needed. Editing tags cannot restore missing audio. Other sizes, formats and states do not receive this explanation. A current scanner error still takes precedence over a historical audit; older stages, timestamps and successful verdicts are not revived.
 
 The Sources tab stores a separate boolean in the current window session. Reload restores it alongside the existing record and filter context; closing it or pressing Back persists the closed state. Logout removes both known view-state keys without touching unrelated storage. The tab key stores no lyrics, tokens or file data. Tab changes and logout remain available when browser storage is denied.
+
+### Stopping when data changes
+
+When recording data or settings change, or a file is busy, both processing and preparation explain the stop and ask you to refresh the fill plan. Completed results remain available; the plan recalculates actions from current evidence.
