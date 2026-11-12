@@ -339,6 +339,9 @@ def freeze(settings, conn, row, proposal, active, *, applied_payload=None):
 
 
 def assert_frozen(settings, row, item, job):
+    if item.get('acceptance_mode') == 'confirmed_fields':
+        from . import confirmed_fields
+        return confirmed_fields.assert_frozen(settings, row, item, job)
     if item.get('acceptance_mode', 'manual') != 'automatic': return
     frozen = item.get('automatic_quality')
     if not frozen:

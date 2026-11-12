@@ -39,6 +39,7 @@ interface ReviewData {
   instrumental_confirmed: boolean;
   stale: boolean;
   accepted_current_revision: boolean;
+  acceptance_origin?: string;
   human_timing_verified: boolean;
   gate: { state: string; reasons: string[]; exceptions: string[]; exception_reason: string };
 }
@@ -221,7 +222,9 @@ export default function LyricsReviewPanel({
             </span>
             <span className={`badge ${review.accepted_current_revision ? "good" : "purple"}`}>
               {review.accepted_current_revision
-                ? "Ревизия принята вручную"
+                ? review.acceptance_origin === "confirmed-metadata-fields-v1"
+                  ? "Подтверждение сохранено после записи метаданных"
+                  : "Ревизия принята вручную"
                 : "Ревизия ещё не принята"}
             </span>
             <span className="badge">Poweramp: отдельная проверка доставки</span>

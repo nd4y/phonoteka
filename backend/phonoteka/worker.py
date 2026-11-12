@@ -214,6 +214,13 @@ class Worker:
         return self.stopping or self.control_cancelled(self.job_control(job_id))
 
     def authorize_grant(self, job):
+        parent = json.loads(job['payload']).get('confirmed_fields_parent')
+        if parent:
+            previous = db.fetchone(self.settings.db_path, 'SELECT cancel_requested,state FROM jobs WHERE id=?', (parent,))
+            if not previous or previous['cancel_requested'] or previous['state'] in {'cancelled', 'cancelled_partial'}:
+                with db.transaction(self.settings.db_path) as conn:
+                    conn.execute('UPDATE jobs SET cancel_requested=1,updated_at=? WHERE id=?', (db.utcnow(), job['id']))
+                raise media.MediaError('cancelled', 'Публикация остановлена вместе с заполнением полей')
         if self.user_cancelled(job['id']):
             raise media.MediaError('cancelled','Job was cancelled before its next effect')
         reason=self.authorization_reason(job['id'])
@@ -524,6 +531,7 @@ class Worker:
         return identity
 
     def persist_mutation(self, job, item, result, metadata=None):
+        incoming_result = result
         if job['kind'] in {'publish', 'rollback_ready'}:
             from . import publication
             # The file operation has committed. Retry only its rolled-back
@@ -583,7 +591,19 @@ class Worker:
                 result['retained_lyrics_proposal_id'] = retained
                 if retained:
                     status = recording_review.catalog_status('needs_review', metadata['possible_mix'])
+            if item.get('acceptance_mode') == 'confirmed_fields':
+                from . import confirmed_fields
+                retained = confirmed_fields.retained_draft(conn, current, metadata, item, result)
+                result['retained_proposal_id'] = retained
+                result.update(acceptance_mode='confirmed_fields', automatic_acceptance=True,
+                              confirmed_fields=item['confirmed_fields'])
+                if retained: status = recording_review.catalog_status('needs_review', metadata['possible_mix'])
             conn.execute("UPDATE tracks SET sha256=?,metadata=?,status=?,updated_at=? WHERE id=?", (metadata["sha256"],db.encode(metadata),status,db.utcnow(),track_id))
+            if item.get('acceptance_mode') == 'confirmed_fields':
+                result['publication_followup'] = confirmed_fields.publication_followup(self.settings, conn, current, metadata, item, result, job)
+                incoming_result.update(acceptance_mode='confirmed_fields', automatic_acceptance=True,
+                                       confirmed_fields=item['confirmed_fields'], retained_proposal_id=retained,
+                                       publication_followup=result['publication_followup'])
             effect_id = result.get("operation_id", str(uuid.uuid4()))
             conn.execute("INSERT OR IGNORE INTO history VALUES(?,?,?,?,?,?,?,?)", (effect_id,track_id,job["id"],job["kind"],result.get("before_sha256"),result.get("after_sha256"),db.encode(result),db.utcnow()))
             db.event(conn, "file_committed", {"track_id": track_id, "job_id": job["id"], "kind": job["kind"]})

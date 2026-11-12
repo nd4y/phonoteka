@@ -1,5 +1,9 @@
 # phonoteka
 
+**Needs review** offers bulk filling of independently confirmed tags and artwork, separately
+from lyric acceptance. Preview changes and remaining reasons before submitting; disputed fields
+stay pending. [Rules and workflow](docs/en/confirmed-fields.md).
+
 Processing counters report completed attempts and errors, without claiming data approval.
 Current partial ASR results explain the missing complete lyrics and open lyric review.
 [Missing-field explanations](docs/en/enrichment-gaps.md).
