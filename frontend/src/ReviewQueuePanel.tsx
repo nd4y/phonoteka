@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, messageFor, requestId } from "./api";
 import { AlbumBatchPanel } from "./AlbumBatchPanel";
+import { ConfirmedFieldsPanel } from "./ConfirmedFieldsPanel";
 import type { Job } from "./types";
 import "./ReviewQueuePanel.css";
 
@@ -140,6 +141,7 @@ export function ReviewQueuePanel({
           </button>
         ))}
       </div>
+      <ConfirmedFieldsPanel onRefresh={onRefresh} onJobs={onJobs} onOpen={onOpen} />
       <div className="review-preparation">
         <div>
           <h3>
@@ -149,7 +151,7 @@ export function ReviewQueuePanel({
                 : "Загружаем план подготовки..."
               : count
                 ? `Можно подготовить: ${count}`
-                : "Доступных автоматических шагов сейчас нет"}
+                : "Новых шагов подготовки сейчас нет"}
           </h3>
           <p className="muted small">
             {batches

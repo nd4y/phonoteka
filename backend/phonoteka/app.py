@@ -272,6 +272,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     publication_sidecars.install(app,settings)
     from . import automatic_quality
     automatic_quality.install(app,settings)
+    from . import confirmed_fields
+    confirmed_fields.install(app, settings)
     recording_review.install(app,settings)
     retention.install(app,settings)
     export_leases.install(app,settings)
@@ -727,7 +729,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     raise security.error(409, 'idempotency_conflict', 'Этот ключ уже использован для другого запроса')
                 existing = dict(conn.execute('SELECT * FROM jobs WHERE id=?', (previous['job_id'],)).fetchone())
                 return public_job(settings, existing)
-        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout", "review_tokens", "release_search", "cover_only"}:
+        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout", "review_tokens", "release_search", "cover_only", "field_tokens", "publish_confirmed"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
         if 'cover_only' in body.params and (
                 body.params['cover_only'] is not True or body.kind != 'apply' or len(body.track_ids) != 1
@@ -758,8 +760,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if {'release_review_id','release_review_version'} & body.params.keys():
             if body.kind != 'replaygain_album' or not re.fullmatch('[a-f0-9-]{36}', str(body.params.get('release_review_id',''))) or type(body.params.get('release_review_version')) is not int or body.params['release_review_version'] < 1:
                 raise security.error(422, 'invalid_params', 'Укажите точную версию принятого состава релиза для Album Gain')
-        if 'acceptance_mode' in body.params and (body.kind != 'apply' or not isinstance(body.params['acceptance_mode'], str) or body.params['acceptance_mode'] not in {'manual', 'automatic'}):
+        if 'acceptance_mode' in body.params and (body.kind != 'apply' or not isinstance(body.params['acceptance_mode'], str) or body.params['acceptance_mode'] not in {'manual', 'automatic', 'confirmed_fields'}):
             raise security.error(422, 'invalid_acceptance_mode', 'Режим manual/automatic применяется только к записи предложения')
+        if body.params.get('acceptance_mode') == 'confirmed_fields':
+            tokens = body.params.get('field_tokens')
+            if (set(body.params) - {'acceptance_mode', 'field_tokens', 'publish_confirmed'}
+                    or not isinstance(tokens, dict) or not 1 <= len(tokens) <= 200
+                    or set(tokens) != set(body.track_ids) or len(tokens) != len(body.track_ids)
+                    or any(not isinstance(v, str) or not re.fullmatch('[a-f0-9]{64}', v) for v in tokens.values())
+                    or type(body.params.get('publish_confirmed', False)) is not bool):
+                raise security.error(422, 'invalid_confirmed_fields_plan', 'Выберите актуальный план до 200 записей')
+            if body.params.get('publish_confirmed'): automation.check_job(active, 'publish')
+        elif {'field_tokens', 'publish_confirmed'} & body.params.keys():
+            raise security.error(422, 'invalid_params', 'План полей доступен только для подтверждённого заполнения')
         if body.kind == 'publish_sidecars':
             if set(body.params) != {'plan_id'} or not isinstance(body.params['plan_id'], str) or not re.fullmatch('[a-f0-9-]{36}', body.params['plan_id']):
                 raise security.error(422, 'sidecar_plan_required', 'Выберите сохраненный план sidecar')
@@ -954,14 +967,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if review_tokens:
                         item['language_hint'] = review_queue.language_hint(item['reference_text'])
                 if body.kind == "apply":
-                    if body.params.get("proposal_id"):
-                        prop = conn.execute("SELECT * FROM proposals WHERE id=? AND track_id=?", (body.params["proposal_id"],track_id)).fetchone()
+                    if body.params.get('acceptance_mode') == 'confirmed_fields':
+                        try:
+                            item.update(confirmed_fields.freeze(settings, conn, track, active, body.params['field_tokens'][track_id]))
+                        except media.MediaError as exc:
+                            raise security.error(409, exc.code, exc.message, file_id=track_id) from exc
                     else:
-                        prop = conn.execute("SELECT * FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", (track_id,)).fetchone()
-                    if not prop or prop["input_sha256"] != track["sha256"]:
-                        raise security.error(409, "proposal_stale", "Создайте актуальное предложение", file_id=track_id)
-                    item["proposal_id"] = prop["id"]
-                    item["proposal"] = json.loads(prop["payload"])
+                        if body.params.get("proposal_id"):
+                            prop = conn.execute("SELECT * FROM proposals WHERE id=? AND track_id=?", (body.params["proposal_id"],track_id)).fetchone()
+                        else:
+                            prop = conn.execute("SELECT * FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", (track_id,)).fetchone()
+                        if not prop or prop["input_sha256"] != track["sha256"]:
+                            raise security.error(409, "proposal_stale", "Создайте актуальное предложение", file_id=track_id)
+                        item["proposal_id"] = prop["id"]
+                        item["proposal"] = json.loads(prop["payload"])
                     if body.params.get('cover_only'):
                         latest = conn.execute('SELECT id FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1',
                                               (track_id,)).fetchone()

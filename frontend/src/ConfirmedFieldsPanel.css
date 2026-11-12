@@ -1,0 +1,78 @@
+.confirmed-fields {
+  border-block: 1px solid var(--outline-variant, #5a5248);
+  padding-block: 1.25rem;
+  margin-block: 1rem;
+}
+.confirmed-fields h3 {
+  margin-block: 0 0.5rem;
+}
+.confirmed-fields .panel-heading {
+  align-items: flex-start;
+  gap: 1rem;
+}
+.confirmed-fields .panel-heading > div {
+  min-width: 0;
+}
+.confirmed-fields progress {
+  width: min(30rem, 100%);
+  display: block;
+  margin-block: 0.75rem;
+}
+.confirmed-choice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-block: 1rem;
+}
+.confirmed-choice input {
+  width: 1.2rem;
+  height: 1.2rem;
+  flex: 0 0 auto;
+}
+.confirmed-list {
+  display: grid;
+  gap: 0.75rem;
+  margin-block: 1rem;
+}
+.confirmed-list article {
+  border: 1px solid var(--outline-variant, #5a5248);
+  border-radius: 1.25rem;
+  padding: 1rem;
+  min-width: 0;
+}
+.confirmed-list dl {
+  margin: 0.5rem 0;
+}
+.confirmed-list dl > div {
+  display: grid;
+  grid-template-columns: minmax(6rem, 0.3fr) minmax(0, 1fr);
+  gap: 0.75rem;
+  margin-block: 0.5rem;
+}
+.confirmed-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.confirmed-path {
+  overflow-wrap: anywhere;
+}
+.confirmed-fields details {
+  margin-top: 1rem;
+}
+.confirmed-fields li {
+  margin-block: 0.6rem;
+}
+@media (max-width: 640px) {
+  .confirmed-fields .panel-heading {
+    display: grid;
+  }
+  .confirmed-fields .panel-heading > button,
+  .confirmed-fields > button {
+    width: 100%;
+  }
+  .confirmed-list dl > div {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+}
