@@ -234,6 +234,7 @@ export function ConfirmedFieldsPanel({
                     <label className="confirmed-choice">
                       <input
                         type="checkbox"
+                        aria-label={`Выбрать запись ${item.relative_path}`}
                         disabled={busy || submitted}
                         checked={selected.has(item.track_id)}
                         onChange={(e) =>
