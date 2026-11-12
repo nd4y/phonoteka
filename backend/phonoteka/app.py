@@ -167,6 +167,10 @@ def public_job(settings: Settings, row: dict, detail=False, activity=None):
     result["progress"] = round(100 * (row["completed"] + row["failed"]) / total) if total else 0
     result["cancel_requested"] = bool(row["cancel_requested"])
     payload=json.loads(row['payload'])
+    if payload.get('trigger') == 'metadata-preparation-v1':
+        result['skipped'] = db.fetchone(settings.db_path,
+            "SELECT count(*) AS n FROM job_items WHERE job_id=? AND state='succeeded' AND json_extract(result,'$.skipped')=1",
+            (row['id'],))['n']
     result['retry_at']=payload.get('retry_at') if row['stage'] in {'waiting_provider','waiting_storage'} else None
     result['pause_requested']=bool(payload.get('pause_requested'))
     if row['kind']=='export_ready': result['export_progress']=payload.get('export_progress')

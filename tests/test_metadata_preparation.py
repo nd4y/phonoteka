@@ -248,6 +248,10 @@ def test_expected_budget_limit_is_pending_and_genuine_failure_still_stops(librar
             assert row['state']=='succeeded'
             assert json.loads(row['result'])['state']=='needs_review'
             assert result['progress']['skipped']==1 and result['progress']['failed']==0
+            detail = client.get('/api/jobs/'+run['job_id']).json()
+            assert detail['skipped'] == detail['completed'] == 1 and detail['failed'] == 0
+            listed = next(j for j in client.get('/api/jobs').json()['items'] if j['id'] == run['job_id'])
+            assert listed['skipped'] == 1
         else:assert row['state']=='failed'
         assert conn.execute("SELECT count(*) FROM jobs WHERE kind IN ('apply','publish')").fetchone()[0]==0
     assert media.sha256_file(path)==sha and entry(client)['preparation'] is None
