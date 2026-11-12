@@ -68,3 +68,5 @@ Server checks: `tests/test_metadata_preparation.py`. A completed search does not
 recording conflicts, ambiguous albums and unconfirmed artwork remain visible gap reasons.
 
 Batches prioritize metadata searches using existing evidence, recognition with remaining capacity, then cache checks for exhausted inputs. The preview includes artist, path and the limitation. Native recognition retains the existing cache permissions and expiry; a cache miss cannot send beyond the budget. This outcome remains pending with its reason and does not claim a new match. Genuine audit/file failures still stop continuation. A stale status poll cannot overwrite a launch/cancel response; cancellation of a completed preparation reports its actual completion.
+
+The preparation card shows its current stage and completion without a stale duplicate launch message. Pausing log scrolling affects the event view; the job's actual state is shown above the log.
