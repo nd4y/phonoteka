@@ -1,11 +1,13 @@
 """Native scoped observations, durable orchestration and fail-closed preparation."""
+import asyncio
 from dataclasses import replace
 import json
+import time
 import uuid
 
 import pytest
 
-from phonoteka import db, input_readiness, media, metadata_preparation as prep
+from phonoteka import db, input_readiness, media, metadata_preparation as prep, provider_attempts
 from phonoteka.worker import Worker
 from test_backend import drain, settings as base_settings
 from test_confirmed_fields import library
@@ -270,3 +272,117 @@ def test_changed_capacity_invalidates_frozen_ui_plan_without_spending(library):
     with db.connect(cfg.db_path) as conn:
         assert not prep.load(conn)
         assert conn.execute("SELECT count(*) FROM settings WHERE key LIKE 'metadata_prepared:%'").fetchone()[0]==0
+
+
+@pytest.mark.parametrize('kind,calls,skipped', [('recognize',3,True),('recognize',2,False),('analyze',3,False)])
+def test_native_returned_retry_respects_remaining_fingerprint_capacity_only(library, monkeypatch, kind, calls, skipped):
+    cfg,client,headers,tid,sha,path=library
+    setup(cfg,tid,unstable=False,stale=kind=='recognize')
+    if kind=='analyze':
+        with db.transaction(cfg.db_path) as conn:
+            analysis=json.loads(conn.execute('SELECT payload FROM analyses WHERE track_id=?',(tid,)).fetchone()[0])
+            analysis['candidates']=[c for c in analysis['candidates'] if c['provider']=='acoustid']
+            conn.execute('UPDATE analyses SET payload=? WHERE track_id=?',(db.encode(analysis),tid))
+    assert entry(client)['preparation']['kind']==kind
+    saved={'input_sha256':sha,'state':'no_match','candidates':[], 'sources':[
+        {'provider':provider,'state':'provider_unavailable' if provider==('shazam' if kind=='recognize' else 'musicbrainz') else 'no_match'}
+        for provider in ('shazam','acoustid','musicbrainz','lrclib')]}
+    due=time.time()+3600
+    native={'state':'no_match','candidates':0,'sources':saved['sources'],'retry_at':due}
+    async def searched(self,job,item):
+        with db.transaction(cfg.db_path) as conn:
+            meta=json.loads(conn.execute('SELECT metadata FROM tracks WHERE id=?',(tid,)).fetchone()[0])
+            conn.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
+                         (provider_attempts.RECOGNITION_PREFIX+meta['audit']['audio_identity'],db.encode({'calls':calls})))
+            conn.execute('UPDATE analyses SET input_sha256=?,payload=?,updated_at=? WHERE track_id=?',(sha,db.encode(saved),db.utcnow(),tid))
+        return native
+    monkeypatch.setattr(Worker,'analyze_item',searched)
+    accepted=start(client,headers).json()
+    drain(cfg);prep.tick(cfg)
+    with db.connect(cfg.db_path) as conn:
+        row=conn.execute('SELECT state,result FROM job_items WHERE job_id=? AND item_key=?',(accepted['job_id'],tid)).fetchone()
+        result=json.loads(row['result'])
+        assert json.loads(conn.execute('SELECT payload FROM analyses WHERE track_id=?',(tid,)).fetchone()[0])==saved
+        meta=json.loads(conn.execute('SELECT metadata FROM tracks WHERE id=?',(tid,)).fetchone()[0])
+        assert json.loads(conn.execute('SELECT value FROM settings WHERE key=?',(provider_attempts.RECOGNITION_PREFIX+meta['audit']['audio_identity'],)).fetchone()[0])['calls']==calls
+        child=conn.execute('SELECT state,stage FROM jobs WHERE id=?',(accepted['job_id'],)).fetchone()
+        if skipped:
+            assert row['state']=='succeeded' and result['skipped'] is True
+            assert result['code']=='recognition_attempt_budget_exhausted' and 'retry_at' not in result
+            assert child['state']=='succeeded' and prep.load(conn)['state']=='review'
+        else:
+            assert row['state']=='deferred' and result==native
+            assert child['state']=='queued' and child['stage']=='waiting_provider' and prep.load(conn)['state']=='active'
+        assert conn.execute("SELECT count(*) FROM jobs WHERE kind IN ('apply','publish')").fetchone()[0]==0
+    assert media.sha256_file(path)==sha
+
+
+@pytest.mark.parametrize('change', ['revision','missing','audit_state','audit_sha','audit_profile','identity','grant'])
+def test_returned_retry_does_not_mask_changed_input_audit_or_grant(library, monkeypatch, change):
+    cfg,client,headers,tid,sha,path=library
+    setup(cfg,tid,unstable=False)
+    accepted=start(client,headers).json()
+    job=dict(db.fetchone(cfg.db_path,'SELECT * FROM jobs WHERE id=?',(accepted['job_id'],)))
+    item=json.loads(job['payload'])['items'][0]
+    async def searched(self,job,item):
+        with db.transaction(cfg.db_path) as conn:
+            meta=json.loads(conn.execute('SELECT metadata FROM tracks WHERE id=?',(tid,)).fetchone()[0])
+            identity=meta['audit']['audio_identity']
+            conn.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',(provider_attempts.RECOGNITION_PREFIX+identity,db.encode({'calls':3})))
+            if change=='revision':conn.execute('UPDATE tracks SET sha256=? WHERE id=?',('f'*64,tid))
+            if change=='missing':conn.execute('UPDATE tracks SET is_current=0 WHERE id=?',(tid,))
+            if change.startswith('audit_') or change=='identity':
+                field={'audit_state':'state','audit_sha':'sha256','audit_profile':'profile','identity':'audio_identity'}[change]
+                meta['audit'][field]={'audit_state':'failed','audit_sha':'0'*64,'audit_profile':'partial','identity':'bad'}[change]
+                conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),tid))
+            if change=='grant':conn.execute("UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='auth_epoch'")
+        return {'state':'no_match','retry_at':time.time()+3600}
+    monkeypatch.setattr(Worker,'analyze_item',searched)
+    worker=Worker(cfg)
+    try:
+        with pytest.raises(media.MediaError) as error:asyncio.run(prep.search(worker,job,item))
+        assert error.value.code in {'conflict','preparation_stale','audit_failed','authorization_changed','authorization_epoch_changed'}
+    finally:worker.pool.shutdown(wait=True)
+    assert media.sha256_file(path)==sha
+
+
+def test_returned_retry_preserves_other_capacity_error(library,monkeypatch):
+    cfg,client,headers,tid,sha,path=library
+    setup(cfg,tid,unstable=False)
+    accepted=start(client,headers).json()
+    job=dict(db.fetchone(cfg.db_path,'SELECT * FROM jobs WHERE id=?',(accepted['job_id'],)))
+    item=json.loads(job['payload'])['items'][0]
+    async def searched(self,job,item):return {'retry_at':time.time()+3600}
+    def invalid(*_):raise provider_attempts.UsageError('recognition_identity_required')
+    monkeypatch.setattr(Worker,'analyze_item',searched)
+    monkeypatch.setattr(provider_attempts,'require_recognition_capacity',invalid)
+    worker=Worker(cfg)
+    try:
+        with pytest.raises(provider_attempts.UsageError) as error:asyncio.run(prep.search(worker,job,item))
+        assert error.value.code=='recognition_identity_required'
+    finally:worker.pool.shutdown(wait=True)
+
+
+@pytest.mark.parametrize('change',['grant','revision','audit'])
+def test_budget_decision_rechecks_input_and_grant_after_capacity_read(library,monkeypatch,change):
+    cfg,client,headers,tid,sha,path=library
+    setup(cfg,tid,unstable=False)
+    accepted=start(client,headers).json()
+    job=dict(db.fetchone(cfg.db_path,'SELECT * FROM jobs WHERE id=?',(accepted['job_id'],)))
+    item=json.loads(job['payload'])['items'][0]
+    async def searched(self,job,item):return {'retry_at':time.time()+3600}
+    def changed(settings,identity):
+        with db.transaction(cfg.db_path) as conn:
+            if change=='grant':conn.execute("UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='auth_epoch'")
+            if change=='revision':conn.execute('UPDATE tracks SET sha256=? WHERE id=?',('0'*64,tid))
+            if change=='audit':
+                meta=json.loads(conn.execute('SELECT metadata FROM tracks WHERE id=?',(tid,)).fetchone()[0])
+                meta['audit']['state']='failed'
+                conn.execute('UPDATE tracks SET metadata=? WHERE id=?',(db.encode(meta),tid))
+        raise provider_attempts.UsageError('recognition_attempt_budget_exhausted')
+    monkeypatch.setattr(Worker,'analyze_item',searched)
+    monkeypatch.setattr(provider_attempts,'require_recognition_capacity',changed)
+    worker=Worker(cfg)
+    try:
+        with pytest.raises(media.MediaError):asyncio.run(prep.search(worker,job,item))
+    finally:worker.pool.shutdown(wait=True)

@@ -198,17 +198,49 @@ def authorize(settings, job):
         validate(conn, settings, run, job)
 
 
+def _budget_result():
+    return {'state': 'needs_review', 'skipped': True, 'code': 'recognition_attempt_budget_exhausted',
+            'message': 'Нового подтверждения нет: бюджет распознавания исчерпан. Доступные результаты сохранены; лимит не сбрасывался.'}
+
+
+def _retry_identity(worker, job, item):
+    worker.authorize_grant(job)
+    row = db.fetchone(worker.settings.db_path, 'SELECT * FROM tracks WHERE id=? AND is_current=1', (item['track_id'],))
+    if not row or row['sha256'] != item['sha256']:
+        raise media.MediaError('conflict', 'Версия файла изменилась после поиска')
+    audit = json.loads(row['metadata']).get('audit')
+    if (not isinstance(audit, dict) or audit.get('state') != 'passed' or audit.get('sha256') != item['sha256']
+            or audit.get('profile') != 'full_decode_all_audio_streams'
+            or not fields.HASH.fullmatch(str(audit.get('audio_identity', '')))):
+        raise media.MediaError('audit_failed', 'Для ожидания распознавания нужна актуальная полная проверка аудио')
+    return audit['audio_identity']
+
+
 async def search(worker, job, item):
     try:
-        return await worker.analyze_item(job, item)
+        result = await worker.analyze_item(job, item)
     except media.MediaError as exc:
         if exc.code != 'recognition_attempt_budget_exhausted':
             raise
-        # Native recognition already enforced the unchanged durable budget and
-        # cache policy. An expected lack of capacity is a pending result, not a
-        # successful identification or an automatic retry instruction.
-        return {'state': 'needs_review', 'skipped': True, 'code': exc.code,
-                'message': 'Нового подтверждения нет: бюджет распознавания исчерпан. Доступные результаты сохранены; лимит не сбрасывался.'}
+        # Native recognition already enforced its cache and durable allowance.
+        return _budget_result()
+    if job['kind'] == 'recognize' and result.get('retry_at'):
+        identity = await worker.io(_retry_identity, worker, job, item)
+        exhausted = False
+        try:
+            await worker.io(provider_attempts.require_recognition_capacity, worker.settings, identity)
+        except provider_attempts.UsageError as exc:
+            if exc.code != 'recognition_attempt_budget_exhausted':
+                raise
+            exhausted = True
+        if await worker.io(_retry_identity, worker, job, item) != identity:
+            raise media.MediaError('conflict', 'Аудиоревизия изменилась после поиска')
+        if exhausted:
+            # A fallback may have spent the last allowance after another
+            # fingerprint source requested a retry. Preserve its saved analysis,
+            # but do not park a retry that has no remaining send capacity.
+            return _budget_result()
+    return result
 
 
 async def scan(worker, job):

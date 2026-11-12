@@ -151,3 +151,5 @@ Confirmed-field filling can prepare missing evidence in a bounded batch of stabi
 Preparation prioritizes metadata searches before remaining recognition capacity. Exhausted inputs can check reusable cached fingerprints without resetting limits; missing confirmation remains visible in results.
 
 The preparation card shows its current state. Pausing log scrolling leaves the job's actual state, shown above the log, unchanged.
+
+If a fallback uses the final fingerprint allowance, preparation retains the evidence for review without waiting for another recognition request beyond that allowance.
