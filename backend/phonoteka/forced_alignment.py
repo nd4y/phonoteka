@@ -17,9 +17,9 @@ def align_reference(model,samples,text,language,words,duration):
     return align_with_provider(samples,text,words,duration,provider)
 
 
-def align_with_provider(samples,text,words,duration,provider):
+def align_with_provider(samples,text,words,duration,provider,*,unscored_words=False):
     """All client-side independent anchors and timing gates apply to every engine."""
-    preliminary=align_lines(text,words,duration)
+    preliminary=align_lines(text,words,duration,unscored_words=unscored_words)
     if len(preliminary['lines'])>500:raise ValueError('Alignment supports up to 500 lines')
     lines=[{**line,'start_ms':None,'end_ms':None,'state':'unaligned','reason':'independent_anchor_missing' if line['text'].strip() else 'empty_line'} for line in preliminary['lines']]
     groups=[];group=[]
@@ -64,4 +64,4 @@ def align_with_provider(samples,text,words,duration,provider):
                 previous=first_time
     content=[line for line in lines if line['text'].strip()]
     complete=bool(content) and all(x['state']=='aligned' for x in content)
-    return {**preliminary,'method':'whisper_attention_dtw_with_independent_asr_anchors_v1','lines':lines,'coverage':sum(x['state']=='aligned' for x in content)/max(1,len(content)),'complete':complete,'state':'needs_review' if complete else 'partially_aligned','automatic_acceptance':False,'music_quality_gate':'not_validated','lrc':serialize_lrc(content) if complete else None}
+    return {**preliminary,'method':'whisper_attention_dtw_with_independent_asr_anchors_v1','lines':lines,'coverage':sum(x['state']=='aligned' for x in content)/max(1,len(content)),'complete':complete,'state':'needs_review' if complete else 'partially_aligned','automatic_acceptance':False,'independent_word_confidence_available':not unscored_words,'music_quality_gate':'not_validated','lrc':serialize_lrc(content) if complete else None}

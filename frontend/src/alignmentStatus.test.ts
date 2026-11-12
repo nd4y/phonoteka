@@ -31,6 +31,17 @@ describe("ASR result explanation", () => {
       )?.code,
     ).toBe("requires_listening");
   });
+  it("does not describe missing model confidence as zero reliable words", () => {
+    const value = analysis(
+      [{ word: "example", start: 0, end: 1 }],
+      [{ start_ms: null, reason: "independent_anchor_missing" }],
+    );
+    value.asr!.confidence_available = false;
+    const status = alignmentStatus(value);
+    expect(status?.code).toBe("no_independent_anchors");
+    expect(status?.detail).toContain("не предоставляет оценку уверенности");
+    expect(status?.detail).not.toContain("0 с достаточной уверенностью");
+  });
   it("counts lyric content while leaving empty LRC markers unverified", () => {
     expect(
       alignmentStatus(

@@ -11,6 +11,9 @@ import time
 
 REMOTE_BACKEND=os.environ.get('ASR_BACKEND','cpu')=='pc2'
 PROFILE = 'pc2-large-v3-https-supervised-v3' if REMOTE_BACKEND else 'cpu-small-int8-unpacked-supervised-v5'
+RUSSIAN_BACKEND=os.environ.get('PC2_ASR_RUSSIAN_MODEL','') if REMOTE_BACKEND else ''
+if RUSSIAN_BACKEND not in ('','gigaam-v3-e2e-rnnt'):raise ValueError('Unknown Russian recognition model')
+if RUSSIAN_BACKEND:PROFILE='pc2-gigaam-f60c62fe-whisper-edaa852e-supervised-v1'
 MAX_DURATION = 1800
 MAX_SAMPLES = MAX_DURATION * 16000
 MAX_PCM_BYTES = 60 * 1024 ** 2
@@ -300,7 +303,9 @@ class ModelProcess:
 
 
 def profile():
-    return {'id':PROFILE, 'models':['pc2:faster-whisper-large-v3:float16'] if REMOTE_BACKEND else ['faster-whisper-small:int8'], 'resident_models':0 if REMOTE_BACKEND else 1,
+    models=['pc2:faster-whisper-large-v3:float16'] if REMOTE_BACKEND else ['faster-whisper-small:int8']
+    if RUSSIAN_BACKEND:models.insert(0,'pc2:gigaam-v3-e2e-rnnt:float16_encoder')
+    return {'id':PROFILE, 'models':models, 'resident_models':0 if REMOTE_BACKEND else 1,
             'max_duration_seconds':MAX_DURATION, 'channels':1, 'sample_rate':16000,
             'max_input_channels':MAX_INPUT_CHANNELS, 'max_input_sample_rate':MAX_INPUT_RATE,
             'max_pcm_samples':MAX_SAMPLES, 'max_pcm_bytes':MAX_PCM_BYTES,

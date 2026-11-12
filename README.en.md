@@ -1,5 +1,9 @@
 # phonoteka
 
+An optional pinned PC2 GigaAM profile recognizes Russian words and their real times;
+Whisper retains the final alignment gates. Unknown confidence and drafts remain
+explicit. [Russian ASR contract and acceptance](docs/en/pc2-russian-asr.md).
+
 Status and job activity recover after a stalled server read. Failed updates are shown separately from task results and clear after recovery. [Connection recovery](docs/en/ui-connection-recovery.md).
 
 Skipping a record shows a next-record transition, without claiming that the file is being written. [Review feedback](docs/en/review-queue-feedback.md).

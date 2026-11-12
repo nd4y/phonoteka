@@ -7,9 +7,10 @@ services:
       ASR_MODEL: faster-whisper-large-v3
       PC2_ASR_URL: ${PC2_ASR_URL:?Set the authenticated HTTPS engine URL ending in /v1/whisper}
       PC2_ASR_SECRET_FILE: /run/secrets/pc2_asr_key
+      PC2_ASR_RUSSIAN_MODEL: ${PC2_ASR_RUSSIAN_MODEL:-}
     volumes:
       - type: bind
         source: ${PC2_ASR_KEY_FILE:?Set an existing protected engine key file}
         target: /run/secrets/pc2_asr_key
         read_only: true
-        bind: {create_host_path: false}
+        bind: { create_host_path: false }

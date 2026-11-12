@@ -20,7 +20,13 @@ export function alignmentStatus(analysis?: Analysis | null) {
   const alignment = analysis?.alignment;
   if (!alignment) return null;
   const words = analysis?.asr?.words || [],
-    reliable = words.filter((word) => word.probability >= 0.5);
+    reliable = words.filter(
+      (word) => typeof word.probability === "number" && word.probability >= 0.5,
+    );
+  const confidence =
+    analysis?.asr?.confidence_available === false
+      ? "Движок не предоставляет оценку уверенности слов."
+      : `Из них ${reliable.length} с достаточной уверенностью.`;
   const content = alignment.lines.filter((line) => line.text?.trim());
   const aligned = content.filter(
     (line) =>
@@ -44,7 +50,7 @@ export function alignmentStatus(analysis?: Analysis | null) {
     return {
       code: "no_independent_anchors",
       title: "Слова аудио не дали надежных совпадений с текстом",
-      detail: `ASR вернул ${words.length} слов, из них ${reliable.length} с достаточной уверенностью. Ни одна из ${total} строк не получила полной независимой опоры. Проверьте слова, язык и конкретную версию записи.`,
+      detail: `ASR вернул ${words.length} слов. ${confidence} Ни одна из ${total} строк не получила полной независимой опоры. Проверьте слова, язык и конкретную версию записи.`,
     };
   return {
     code: aligned === total && total > 0 ? "requires_listening" : "partial_alignment",

@@ -193,8 +193,10 @@ export type Analysis = {
     model: string;
     language: string;
     text: string;
+    confidence_available?: boolean;
+    word_probabilities?: boolean;
     segments?: Array<{ uncertain?: boolean }>;
-    words: Array<{ start: number; end: number; word: string; probability: number }>;
+    words: Array<{ start: number; end: number; word: string; probability?: number }>;
   };
   alignment?: {
     state: string;
