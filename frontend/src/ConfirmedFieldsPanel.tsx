@@ -2,9 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, api, messageFor, requestId } from "./api";
 import type { Job } from "./types";
 import { preparationBatch, type EvidencePreparation } from "./preparationBatch";
+import { readPlanPage } from "./readPlanPage";
 import "./ConfirmedFieldsPanel.css";
 
-type Change = { field: string; before: string | boolean; after: string | boolean; source: string };
+type Change = {
+  field: string;
+  before: string | boolean;
+  after: string | boolean;
+  source: string;
+};
 type Pending = { field: string; code: string; message: string };
 type Entry = {
   track_id: string;
@@ -28,14 +34,25 @@ type Preparation = {
   total?: number;
   completed_stages?: string[];
   reason?: string | null;
-  progress?: { total: number; completed: number; failed: number; skipped?: number; state: string };
+  progress?: {
+    total: number;
+    completed: number;
+    failed: number;
+    skipped?: number;
+    state: string;
+  };
 };
 const stages: Record<string, string> = {
   scan_first: "Первая проверка файлов",
   scan_second: "Повторная проверка стабильности",
   search: "Поиск недостающих данных",
 };
-type Page = { items: Entry[]; next_after: string | null; scanned: number; total: number };
+type Page = {
+  items: Entry[];
+  next_after: string | null;
+  scanned: number;
+  total: number;
+};
 const names: Record<string, string> = {
   title: "Название",
   artist: "Исполнитель",
@@ -126,10 +143,17 @@ export function ConfirmedFieldsPanel({
     let after = "";
     try {
       do {
-        const page = await api<Page>(
-          `/confirmed-fields/plan?limit=30${after ? `&after=${encodeURIComponent(after)}` : ""}`,
+        const page = await readPlanPage(
+          () =>
+            api<Page>(
+              `/confirmed-fields/plan?limit=30${after ? `&after=${encodeURIComponent(after)}` : ""}`,
+            ),
+          () => version === serial.current && !cancelled.current,
+          () =>
+            setNotice("Повторяем чтение текущей части плана. Уже проверенные записи сохраняются."),
         );
         if (version !== serial.current || cancelled.current) break;
+        setNotice("");
         if (
           collected.length + page.items.length > 100000 ||
           (page.next_after && cursors.has(page.next_after))
@@ -148,7 +172,11 @@ export function ConfirmedFieldsPanel({
       if (cancelled.current)
         setNotice("Проверка остановлена. Для записи нужен полный актуальный план.");
     } catch (err) {
-      if (version === serial.current) setError(messageFor(err));
+      if (version === serial.current) {
+        if (cancelled.current)
+          setNotice("Проверка остановлена. Для записи нужен полный актуальный план.");
+        else setError(messageFor(err));
+      }
     } finally {
       if (version === serial.current) {
         lock.current = false;
@@ -197,7 +225,11 @@ export function ConfirmedFieldsPanel({
       await api<Job>("/jobs", {
         method: "POST",
         headers: { "Idempotency-Key": reconcileKey.current },
-        body: JSON.stringify({ kind: "scan", track_ids: [], params: { reconcile_root: true } }),
+        body: JSON.stringify({
+          kind: "scan",
+          track_ids: [],
+          params: { reconcile_root: true },
+        }),
       });
       setReconcileNeeded(false);
       setComplete(false);

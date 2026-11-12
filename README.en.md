@@ -153,3 +153,5 @@ Preparation prioritizes metadata searches before remaining recognition capacity.
 The preparation card shows its current state. Pausing log scrolling leaves the job's actual state, shown above the log, unchanged.
 
 If a fallback uses the final fingerprint allowance, preparation retains the evidence for review without waiting for another recognition request beyond that allowance.
+
+When Shazam's allowance is exhausted, preparation also checks valid AcoustID cache entries without sending on a miss. This new check has a separate durable receipt; old receipts and limits remain intact. A temporary plan-read timeout retries only the current page once.

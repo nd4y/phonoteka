@@ -274,6 +274,54 @@ def test_changed_capacity_invalidates_frozen_ui_plan_without_spending(library):
         assert conn.execute("SELECT count(*) FROM settings WHERE key LIKE 'metadata_prepared:%'").fetchone()[0]==0
 
 
+@pytest.mark.parametrize('calls', [2, 3])
+def test_new_cache_capability_preserves_legacy_receipt_and_send_allowance(library, calls):
+    cfg, client, headers, tid, sha, path = library
+    setup(cfg, tid, unstable=False)
+    with db.transaction(cfg.db_path) as conn:
+        row = conn.execute('SELECT * FROM tracks WHERE id=?', (tid,)).fetchone()
+        meta = json.loads(row['metadata'])
+        usage_key = provider_attempts.RECOGNITION_PREFIX + meta['audit']['audio_identity']
+        conn.execute('INSERT INTO settings VALUES(?,?)', (usage_key, db.encode({'calls': calls})))
+        legacy = prep.fields.digest([prep.CONTRACT, tid, sha, 'recognize', prep.guards(conn, row)])
+        conn.execute('INSERT INTO settings VALUES(?,?)', ('metadata_prepared:' + legacy, db.encode({'run_id': 'legacy-retained'})))
+    current = entry(client)
+    assert bool(current['preparation']) == (calls == 3)
+    if calls == 3:
+        assert current['preparation']['fingerprint_requests_remaining'] == 0
+        started = start(client, headers).json()
+        assert client.post('/api/metadata-preparation/cancel', json={'id': started['id']}, headers=headers).status_code == 200
+        assert entry(client)['preparation'] is None
+        with db.transaction(cfg.db_path) as conn:
+            conn.execute("UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='auth_epoch'")
+            row = conn.execute('SELECT * FROM tracks WHERE id=?', (tid,)).fetchone()
+            result = prep.fields.evaluate(cfg, conn, row, {'auth_epoch': 2}, busy=set(), retired=set())
+            assert prep.candidate(cfg, conn, row, {'auth_epoch': 2}, result) is None
+    with db.connect(cfg.db_path) as conn:
+        assert json.loads(conn.execute('SELECT value FROM settings WHERE key=?', (usage_key,)).fetchone()[0]) == {'calls': calls}
+        assert json.loads(conn.execute('SELECT value FROM settings WHERE key=?', ('metadata_prepared:' + legacy,)).fetchone()[0]) == {'run_id': 'legacy-retained'}
+        assert conn.execute("SELECT count(*) FROM settings WHERE key LIKE 'metadata_prepared:%'").fetchone()[0] == (2 if calls == 3 else 1)
+        assert conn.execute("SELECT count(*) FROM jobs WHERE kind IN ('apply','publish')").fetchone()[0] == 0
+    assert media.sha256_file(path) == sha
+
+
+def test_new_cache_capability_does_not_replay_metadata_receipts(library):
+    cfg, client, headers, tid, sha, path = library
+    setup(cfg, tid, unstable=False, stale=False)
+    with db.transaction(cfg.db_path) as conn:
+        analysis = json.loads(conn.execute('SELECT payload FROM analyses WHERE track_id=?', (tid,)).fetchone()[0])
+        analysis['candidates'] = [c for c in analysis['candidates'] if c['provider'] == 'acoustid']
+        conn.execute('UPDATE analyses SET payload=? WHERE track_id=?', (db.encode(analysis), tid))
+    assert entry(client)['preparation']['kind'] == 'analyze'
+    with db.transaction(cfg.db_path) as conn:
+        row = conn.execute('SELECT * FROM tracks WHERE id=?', (tid,)).fetchone()
+        identity = json.loads(row['metadata'])['audit']['audio_identity']
+        conn.execute('INSERT INTO settings VALUES(?,?)', (provider_attempts.RECOGNITION_PREFIX + identity, db.encode({'calls': 3})))
+        legacy = prep.fields.digest([prep.CONTRACT, tid, sha, 'analyze', prep.guards(conn, row)])
+        conn.execute('INSERT INTO settings VALUES(?,?)', ('metadata_prepared:' + legacy, db.encode({'run_id': 'legacy-retained'})))
+    assert entry(client)['preparation'] is None
+
+
 @pytest.mark.parametrize('kind,calls,skipped', [('recognize',3,True),('recognize',2,False),('analyze',3,False)])
 def test_native_returned_retry_respects_remaining_fingerprint_capacity_only(library, monkeypatch, kind, calls, skipped):
     cfg,client,headers,tid,sha,path=library

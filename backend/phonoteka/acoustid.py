@@ -125,12 +125,12 @@ def fingerprint(path, roots):
         raise media.MediaError('fingerprint_failed', 'Не удалось вычислить Chromaprint') from exc
 
 
-async def lookup(providers, signature, duration, authorize=lambda: None, *, probe=False):
+async def lookup(providers, signature, duration, authorize=lambda: None, *, probe=False, cache_only=False):
     with providers.metrics.provider('acoustid', 'metadata' if probe else 'fingerprint'):
-        return await _lookup(providers, signature, duration, authorize, probe=probe)
+        return await _lookup(providers, signature, duration, authorize, probe=probe, cache_only=cache_only)
 
 
-async def _lookup(providers, signature, duration, authorize=lambda: None, *, probe=False):
+async def _lookup(providers, signature, duration, authorize=lambda: None, *, probe=False, cache_only=False):
     settings = providers.settings
     cfg = await asyncio.to_thread(connection, settings)
     if not settings.external_fingerprints or not cfg['enabled']:
@@ -152,15 +152,36 @@ async def _lookup(providers, signature, duration, authorize=lambda: None, *, pro
                     return
             time.sleep(min(delay, .1))
     if (not isinstance(signature, str) or not re.fullmatch(r'[A-Za-z0-9_-]{10,20000}', signature)
-            or not math.isfinite(duration) or not 3 <= duration <= 21600):
+            or not math.isfinite(duration) or not 3 <= duration <= 21600 or cache_only and probe):
         raise ProviderError('invalid_fingerprint', 'acoustid', 'Некорректный отпечаток или длительность')
     usage = await asyncio.to_thread(provider_policy.check, settings, 'acoustid', 'metadata', 'fetch')
+    if cache_only:
+        await asyncio.to_thread(provider_policy.check, settings, 'acoustid', 'metadata', 'cache')
     cache_key = hashlib.sha256(db.encode([PROFILE, usage['policy_version'], signature, round(duration)]).encode()).hexdigest()
     async with providers.locks.setdefault('acoustid-flight', asyncio.Lock()):
         current_authorization()
         cached = await asyncio.to_thread(db.fetchone, settings.db_path,
-            'SELECT payload FROM provider_cache WHERE key=? AND expires>?', (cache_key, time.time())) if usage['allow_cache'] and not probe else None
-        if cached: return json.loads(cached['payload'])
+            "SELECT payload,expires FROM provider_cache WHERE key=? AND provider='acoustid' AND expires>?",
+            (cache_key, time.time())) if usage['allow_cache'] and not probe else None
+        if cached:
+            if cache_only:
+                try:
+                    rows = json.loads(cached['payload'])
+                    if not isinstance(rows, list) or len(rows) > 100: raise ValueError()
+                    candidates(rows, duration)
+                except (ValueError, TypeError, KeyError) as exc:
+                    raise ProviderError('provider_unavailable', 'acoustid', 'Некорректный сохранённый ответ AcoustID') from exc
+                current_authorization()
+                current = await asyncio.to_thread(provider_policy.check, settings, 'acoustid', 'metadata', 'cache')
+                if current['policy_version'] != usage['policy_version']:
+                    raise media.MediaError('provider_policy_denied', 'Политика AcoustID изменилась во время проверки кэша')
+                if cached['expires'] > time.time(): return rows
+            else:
+                return json.loads(cached['payload'])
+        if cache_only:
+            # No transport, pacing reservation or budget attempt may follow a
+            # miss in this mode. Expired evidence never earns another send.
+            raise ProviderError('recognition_attempt_budget_exhausted', 'acoustid', 'Пригодный сохранённый результат отсутствует; новые запросы распознавания не разрешены')
         breaker = json.loads(await asyncio.to_thread(db.setting, settings.db_path, 'provider_breaker:acoustid', '{}'))
         if breaker.get('until', 0) > time.time():
             raise ProviderError('provider_cooldown', 'acoustid', 'AcoustID временно приостановлен')
@@ -237,8 +258,8 @@ def candidates(rows, duration):
     return result
 
 
-async def identify(providers, signature, duration, authorize=lambda: None):
-    rows = await lookup(providers, signature, duration, authorize)
+async def identify(providers, signature, duration, authorize=lambda: None, *, cache_only=False):
+    rows = await lookup(providers, signature, duration, authorize, cache_only=cache_only)
     return candidates(rows, duration)
 
 
