@@ -15,6 +15,7 @@ STAGES = ('scan_first', 'scan_second', 'search')
 WAITING = {'queued', 'running', 'paused', 'waiting_authorization', 'waiting', 'deferred', 'waiting_provider', 'waiting_storage'}
 SAFE_BLOCKS = {'input_stabilizing', 'analysis_missing', 'analysis_stale', 'audio_audit_required'}
 CACHE_FALLBACK_PROFILE = 'exhausted-acoustid-cache-v1'
+UNSEARCHED_RECOVERY_PROFILE = 'unsearched-preparation-stale-v1'
 
 
 def load(conn, identity=None):
@@ -33,6 +34,105 @@ def guards(conn, row):
     decision = meta.get('recording_classification') or {}
     return fields.digest([field_policy.load(conn, row['id']), dict(p) if p else None,
                           decision if decision.get('origin') == 'owner' else None])
+
+
+def unsearched_recovery(settings, conn, row, active, signature, receipt, kind, current_guard):
+    """One new capability, never a replay or removal of the original receipt."""
+    from .worker import root_identity
+    try:
+        binding = json.loads(receipt)
+        if not isinstance(binding, dict) or set(binding) != {'run_id'}:
+            return None
+        identity = binding['run_id']
+        if not isinstance(identity, str) or str(uuid.UUID(identity)) != identity:
+            return None
+        run = load(conn, identity)
+        stage = run.get('stage')
+        if (run.get('id') != identity or run.get('state') != 'stopped' or run.get('reason') != 'preparation_stale'
+                or stage not in STAGES[:2] or run.get('kind') != kind):
+            return None
+        completed = [] if stage == 'scan_first' else ['scan_first']
+        items = run.get('items')
+        if (run.get('completed_stages') != completed or not isinstance(items, list) or not 1 <= len(items) <= LIMIT
+                or type(run.get('total')) is not int or run['total'] != len(items)):
+            return None
+        keys = {'track_id', 'sha256', 'relative_path', 'scan', 'guards'}
+        if any(not isinstance(i, dict) or set(i) != keys or type(i['scan']) is not bool
+               or not isinstance(i['track_id'], str) or str(uuid.UUID(i['track_id'])) != i['track_id']
+               or not isinstance(i['relative_path'], str) or not i['relative_path']
+               or not isinstance(i['sha256'], str) or not fields.HASH.fullmatch(i['sha256'])
+               or not isinstance(i['guards'], str) or not fields.HASH.fullmatch(i['guards']) for i in items):
+            return None
+        ids = {i['track_id'] for i in items}
+        tokens = run.get('tokens')
+        if (len(ids) != len(items) or len({i['relative_path'] for i in items}) != len(items)
+                or not isinstance(tokens, dict) or set(tokens) != ids
+                or any(not isinstance(t, str) or not fields.HASH.fullmatch(t) for t in tokens.values())):
+            return None
+        original = next((i for i in items if i['track_id'] == row['id']), None)
+        if (not original or original['sha256'] != row['sha256'] or original['relative_path'] != row['relative_path']
+                or original['guards'] != current_guard):
+            return None
+        dependency = [CONTRACT, row['id'], row['sha256'], kind, original['guards']]
+        if signature not in {fields.digest(dependency), fields.digest(dependency + [CACHE_FALLBACK_PROFILE])}:
+            return None
+        epoch = conn.execute("SELECT value FROM settings WHERE key='auth_epoch'").fetchone()
+        recovery = conn.execute("SELECT value FROM settings WHERE key='recovery_required'").fetchone()
+        actual_root = root_identity(settings.work_root)
+        stored_root = conn.execute("SELECT value FROM settings WHERE key='work_root_identity'").fetchone()
+        if (not epoch or type(active.get('auth_epoch')) is not int or type(run.get('epoch')) is not int
+                or run['epoch'] != active['auth_epoch'] or run['epoch'] != int(epoch[0])
+                or recovery and recovery[0] != 'false' or not stored_root
+                or run.get('root') != actual_root or json.loads(stored_root[0]) != actual_root):
+            return None
+        stage_ids = {s: str(uuid.uuid5(uuid.UUID(identity), s)) for s in STAGES}
+        if run.get('job_id') != stage_ids[stage] or run.get('last_job_id') != (stage_ids['scan_first'] if completed else None):
+            return None
+        scanned = [i for i in items if i['scan']]
+        if not scanned:
+            return None
+        for name in [*completed, stage]:
+            job = conn.execute('SELECT * FROM jobs WHERE id=?', (stage_ids[name],)).fetchone()
+            if (not job or job['kind'] != 'scan' or job['auth_epoch'] != run['epoch'] or job['cancel_requested']
+                    or job['state'] not in {'succeeded', 'failed', 'completed_with_errors'}
+                    or job['error'] not in {None, 'preparation_stale'} or job['total'] != len(scanned)):
+                return None
+            payload = json.loads(job['payload'])
+            if payload.get('trigger') != CONTRACT or payload.get('metadata_preparation_id') != identity or payload.get('items') != scanned:
+                return None
+            results = conn.execute('SELECT * FROM job_items WHERE job_id=?', (job['id'],)).fetchall()
+            expected = {i['relative_path']: i for i in scanned}
+            for result in results:
+                value = json.loads(result['result'])
+                item = expected.get(result['item_key'])
+                if not item or not isinstance(value, dict) or result['state'] not in {'succeeded', 'failed'}:
+                    return None
+                if result['state'] == 'failed' and value.get('code') != 'preparation_stale':
+                    return None
+                if result['state'] == 'succeeded' and (value.get('track_id') != item['track_id'] or value.get('sha256') != item['sha256']):
+                    return None
+            if (job['completed'] != sum(r['state'] == 'succeeded' for r in results)
+                    or job['failed'] != sum(r['state'] == 'failed' for r in results)):
+                return None
+            if name in completed:
+                proof = conn.execute('SELECT value FROM settings WHERE key=?', ('metadata_scan:' + job['id'],)).fetchone()
+                if (job['state'] != 'succeeded' or job['completed'] != len(scanned) or job['failed']
+                        or not proof or json.loads(proof[0]).get('complete') is not True):
+                    return None
+        search = stage_ids['search']
+        if (conn.execute("SELECT 1 FROM jobs WHERE id=? OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.metadata_preparation_id')=? AND kind IN ('analyze','recognize') ELSE 0 END LIMIT 1", (search, identity)).fetchone()
+                or conn.execute('SELECT 1 FROM job_items WHERE job_id=? LIMIT 1', (search,)).fetchone()):
+            return None
+        batches = (identity, *stage_ids.values())
+        if conn.execute("SELECT 1 FROM settings WHERE key GLOB ? AND CASE WHEN json_valid(value) THEN json_type(value)<>'object' OR json_extract(value,'$.batch_id') IN (?,?,?,?) ELSE 1 END LIMIT 1",
+                        (provider_attempts.PREFIX + '*', *batches)).fetchone():
+            return None
+        recovered = fields.digest([UNSEARCHED_RECOVERY_PROFILE, signature])
+        if conn.execute('SELECT 1 FROM settings WHERE key=?', ('metadata_prepared:' + recovered,)).fetchone():
+            return None
+        return recovered
+    except (ValueError, TypeError, KeyError, AttributeError, OSError, media.MediaError):
+        return None
 
 
 def candidate(settings, conn, row, active, result):
@@ -63,14 +163,20 @@ def candidate(settings, conn, row, active, result):
     if kind == 'recognize' and remaining == 0:
         dependency.append(CACHE_FALLBACK_PROFILE)
     signature = fields.digest(dependency)
-    receipt = conn.execute('SELECT 1 FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone()
+    receipt = conn.execute('SELECT value FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone()
+    recovery_of = None
     if receipt:
-        return None
+        recovered = unsearched_recovery(settings, conn, row, active, signature, receipt[0], kind, dependency[4])
+        if not recovered:
+            return None
+        recovery_of, signature = signature, recovered
     stable = input_readiness.describe(metadata, grace_seconds=settings.input_grace_seconds)['state'] == 'ready'
     return {'token': fields.digest([signature, result['token'], remaining]), 'receipt': signature,
             'fingerprint_requests_remaining': remaining if kind == 'recognize' else None,
-            'kind': kind, 'scan': not stable,
-            'reason': 'Проверим сохранённые отпечатки. Новые запросы распознавания недоступны.' if kind == 'recognize' and remaining == 0 else
+            'kind': kind, 'scan': bool(recovery_of) or not stable,
+            **({'recovery_of': recovery_of} if recovery_of else {}),
+            'reason': 'Предыдущая подготовка остановилась до поиска. Заново проверим файлы и доступные данные.' if recovery_of else
+                      'Проверим сохранённые отпечатки. Новые запросы распознавания недоступны.' if kind == 'recognize' and remaining == 0 else
                       'Проверим стабильность и найдём недостающие данные.' if not stable else
                       'Повторим поиск по аудио.' if kind == 'recognize' else 'Уточним данные музыкальных источников.'}
 
@@ -322,8 +428,10 @@ def install(app, settings):
                     raise security.error(409, 'preparation_stale', 'Обновите план: данные или доступные действия изменились')
                 kind = item['kind']
                 chosen.append({'track_id': tid, 'sha256': row['sha256'], 'relative_path': row['relative_path'],
-                               'scan': item['scan'], 'guards': guards(conn, row)})
-                conn.execute('INSERT INTO settings VALUES(?,?)', ('metadata_prepared:' + item['receipt'], db.encode({'run_id': key})))
+                               'scan': item['scan'], 'guards': guards(conn, row),
+                               **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})
+                conn.execute('INSERT INTO settings VALUES(?,?)', ('metadata_prepared:' + item['receipt'],
+                             db.encode({'run_id': key, **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})))
             run = {'id': key, 'state': 'active', 'items': chosen, 'tokens': body.tokens, 'epoch': active['auth_epoch'],
                    'root': root_identity(settings.work_root), 'kind': kind, 'total': len(chosen), 'completed_stages': [],
                    'job_id': None, 'stage': STAGES[0], 'reason': None, 'started_at': db.utcnow()}

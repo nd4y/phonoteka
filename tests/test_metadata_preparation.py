@@ -434,3 +434,200 @@ def test_budget_decision_rechecks_input_and_grant_after_capacity_read(library,mo
     try:
         with pytest.raises(media.MediaError):asyncio.run(prep.search(worker,job,item))
     finally:worker.pool.shutdown(wait=True)
+
+
+def stopped_before_search(library, monkeypatch, *, stage='scan_first', stable=False):
+    """A real scan changes one peer's proposal guard; this track stays frozen."""
+    cfg, client, headers, tid, sha, path = library
+    setup(cfg, tid, unstable=not stable)
+    other_id = str(uuid.uuid4())
+    (cfg.work_root / 'other.flac').write_bytes(path.read_bytes())
+    with db.transaction(cfg.db_path) as conn:
+        other = dict(conn.execute('SELECT * FROM tracks WHERE id=?', (tid,)).fetchone())
+        metadata = json.loads(other['metadata'])
+        metadata['input_readiness'] = input_readiness.observed(metadata, {}, None)
+        other.update(id=other_id, relative_path='other.flac', metadata=db.encode(metadata))
+        conn.execute('INSERT INTO tracks(' + ','.join(other) + ') VALUES(' + ','.join('?' for _ in other) + ')', tuple(other.values()))
+        analysis = conn.execute('SELECT * FROM analyses WHERE track_id=?', (tid,)).fetchone()
+        conn.execute('INSERT INTO analyses VALUES(?,?,?,?)', (other_id, analysis['input_sha256'], analysis['payload'], analysis['updated_at']))
+        usage_key = provider_attempts.RECOGNITION_PREFIX + metadata['audit']['audio_identity']
+        conn.execute('INSERT INTO settings VALUES(?,?)', (usage_key, db.encode({'calls': 3})))
+    values = {v['track_id']: v for v in client.get('/api/confirmed-fields/plan').json()['items']}
+    response = client.post('/api/metadata-preparation', json={'tokens': {
+        ident: values[ident]['preparation']['token'] for ident in (tid, other_id)}},
+        headers={**headers, 'Idempotency-Key': str(uuid.uuid4())})
+    assert response.status_code == 202, response.text
+    if stage == 'scan_second':
+        drain(cfg); prep.tick(cfg)
+    original = client.get('/api/metadata-preparation').json()
+    assert original['stage'] == stage
+    scan_one = Worker.scan_one
+    changed = []
+    def observe(self, relative, scan_id, expected=None):
+        result = scan_one(self, relative, scan_id, expected)
+        if scan_id == original['job_id'] and not changed:
+            with db.transaction(cfg.db_path) as conn:
+                conn.execute('INSERT INTO proposals VALUES(?,?,?,?,?)',
+                             (str(uuid.uuid4()), other_id, sha, db.encode({'tags': {'album': 'Owner choice'}}), db.utcnow()))
+            changed.append(True)
+        return result
+    monkeypatch.setattr(Worker, 'scan_one', observe)
+    drain(cfg); prep.tick(cfg)
+    monkeypatch.setattr(Worker, 'scan_one', scan_one)
+    stopped = client.get('/api/metadata-preparation').json()
+    assert stopped['state'] == 'stopped' and stopped['reason'] == 'preparation_stale'
+    with db.connect(cfg.db_path) as conn:
+        receipts = [(r['key'], r['value']) for r in conn.execute("SELECT key,value FROM settings WHERE key GLOB 'metadata_prepared:*'")]
+        assert len(receipts) == 2
+        run = db.setting(cfg.db_path, prep.KEY + ':' + stopped['id'])
+        search_id = str(uuid.uuid5(uuid.UUID(stopped['id']), 'search'))
+        assert not conn.execute('SELECT 1 FROM jobs WHERE id=?', (search_id,)).fetchone()
+    return stopped, receipts, run, usage_key
+
+
+def recovery_candidate(cfg, tid):
+    with db.connect(cfg.db_path) as conn:
+        row = conn.execute('SELECT * FROM tracks WHERE id=? AND is_current=1', (tid,)).fetchone()
+        active = {'auth_epoch': int(conn.execute("SELECT value FROM settings WHERE key='auth_epoch'").fetchone()[0])}
+        value = prep.fields.evaluate(cfg, conn, row, active)
+        return prep.candidate(cfg, conn, row, active, value)
+
+
+@pytest.mark.parametrize('stage,stable', [('scan_first', False), ('scan_first', True), ('scan_second', False)])
+def test_unsearched_stale_receipt_gets_one_fresh_ui_preparation_with_two_scans(library, monkeypatch, stage, stable):
+    cfg, client, headers, tid, sha, path = library
+    old, receipts, saved_run, usage_key = stopped_before_search(library, monkeypatch, stage=stage, stable=stable)
+    value = entry(client)['preparation']
+    assert value['scan'] is True and value['fingerprint_requests_remaining'] == 0
+    assert 'recovery_of' in value
+    fresh = start(client, headers).json()
+    assert fresh['id'] != old['id'] and fresh['stage'] == 'scan_first' and fresh['total'] == 1
+    drain(cfg); prep.tick(cfg)
+    second = client.get('/api/metadata-preparation').json()
+    assert second['stage'] == 'scan_second'
+    drain(cfg); prep.tick(cfg)
+    searched = client.get('/api/metadata-preparation').json()
+    assert searched['stage'] == 'search'
+    with db.connect(cfg.db_path) as conn:
+        assert conn.execute('SELECT kind FROM jobs WHERE id=?', (searched['job_id'],)).fetchone()[0] == 'recognize'
+        assert db.setting(cfg.db_path, prep.KEY + ':' + old['id']) == saved_run
+        assert all(conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()[0] == raw for key, raw in receipts)
+        item = prep.load(conn)['items'][0]
+        assert item['recovery_of'] == value['recovery_of']
+        assert json.loads(conn.execute('SELECT value FROM settings WHERE key=?', ('metadata_prepared:' + value['receipt'],)).fetchone()[0]) == {'run_id': fresh['id'], 'recovery_of': value['recovery_of']}
+        assert json.loads(db.setting(cfg.db_path, usage_key)) == {'calls': 3}
+        assert conn.execute("SELECT count(*) FROM settings WHERE key GLOB 'provider_attempt:*'").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM jobs WHERE kind IN ('apply','publish')").fetchone()[0] == 0
+    assert client.post('/api/metadata-preparation/cancel', json={'id': fresh['id']}, headers=headers).status_code == 200
+    assert entry(client)['preparation'] is None
+    assert media.sha256_file(path) == sha
+
+
+@pytest.mark.parametrize('change', ['cancelled', 'authorization_changed', 'root_identity_changed', 'media_timeout',
+    'missing_run', 'malformed_receipt', 'wrong_item', 'wrong_signature', 'recovery_origin', 'tokens',
+    'missing_scan', 'scan_cancelled', 'scan_error', 'epoch', 'root', 'stored_root', 'held', 'mix'])
+def test_unsearched_recovery_fails_closed_for_invalid_origin_or_current_guards(library, monkeypatch, change):
+    cfg, client, headers, tid, sha, path = library
+    old, receipts, saved_run, usage_key = stopped_before_search(library, monkeypatch)
+    with db.transaction(cfg.db_path) as conn:
+        run = prep.load(conn, old['id'])
+        item = next(i for i in run['items'] if i['track_id'] == tid)
+        signature = prep.fields.digest([prep.CONTRACT, tid, sha, run['kind'], item['guards'], prep.CACHE_FALLBACK_PROFILE])
+        if change in {'cancelled', 'authorization_changed', 'root_identity_changed', 'media_timeout'}: run['reason'] = change
+        if change == 'wrong_item': item['relative_path'] = 'different.flac'
+        if change == 'wrong_signature': item['guards'] = 'f' * 64
+        if change == 'recovery_origin': item['recovery_of'] = signature
+        if change == 'tokens': run['tokens'] = {}
+        prep.save(conn, run)
+        if change == 'missing_run': conn.execute('DELETE FROM settings WHERE key=?', (prep.KEY + ':' + old['id'],))
+        if change == 'malformed_receipt': conn.execute('UPDATE settings SET value=? WHERE key=?', ('not-json', 'metadata_prepared:' + signature))
+        if change == 'missing_scan': conn.execute('DELETE FROM job_items WHERE job_id=?', (old['job_id'],)); conn.execute('DELETE FROM jobs WHERE id=?', (old['job_id'],))
+        if change == 'scan_cancelled': conn.execute('UPDATE jobs SET cancel_requested=1 WHERE id=?', (old['job_id'],))
+        if change == 'scan_error': conn.execute('UPDATE jobs SET error=? WHERE id=?', ('internal_error', old['job_id']))
+        if change == 'epoch': conn.execute("UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='auth_epoch'")
+        if change == 'stored_root': conn.execute("UPDATE settings SET value=? WHERE key='work_root_identity'", (db.encode({'changed': True}),))
+        if change == 'held':
+            stamp = db.utcnow()
+            conn.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch) VALUES(?,'recognize','needs_review','held',?,1,?,?,1)",
+                         (str(uuid.uuid4()), db.encode({'items': [{'track_id': tid}]}), stamp, stamp))
+        if change == 'mix':
+            meta = json.loads(conn.execute('SELECT metadata FROM tracks WHERE id=?', (tid,)).fetchone()[0])
+            meta['possible_mix'] = True
+            conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), tid))
+    if change == 'root': monkeypatch.setattr('phonoteka.worker.root_identity', lambda _: {'changed': True})
+    assert recovery_candidate(cfg, tid) is None
+    assert media.sha256_file(path) == sha and json.loads(db.setting(cfg.db_path, usage_key)) == {'calls': 3}
+
+
+@pytest.mark.parametrize('state', ['queued', 'failed', 'cancelled', 'succeeded', 'completed_with_errors'])
+def test_any_created_search_job_prevents_unsearched_recovery(library, monkeypatch, state):
+    cfg, client, headers, tid, sha, path = library
+    old, *_ = stopped_before_search(library, monkeypatch)
+    search = str(uuid.uuid5(uuid.UUID(old['id']), 'search'))
+    with db.transaction(cfg.db_path) as conn:
+        stamp = db.utcnow()
+        conn.execute('INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch) VALUES(?,?,?,?,?,1,?,?,1)',
+                     (search, 'recognize', state, state, db.encode({'items': []}), stamp, stamp))
+    assert recovery_candidate(cfg, tid) is None
+
+
+@pytest.mark.parametrize('state', ['reserved', 'sent', 'unknown_outcome', 'failed', 'succeeded', 'malformed'])
+def test_any_origin_attempt_or_malformed_ledger_prevents_unsearched_recovery(library, monkeypatch, state):
+    cfg, client, headers, tid, sha, path = library
+    old, *_ = stopped_before_search(library, monkeypatch)
+    search = str(uuid.uuid5(uuid.UUID(old['id']), 'search'))
+    with db.transaction(cfg.db_path) as conn:
+        payload = 'bad-json' if state == 'malformed' else db.encode({'batch_id': search, 'state': state})
+        conn.execute('INSERT INTO settings VALUES(?,?)', (provider_attempts.PREFIX + str(uuid.uuid4()), payload))
+    assert recovery_candidate(cfg, tid) is None
+
+
+def test_orphan_search_result_prevents_unsearched_recovery(library, monkeypatch):
+    cfg, client, headers, tid, sha, path = library
+    old, *_ = stopped_before_search(library, monkeypatch)
+    search = str(uuid.uuid5(uuid.UUID(old['id']), 'search'))
+    with db.connect(cfg.db_path) as conn:
+        # Corrupt legacy/orphan evidence must not be mistaken for no search.
+        conn.execute('PRAGMA foreign_keys=OFF')
+        conn.execute('INSERT INTO job_items VALUES(?,?,?,?)', (search, tid, 'failed', db.encode({'code': 'unknown_outcome'})))
+    assert recovery_candidate(cfg, tid) is None
+
+
+def test_failed_recovery_is_not_a_recursive_origin_and_keeps_original_receipts(library, monkeypatch):
+    cfg, client, headers, tid, sha, path = library
+    old, receipts, saved_run, usage_key = stopped_before_search(library, monkeypatch)
+    value = entry(client)['preparation']; fresh = start(client, headers).json()
+    with db.transaction(cfg.db_path) as conn:
+        run = prep.load(conn)
+        run.update(state='stopped', reason='preparation_stale')
+        prep.save(conn, run)
+        conn.execute("UPDATE jobs SET state='failed',error='preparation_stale' WHERE id=?", (fresh['job_id'],))
+        row = conn.execute('SELECT * FROM tracks WHERE id=?', (tid,)).fetchone()
+        binding = conn.execute('SELECT value FROM settings WHERE key=?', ('metadata_prepared:' + value['receipt'],)).fetchone()[0]
+        assert prep.unsearched_recovery(cfg, conn, row, {'auth_epoch': run['epoch']}, value['receipt'], binding, run['kind'], prep.guards(conn, row)) is None
+    assert entry(client)['preparation'] is None
+    assert db.setting(cfg.db_path, prep.KEY + ':' + old['id']) == saved_run
+    assert json.loads(db.setting(cfg.db_path, usage_key)) == {'calls': 3}
+
+
+@pytest.mark.parametrize('trace', ['attempt', 'search_job'])
+def test_recovery_admission_rechecks_absence_of_search_after_the_ui_plan(library, monkeypatch, trace):
+    cfg, client, headers, tid, sha, path = library
+    old, receipts, saved_run, usage_key = stopped_before_search(library, monkeypatch)
+    token = entry(client)['preparation']['token']
+    search = str(uuid.uuid5(uuid.UUID(old['id']), 'search'))
+    with db.transaction(cfg.db_path) as conn:
+        if trace == 'attempt':
+            conn.execute('INSERT INTO settings VALUES(?,?)', (provider_attempts.PREFIX + str(uuid.uuid4()),
+                         db.encode({'batch_id': search, 'state': 'unknown_outcome'})))
+        else:
+            stamp = db.utcnow()
+            conn.execute("INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch) VALUES(?,'recognize','failed','failed',?,1,?,?,1)",
+                         (search, db.encode({'items': []}), stamp, stamp))
+    response = client.post('/api/metadata-preparation', json={'tokens': {tid: token}},
+                           headers={**headers, 'Idempotency-Key': str(uuid.uuid4())})
+    assert response.status_code == 409
+    with db.connect(cfg.db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM settings WHERE key GLOB 'metadata_prepared:*'").fetchone()[0] == len(receipts)
+    assert db.setting(cfg.db_path, prep.KEY + ':' + old['id']) == saved_run
+    assert json.loads(db.setting(cfg.db_path, usage_key)) == {'calls': 3}
