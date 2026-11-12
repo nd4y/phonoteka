@@ -220,3 +220,49 @@ def test_complete_observations_do_not_skip_grace_period(library):
     assert value['stage'] == 'search' and not value['job_id']
     with db.connect(cfg.db_path) as conn:
         assert conn.execute("SELECT count(*) FROM jobs WHERE kind='recognize'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('code', ['recognition_attempt_budget_exhausted', 'audit_failed'])
+def test_expected_budget_limit_is_pending_and_genuine_failure_still_stops(library, monkeypatch, code):
+    cfg, client, headers, tid, sha, path = library
+    setup(cfg, tid, unstable=False)
+    with db.transaction(cfg.db_path) as conn:
+        meta=json.loads(conn.execute('SELECT metadata FROM tracks WHERE id=?',(tid,)).fetchone()[0])
+        identity=meta['audit']['audio_identity']
+        conn.execute('INSERT INTO settings VALUES(?,?)', ('recognition_usage:'+identity, db.encode({'calls':3})))
+    value=entry(client)
+    assert value['preparation']['fingerprint_requests_remaining']==0
+    assert 'Новые запросы' in value['preparation']['reason']
+    async def search(self, job, item):
+        raise media.MediaError(code, 'synthetic deterministic source outcome')
+    monkeypatch.setattr(Worker,'analyze_item',search)
+    run=start(client,headers).json()
+    drain(cfg);prep.tick(cfg)
+    result=client.get('/api/metadata-preparation').json()
+    assert result['state']==('review' if code=='recognition_attempt_budget_exhausted' else 'stopped')
+    with db.connect(cfg.db_path) as conn:
+        usage=json.loads(conn.execute('SELECT value FROM settings WHERE key=?',('recognition_usage:'+identity,)).fetchone()[0])
+        assert usage['calls']==3
+        row=conn.execute('SELECT state,result FROM job_items WHERE job_id=?',(run['job_id'],)).fetchone()
+        if code=='recognition_attempt_budget_exhausted':
+            assert row['state']=='succeeded'
+            assert json.loads(row['result'])['state']=='needs_review'
+            assert result['progress']['skipped']==1 and result['progress']['failed']==0
+        else:assert row['state']=='failed'
+        assert conn.execute("SELECT count(*) FROM jobs WHERE kind IN ('apply','publish')").fetchone()[0]==0
+    assert media.sha256_file(path)==sha and entry(client)['preparation'] is None
+
+
+def test_changed_capacity_invalidates_frozen_ui_plan_without_spending(library):
+    cfg,client,headers,tid,sha,path=library
+    setup(cfg,tid,unstable=False)
+    value=entry(client)
+    assert value['preparation']['fingerprint_requests_remaining']==3
+    with db.transaction(cfg.db_path) as conn:
+        meta=json.loads(conn.execute('SELECT metadata FROM tracks WHERE id=?',(tid,)).fetchone()[0])
+        conn.execute('INSERT INTO settings VALUES(?,?)',('recognition_usage:'+meta['audit']['audio_identity'],db.encode({'calls':3})))
+    response=client.post('/api/metadata-preparation',json={'tokens':{tid:value['preparation']['token']}},headers={**headers,'Idempotency-Key':str(uuid.uuid4())})
+    assert response.status_code==409
+    with db.connect(cfg.db_path) as conn:
+        assert not prep.load(conn)
+        assert conn.execute("SELECT count(*) FROM settings WHERE key LIKE 'metadata_prepared:%'").fetchone()[0]==0

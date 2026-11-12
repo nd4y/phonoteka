@@ -3046,3 +3046,5 @@ UI-REVIEW-15 уточнение: причины пропусков видны т
 Acceptance: native scoped-scan, stale/auth/held/mount, cancellation/dedupe/restart tests, desktop/mobile
 browser journey, exact GitHub/st1 release and real collection iteration. Search completion is not acceptance.
 [RU](ru/confirmed-fields.md#подготовка-недостающих-данных) / [EN](en/confirmed-fields.md#preparing-missing-evidence).
+
+UI-REVIEW-16 уточнение: показывать остаток внутреннего бюджета распознавания и проверку кэша без новых отправок сверх лимита; сначала выполнять метаданные и доступное распознавание. Недостаток бюджета - ожидаемый результат на проверке с явной причиной, а не найденное совпадение; ошибки аудита не маскировать. Показывать путь в предварительной партии, сохранять финальную статистику ограничений и фактическое состояние при гонке отмены/завершения.

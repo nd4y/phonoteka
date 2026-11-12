@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import confirmed_fields as fields, db, field_policy, input_readiness, media, security, webhooks
+from . import confirmed_fields as fields, db, field_policy, input_readiness, media, provider_attempts, security, webhooks
 
 KEY = 'metadata_preparation'
 CONTRACT = 'metadata-preparation-v1'
@@ -58,10 +58,16 @@ def candidate(settings, conn, row, active, result):
     receipt = conn.execute('SELECT 1 FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone()
     if receipt:
         return None
+    identity = (metadata.get('audit') or {}).get('audio_identity')
+    usage = conn.execute('SELECT value FROM settings WHERE key=?', (provider_attempts.RECOGNITION_PREFIX + str(identity),)).fetchone()
+    calls = json.loads(usage[0]).get('calls', 0) if usage else 0
+    remaining = max(0, provider_attempts.RECOGNITION_CALL_LIMIT - calls) if identity else None
     stable = input_readiness.describe(metadata, grace_seconds=settings.input_grace_seconds)['state'] == 'ready'
-    return {'token': fields.digest([signature, result['token']]), 'receipt': signature,
+    return {'token': fields.digest([signature, result['token'], remaining]), 'receipt': signature,
+            'fingerprint_requests_remaining': remaining if kind == 'recognize' else None,
             'kind': kind, 'scan': not stable,
-            'reason': 'Проверим стабильность и найдём недостающие данные.' if not stable else
+            'reason': 'Проверим сохранённые отпечатки. Новые запросы распознавания недоступны.' if kind == 'recognize' and remaining == 0 else
+                      'Проверим стабильность и найдём недостающие данные.' if not stable else
                       'Повторим поиск по аудио.' if kind == 'recognize' else 'Уточним данные музыкальных источников.'}
 
 
@@ -78,9 +84,11 @@ class Stop(BaseModel):
 
 def public(run, conn):
     result = {k: run[k] for k in ('id', 'state', 'stage', 'job_id', 'total', 'completed_stages', 'reason', 'started_at', 'finished_at') if k in run}
-    job = conn.execute('SELECT state,total,completed,failed FROM jobs WHERE id=?', (run.get('job_id'),)).fetchone()
+    job_id = run.get('job_id') or run.get('last_job_id')
+    job = conn.execute('SELECT state,total,completed,failed FROM jobs WHERE id=?', (job_id,)).fetchone()
     if job:
         result['progress'] = dict(job)
+        result['progress']['skipped'] = conn.execute("SELECT count(*) FROM job_items WHERE job_id=? AND json_extract(result,'$.skipped')=1", (job_id,)).fetchone()[0]
     return result
 
 
@@ -135,6 +143,7 @@ def advance(conn, settings, run):
                 if not receipt or json.loads(receipt[0]).get('complete') is not True:
                     raise media.MediaError('preparation_scan_incomplete', 'Проверка стабильности не завершена')
             run['completed_stages'].append(run['stage'])
+            run['last_job_id'] = run['job_id']
             run['job_id'] = None
         for stage in STAGES:
             if stage in run['completed_stages']:
@@ -187,6 +196,19 @@ def authorize(settings, job):
     with db.connect(settings.db_path) as conn:
         run = load(conn, payload.get('metadata_preparation_id', ''))
         validate(conn, settings, run, job)
+
+
+async def search(worker, job, item):
+    try:
+        return await worker.analyze_item(job, item)
+    except media.MediaError as exc:
+        if exc.code != 'recognition_attempt_budget_exhausted':
+            raise
+        # Native recognition already enforced the unchanged durable budget and
+        # cache policy. An expected lack of capacity is a pending result, not a
+        # successful identification or an automatic retry instruction.
+        return {'state': 'needs_review', 'skipped': True, 'code': exc.code,
+                'message': 'Нового подтверждения нет: бюджет распознавания исчерпан. Доступные результаты сохранены; лимит не сбрасывался.'}
 
 
 async def scan(worker, job):

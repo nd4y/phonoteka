@@ -1066,6 +1066,7 @@ class Worker:
             return await self._process(job)
 
     async def _process(self, job):
+        from . import metadata_preparation
         self.state = job["kind"]
         if job["kind"] == "scan":
             return await self.scan(job)
@@ -1193,7 +1194,10 @@ class Worker:
                     result = await inference_client.process(self,job,item)
                 elif job['kind']=='youtube':result=await self.process_youtube(job,item)
                 else:
-                    result = await self.analyze_item(job, item) if job['kind'] in {'analyze','recognize'} else await self.io(self.process_item, job, item)
+                    if job['kind'] in {'analyze','recognize'} and payload.get('trigger') == metadata_preparation.CONTRACT:
+                        result = await metadata_preparation.search(self, job, item)
+                    else:
+                        result = await self.analyze_item(job, item) if job['kind'] in {'analyze','recognize'} else await self.io(self.process_item, job, item)
                 if result.get('retry_at'):
                     retry_at=max(retry_at,result['retry_at'])
                     await checkpoint(key,'deferred',result)
