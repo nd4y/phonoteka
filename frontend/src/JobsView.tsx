@@ -46,7 +46,10 @@ type Props = {
   onCancel: (id: string) => Promise<void>;
 };
 const dateOf = (value: string) =>
-  new Date(value).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
+  new Date(value).toLocaleString("ru-RU", {
+    dateStyle: "short",
+    timeStyle: "short",
+  });
 const timeOf = (value: string) =>
   new Date(value).toLocaleTimeString("ru-RU", {
     hour: "2-digit",
@@ -269,7 +272,10 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
       setControlError("");
       try {
         if (action === "cancel") await onCancel(job.id);
-        else await api(`/jobs/${encodeURIComponent(job.id)}/${action}`, { method: "POST" });
+        else
+          await api(`/jobs/${encodeURIComponent(job.id)}/${action}`, {
+            method: "POST",
+          });
         await refresh();
         if (selectedId === job.id) await refreshSelected.current?.();
       } catch (err) {
@@ -314,8 +320,8 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
         <div>
           <h2>Очередь обработки</h2>
           <p className="muted small">
-            {activeCount ? `Активных задач: ${count(activeCount)}. ` : ""}Прогресс обновляется
-            автоматически, события поступают в реальном времени.
+            {activeCount ? `Активных задач: ${count(activeCount)}. ` : ""}
+            Прогресс обновляется автоматически, события поступают в реальном времени.
           </p>
         </div>
         <button
@@ -488,7 +494,7 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
                           : "Файлов для обработки нет"}
                     </span>
                     <small>
-                      {count(job.completed)} успешно · {count(job.failed)} требуют внимания
+                      {count(job.completed)} выполнено · {count(job.failed)} ошибок или пропусков
                     </small>
                   </div>
                   {active && (

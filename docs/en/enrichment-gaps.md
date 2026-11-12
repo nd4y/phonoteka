@@ -36,6 +36,16 @@ When a source policy blocks saving manual changes, choose **Restore saved values
 
 ## Finding gaps in music
 
+Processing counters refer to completed attempts and errors or skipped attempts.
+A successfully computed ASR result may still require checking; task completion is
+separate from accepted tags, lyrics and publication. Open the per-file results to
+review that record.
+
+When a current ASR alignment is incomplete and no more specific source, stale-data
+or failure reason applies, the missing-lyrics row explains the incomplete timing
+and opens Lyrics. Zero coverage does not establish an instrumental recording.
+Stale, non-numeric and out-of-range coverage cannot supply this explanation.
+
 When uploading a cover, select the embedded slot and apply the artwork preview to the draft. A slot selection by itself does not create a change to write.
 
 Choose **Music gaps** in the collection or select a specific field in the **Gaps in individual music recordings** group. These filters skip possible mixes, CUE sheets and album images, and entries explicitly tagged as speech, audiobooks or podcasts. Entries with no genre remain visible for review. The filter sets the list and playback order. In **Collection actions**, retrying search or recognition covers all eligible records in the selected music category, including those outside the current text search. Review the results before writing them.

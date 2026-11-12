@@ -262,6 +262,56 @@ def test_partial_asr_evidence_is_not_reported_as_complete_lyrics(client, setting
     assert 'last_alignment_coverage' not in values['cover']
 
 
+@pytest.mark.parametrize('coverage', [0, 0.12, 0.25])
+def test_current_incomplete_alignment_explains_the_missing_timed_text(client, settings, coverage):
+    authenticated(client, settings)
+    identity, sha = seed(settings)
+    analysis(settings, identity, sha, {'alignment': {'coverage': coverage, 'complete': False},
+                                     'asr': {'text': 'private recognition payload'}})
+    values = gaps(client, identity)
+    timed = values['synced_lyrics']
+    assert (timed['code'], timed['action']) == ('alignment_incomplete', 'lyrics')
+    assert timed['last_alignment_coverage'] == coverage
+    assert 'не записывается автоматически' in timed['next_step']
+    assert values['cover']['code'] == 'cover_album_unconfirmed'
+    page = client.get('/api/tracks').json()['items'][0]
+    assert next(g for g in page['enrichment_gaps'] if g['field'] == 'synced_lyrics') == timed
+    assert 'private recognition payload' not in json.dumps(page)
+
+
+@pytest.mark.parametrize('coverage', [True, False, None, '0.25', -0.1, 1, 1.1])
+def test_invalid_or_full_coverage_does_not_claim_a_partial_alignment(client, settings, coverage):
+    authenticated(client, settings)
+    identity, sha = seed(settings)
+    analysis(settings, identity, sha, {'alignment': {'coverage': coverage}})
+    timed = gaps(client, identity)['synced_lyrics']
+    assert timed['code'] != 'alignment_incomplete'
+    if type(coverage) not in (int, float) or not 0 <= coverage <= 1:
+        assert 'last_alignment_coverage' not in timed
+
+
+@pytest.mark.parametrize('old_audio', [False, True])
+def test_stale_alignment_does_not_replace_the_current_missing_field_reason(client, settings, old_audio):
+    authenticated(client, settings)
+    identity, sha = seed(settings)
+    analysis(settings, identity, 'b' * 64 if old_audio else sha,
+             {'alignment': {'coverage': 0.25, 'stale': not old_audio}})
+    timed = gaps(client, identity)['synced_lyrics']
+    assert timed['code'] == ('search_stale' if old_audio else 'field_not_returned')
+    assert 'last_alignment_coverage' not in timed
+
+
+@pytest.mark.parametrize('state,code', [('rate_limited', 'provider_retry'),
+                                      ('provider_policy_denied', 'source_policy_restricted'),
+                                      ('unknown_outcome', 'provider_outcome_unknown')])
+def test_partial_alignment_keeps_source_restrictions_and_failures_visible(client, settings, state, code):
+    authenticated(client, settings)
+    identity, sha = seed(settings)
+    analysis(settings, identity, sha, {'alignment': {'coverage': 0.25},
+                                     'sources': [{'provider': 'lrclib', 'state': state}]})
+    assert gaps(client, identity)['synced_lyrics']['code'] == code
+
+
 def test_catalog_projection_does_not_load_cover_or_transcript_payloads(client, settings):
     authenticated(client, settings)
     identity, sha = seed(settings)

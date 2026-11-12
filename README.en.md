@@ -1,5 +1,9 @@
 # phonoteka
 
+Processing counters report completed attempts and errors, without claiming data approval.
+Current partial ASR results explain the missing complete lyrics and open lyric review.
+[Missing-field explanations](docs/en/enrichment-gaps.md).
+
 ASR cancellation removes scratch files after the owned process tree is reaped.
 Transient Windows log locks get bounded cleanup retries; permanent errors remain visible.
 
