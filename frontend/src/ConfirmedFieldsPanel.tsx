@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, messageFor, requestId } from "./api";
 import type { Job } from "./types";
+import { preparationBatch, type EvidencePreparation } from "./preparationBatch";
 import "./ConfirmedFieldsPanel.css";
 
 type Change = { field: string; before: string | boolean; after: string | boolean; source: string };
@@ -16,7 +17,7 @@ type Entry = {
   remaining: Pending[];
   blocked: string[];
   publication: { eligible: boolean; reason: string };
-  preparation?: { token: string; kind: "recognize" | "analyze"; reason: string } | null;
+  preparation?: EvidencePreparation | null;
 };
 type Preparation = {
   id?: string;
@@ -26,7 +27,7 @@ type Preparation = {
   total?: number;
   completed_stages?: string[];
   reason?: string | null;
-  progress?: { total: number; completed: number; failed: number; state: string };
+  progress?: { total: number; completed: number; failed: number; skipped?: number; state: string };
 };
 const stages: Record<string, string> = {
   scan_first: "Первая проверка файлов",
@@ -67,14 +68,16 @@ export function ConfirmedFieldsPanel({
   const [preparation, setPreparation] = useState<Preparation>({});
   const [preparing, setPreparing] = useState(false);
   const prepKey = useRef({ body: "", key: "" });
+  const prepVersion = useRef(0);
   useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
+      const version = prepVersion.current;
       try {
         const value = await api<Preparation>("/metadata-preparation");
         if (!disposed) {
-          setPreparation(value);
+          if (version === prepVersion.current) setPreparation(value);
           timer = setTimeout(() => void poll(), 5000);
         }
       } catch {
@@ -152,9 +155,7 @@ export function ConfirmedFieldsPanel({
 
   async function prepare() {
     if (lock.current || preparing || preparation.state === "active" || !complete) return;
-    const eligible = items.filter((i) => i.preparation);
-    const kind = eligible[0]?.preparation?.kind;
-    const chosen = eligible.filter((i) => i.preparation?.kind === kind).slice(0, 50);
+    const chosen = preparationBatch(items);
     if (!chosen.length) return;
     lock.current = true;
     setPreparing(true);
@@ -164,13 +165,13 @@ export function ConfirmedFieldsPanel({
     });
     if (prepKey.current.body !== body) prepKey.current = { body, key: requestId() };
     try {
-      setPreparation(
-        await api<Preparation>("/metadata-preparation", {
-          method: "POST",
-          body,
-          headers: { "Idempotency-Key": prepKey.current.key },
-        }),
-      );
+      const value = await api<Preparation>("/metadata-preparation", {
+        method: "POST",
+        body,
+        headers: { "Idempotency-Key": prepKey.current.key },
+      });
+      prepVersion.current++;
+      setPreparation(value);
       setComplete(false);
       setNotice(
         "Подготовка запущена. После завершения обновите план и заполните подтверждённые поля.",
@@ -186,14 +187,16 @@ export function ConfirmedFieldsPanel({
   async function stopPreparation() {
     setPreparing(true);
     try {
-      setPreparation(
-        await api<Preparation>("/metadata-preparation/cancel", {
-          method: "POST",
-          body: JSON.stringify({ id: preparation.id }),
-        }),
-      );
+      const value = await api<Preparation>("/metadata-preparation/cancel", {
+        method: "POST",
+        body: JSON.stringify({ id: preparation.id }),
+      });
+      prepVersion.current++;
+      setPreparation(value);
       setNotice(
-        "Подготовка остановлена. Уже полученные результаты сохранены; следующие этапы не запускаются.",
+        value.state === "review"
+          ? "Подготовка уже завершена. Обновите план заполнения."
+          : "Подготовка остановлена. Уже полученные результаты сохранены; следующие этапы не запускаются.",
       );
     } catch (err) {
       setError(messageFor(err));
@@ -250,6 +253,7 @@ export function ConfirmedFieldsPanel({
   }
 
   const ready = items.filter((i) => i.ready);
+  const nextBatch = preparationBatch(items);
   const pending = new Map<string, { field: string; message: string; count: number }>();
   for (const item of items)
     for (const reason of item.remaining) {
@@ -303,6 +307,12 @@ export function ConfirmedFieldsPanel({
               Ошибок: {preparation.progress.failed}. Подробные действия и ETA - в обработке.
             </p>
           )}
+          {!!preparation.progress?.skipped && (
+            <p>
+              Без нового подтверждения: {preparation.progress.skipped}. Причины ограничения
+              сохранены в результатах обработки.
+            </p>
+          )}
           {preparation.reason === "waiting_input_grace" && (
             <p>
               Ожидаем окончания периода стабильности файла. Подготовка продолжится автоматически.
@@ -345,9 +355,16 @@ export function ConfirmedFieldsPanel({
           <p role="status">
             Проверено записей: {progress.scanned}. Доступно для заполнения: {ready.length}.
           </p>
-          {!!items.some((i) => i.preparation) && (
+          {!!nextBatch.length && (
             <div className="confirmed-preparation">
               <h4>Подготовить недостающие данные</h4>
+              <p className="muted small">
+                {nextBatch[0].preparation?.kind === "analyze"
+                  ? "Сначала уточним источники по уже найденным отпечаткам."
+                  : nextBatch[0].preparation?.fingerprint_requests_remaining === 0
+                    ? "Новые запросы распознавания недоступны. Проверим пригодный к повторному использованию кэш; лимит не сбрасывается."
+                    : "Проверим аудио в пределах оставшегося бюджета распознавания."}
+              </p>
               <p>
                 Проверим выбранные файлы и повторим поиск там, где не хватает доказательств. Миксы,
                 разговорные записи, спорные совпадения и занятые файлы пропускаются. Автоматической
@@ -358,34 +375,20 @@ export function ConfirmedFieldsPanel({
                 disabled={busy || preparing || preparation.state === "active"}
                 onClick={() => void prepare()}
               >
-                Подготовить данные ·{" "}
-                {Math.min(
-                  50,
-                  items.filter(
-                    (i) =>
-                      i.preparation?.kind === items.find((v) => v.preparation)?.preparation?.kind &&
-                      i.preparation,
-                  ).length,
-                )}
+                Подготовить данные · {nextBatch.length}
               </button>
               <details>
                 <summary>Какие записи войдут в ближайшую партию</summary>
                 <ul>
-                  {items
-                    .filter(
-                      (i) =>
-                        i.preparation?.kind ===
-                          items.find((v) => v.preparation)?.preparation?.kind && i.preparation,
-                    )
-                    .slice(0, 50)
-                    .map((i) => (
-                      <li key={i.track_id}>
-                        <button className="button subtle" onClick={() => onOpen(i.track_id)}>
-                          {i.title || i.relative_path}
-                        </button>{" "}
-                        - {i.preparation!.reason}
-                      </li>
-                    ))}
+                  {nextBatch.map((i) => (
+                    <li key={i.track_id}>
+                      <button className="button subtle" onClick={() => onOpen(i.track_id)}>
+                        {i.title || i.relative_path}
+                      </button>{" "}
+                      {i.artist ? ` · ${i.artist}` : ""} · {i.relative_path} -{" "}
+                      {i.preparation!.reason}
+                    </li>
+                  ))}
                 </ul>
               </details>
             </div>

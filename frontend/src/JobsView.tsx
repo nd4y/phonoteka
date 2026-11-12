@@ -486,7 +486,14 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
                           : "Файлов для обработки нет"}
                     </span>
                     <small>
-                      {count(job.completed)} выполнено · {count(job.failed)} ошибок или пропусков
+                      {count(Math.max(0, job.completed - (job.skipped || 0)))} выполнено ·{" "}
+                      {job.skipped ? (
+                        <>
+                          {count(job.skipped)} без нового подтверждения · {count(job.failed)} ошибок
+                        </>
+                      ) : (
+                        <>{count(job.failed)} ошибок или пропусков</>
+                      )}
                     </small>
                   </div>
                   {active && (

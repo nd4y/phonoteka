@@ -144,6 +144,7 @@ export type Job = {
   total: number;
   completed: number;
   failed: number;
+  skipped?: number;
   cancel_requested: boolean;
   created_at: string;
   updated_at: string;
