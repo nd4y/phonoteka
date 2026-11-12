@@ -139,3 +139,5 @@ Sources groups candidates by song tags, releases, lyrics, and artwork. Compare c
 Other requests continue while a comparison or save waits for catalog access.
 If the catalog is temporarily busy after writing a Ready file, the worker retries saving the verified publication receipt.
 Clear the checkbox for any field you want to keep as it is.
+
+Confirmed-field batches show per-record gap reasons and the fields actually written in processing results.

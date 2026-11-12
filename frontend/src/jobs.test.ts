@@ -3,6 +3,7 @@ import {
   etaText,
   isActiveJob,
   jobTone,
+  jobResultLabel,
   mergeActivityEvents,
   needsJobAuthorization,
   readyPublicationStatus,
@@ -100,5 +101,37 @@ describe("job progress presentation", () => {
     expect(result[0].id).toBe(3);
     expect(result.at(-1)?.id).toBe(202);
     expect(result.filter((item) => item.id === 199)).toHaveLength(1);
+  });
+});
+
+describe("native write result presentation", () => {
+  const receipt = {
+    state: "committed",
+    item_state: "succeeded",
+    acceptance_mode: "confirmed_fields",
+    confirmed_fields: { fields: ["album", "cover"] },
+  };
+  it("names actual written fields without implying lyrics or publication", () => {
+    expect(jobResultLabel(receipt)).toBe("Записано в файл: альбом, обложка");
+    expect(jobResultLabel({ ...receipt, confirmed_fields: { fields: ["album"] } })).toBe(
+      "Записано в файл: альбом",
+    );
+  });
+  it.each(["interrupted", "failed", "cancelled", undefined])(
+    "does not turn a durable native receipt into outer success: %s",
+    (item_state) => {
+      expect(jobResultLabel({ ...receipt, item_state })).not.toMatch(/Записано|записаны|committed/);
+    },
+  );
+  it("handles old receipts and unexpected fields without inventing acceptance", () => {
+    expect(jobResultLabel({ ...receipt, acceptance_mode: "manual" })).toBe(
+      "Изменения записаны в файл",
+    );
+    expect(
+      jobResultLabel({
+        ...receipt,
+        confirmed_fields: { fields: ["album", "album", "synced_lyrics", 7] },
+      }),
+    ).toBe("Записано в файл: альбом");
   });
 });

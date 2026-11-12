@@ -142,7 +142,7 @@ export function ConfirmedFieldsPanel({
         if (version !== serial.current) return;
         queued += batch.length;
         setNotice(
-          `В очередь записи передано: ${queued} файлов. Результаты записи и Ready будут в обработке.`,
+          `Передано в очередь записи: ${queued}. Результаты записи и Ready будут в обработке.`,
         );
       }
       setSubmitted(true);
@@ -213,7 +213,7 @@ export function ConfirmedFieldsPanel({
       {complete && (
         <>
           <p role="status">
-            Проверено файлов: {progress.scanned}. Можно заполнить: {ready.length} файлов.
+            Проверено записей: {progress.scanned}. Доступно для заполнения: {ready.length}.
           </p>
           {!!ready.length && (
             <>
@@ -261,6 +261,22 @@ export function ConfirmedFieldsPanel({
                         </div>
                       ))}
                     </dl>
+                    {!!item.remaining.length && (
+                      <details>
+                        <summary>Осталось проверить: {item.remaining.length}</summary>
+                        <ul>
+                          {item.remaining.map((reason) => (
+                            <li key={`${reason.field}:${reason.code}`}>
+                              <strong>{names[reason.field] || reason.field}</strong> -{" "}
+                              {reason.message}
+                            </li>
+                          ))}
+                        </ul>
+                        <button className="button subtle" onClick={() => onOpen(item.track_id)}>
+                          Открыть запись
+                        </button>
+                      </details>
+                    )}
                     {!item.publication.eligible && (
                       <p className="muted small">{item.publication.reason}</p>
                     )}

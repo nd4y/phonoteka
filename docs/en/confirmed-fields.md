@@ -37,3 +37,7 @@ more than once. No eligible fields does not establish that further search is imp
 
 Server acceptance is covered by `tests/test_confirmed_fields.py`. Build, CI, installed UI and actual
 collection delivery have separate acceptance evidence; this document is not a passing result.
+
+Each eligible record has a **Still needs review** section explaining its remaining gaps.
+Processing lists the fields actually written by a successful item. An interrupted outer attempt
+is not presented as successful even when a durable native commit receipt exists.
