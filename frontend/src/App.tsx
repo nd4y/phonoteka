@@ -62,6 +62,7 @@ import { CueView } from "./CueView";
 import { AudioPlayer } from "./AudioPlayer";
 import { PublishedTrackSearch, TrackFilters } from "./TrackFilters";
 import AudioAuditSummary from "./AudioAuditSummary";
+import { formatScannedFileSize } from "./scannedFileSize";
 import PwaStatus from "./PwaStatus";
 import { createPwaReloadGuard } from "./pwaReloadGuard";
 import { acceptDetailNavigation, loadLatestResult, loadOrderedResult } from "./detailNavigation";
@@ -2871,8 +2872,19 @@ function TrackEditor({
                         block: "center",
                         behavior: "auto",
                       });
-                    } else if (nextAction === "file") setSourcesOpen(true);
-                    else if (nextAction === "write") void onApplyNext();
+                    } else if (nextAction === "file") {
+                      const details = document.getElementById(`track-file-details-${track.id}`);
+                      if (details instanceof HTMLDetailsElement) {
+                        details.open = true;
+                        details.querySelector("summary")?.focus({ preventScroll: true });
+                        details.scrollIntoView({
+                          block: "start",
+                          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+                            ? "auto"
+                            : "smooth",
+                        });
+                      }
+                    } else if (nextAction === "write") void onApplyNext();
                     else if (nextAction === "recover") void onJob("normalize_audio");
                     else if (nextAction === "lyrics") {
                       onTab("lyrics", true);
@@ -3354,7 +3366,7 @@ function TrackEditor({
             {lyricsInvalid && <ErrorBox message={lyricsInvalid} />}
           </div>
         </div>
-        <details className="panel detail-tools">
+        <details id={`track-file-details-${track.id}`} className="panel detail-tools">
           <summary>Файл, сохранение результата и история</summary>
           <dl className="file-facts">
             <div>
@@ -3364,6 +3376,10 @@ function TrackEditor({
             <div>
               <dt>Ревизия</dt>
               <dd className="mono break-word">{track.sha256}</dd>
+            </div>
+            <div>
+              <dt>Размер при сканировании</dt>
+              <dd>{formatScannedFileSize(track.size)}</dd>
             </div>
             <div>
               <dt>Полная проверка файла</dt>

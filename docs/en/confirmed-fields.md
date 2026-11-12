@@ -78,3 +78,9 @@ When Shazam reports an exhausted allowance, preparation may check only the valid
 Previously exhausted inputs receive a capability-specific receipt version for this newly available cache check. It permits one UI preparation while retaining old receipts and send counters; cancellation or failure does not automatically replay that check. Metadata searches and inputs with remaining send capacity are not replayed by this change.
 
 A temporary plan-read timeout retries the same page once while retaining earlier pages. Cancellation or a superseding scan prevents retry admission. Authorization and changed-Work errors are not retried; each read retains its 25-second deadline. This rule never retries task submission or file writes.
+
+## Unusable input files
+
+Check file opens and focuses the file details while preserving the current tab. This is a view action, not an audit or recovery job. Saved scan size is historical metadata; absent or invalid values are not displayed as zero.
+
+A WebM input with `invalid_audio` and a saved size of 0-1 bytes explains that an original file or a new download is needed. Editing tags cannot restore missing audio. Other sizes, formats and states do not receive this explanation. A current scanner error still takes precedence over a historical audit; older stages, timestamps and successful verdicts are not revived.
