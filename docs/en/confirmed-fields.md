@@ -90,3 +90,14 @@ The Sources tab stores a separate boolean in the current window session. Reload 
 ### Stopping when data changes
 
 When recording data or settings change, or a file is busy, both processing and preparation explain the stop and ask you to refresh the fill plan. Completed results remain available; the plan recalculates actions from current evidence.
+
+When a saved preparation stopped with changed data during its first or second file check, and search
+was never created, the original attempt must not permanently hide unsearched files. A refreshed plan
+may offer one fresh, explicitly selected pass after validating the original receipt, frozen record,
+authorization and Work identity. It performs two new stability checks and keeps the original history.
+The new attempt has its own durable receipt; failure does not create an automatic retry loop.
+
+Cancellation, other stop reasons, missing or inconsistent history, any created search and any reserved,
+sent or uncertain search request prevent this recovery. Current exclusions and guards still apply.
+Provider counters, cache expiry, lyric acceptance and tracing remain unchanged. A completed check or
+search attempt does not mean that tags, artwork or timed lyrics have been filled.

@@ -1,5 +1,10 @@
 # phonoteka
 
+If changed data stops preparation before search, refresh the plan. After checking the saved history,
+the application can offer one fresh pass with new file-stability checks. Cancelled preparations,
+started searches and uncertain request outcomes are not replayed.
+[Recovery conditions](docs/en/confirmed-fields.md).
+
 If the Work filesystem device changes, the review UI offers an explicit whole-catalogue
 SHA-256 reconciliation. Only a complete match can rebind the known directory; audio,
 tags and review decisions remain unchanged. See [confirmed fields](docs/en/confirmed-fields.md).
