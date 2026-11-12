@@ -16,6 +16,22 @@ type Entry = {
   remaining: Pending[];
   blocked: string[];
   publication: { eligible: boolean; reason: string };
+  preparation?: { token: string; kind: "recognize" | "analyze"; reason: string } | null;
+};
+type Preparation = {
+  id?: string;
+  state?: "active" | "stopped" | "review";
+  stage?: string;
+  job_id?: string;
+  total?: number;
+  completed_stages?: string[];
+  reason?: string | null;
+  progress?: { total: number; completed: number; failed: number; state: string };
+};
+const stages: Record<string, string> = {
+  scan_first: "Первая проверка файлов",
+  scan_second: "Повторная проверка стабильности",
+  search: "Поиск недостающих данных",
 };
 type Page = { items: Entry[]; next_after: string | null; scanned: number; total: number };
 const names: Record<string, string> = {
@@ -48,6 +64,29 @@ export function ConfirmedFieldsPanel({
     [visible, setVisible] = useState(30);
   const [error, setError] = useState(""),
     [notice, setNotice] = useState("");
+  const [preparation, setPreparation] = useState<Preparation>({});
+  const [preparing, setPreparing] = useState(false);
+  const prepKey = useRef({ body: "", key: "" });
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      try {
+        const value = await api<Preparation>("/metadata-preparation");
+        if (!disposed) {
+          setPreparation(value);
+          timer = setTimeout(() => void poll(), 5000);
+        }
+      } catch {
+        if (!disposed) timer = setTimeout(() => void poll(), 10000);
+      }
+    }
+    void poll();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, []);
   const serial = useRef(0),
     cancelled = useRef(false),
     lock = useRef(false);
@@ -108,6 +147,58 @@ export function ConfirmedFieldsPanel({
         lock.current = false;
         setScanning(false);
       }
+    }
+  }
+
+  async function prepare() {
+    if (lock.current || preparing || preparation.state === "active" || !complete) return;
+    const eligible = items.filter((i) => i.preparation);
+    const kind = eligible[0]?.preparation?.kind;
+    const chosen = eligible.filter((i) => i.preparation?.kind === kind).slice(0, 50);
+    if (!chosen.length) return;
+    lock.current = true;
+    setPreparing(true);
+    setError("");
+    const body = JSON.stringify({
+      tokens: Object.fromEntries(chosen.map((i) => [i.track_id, i.preparation!.token])),
+    });
+    if (prepKey.current.body !== body) prepKey.current = { body, key: requestId() };
+    try {
+      setPreparation(
+        await api<Preparation>("/metadata-preparation", {
+          method: "POST",
+          body,
+          headers: { "Idempotency-Key": prepKey.current.key },
+        }),
+      );
+      setComplete(false);
+      setNotice(
+        "Подготовка запущена. После завершения обновите план и заполните подтверждённые поля.",
+      );
+    } catch (err) {
+      setError(messageFor(err));
+    } finally {
+      lock.current = false;
+      setPreparing(false);
+    }
+  }
+
+  async function stopPreparation() {
+    setPreparing(true);
+    try {
+      setPreparation(
+        await api<Preparation>("/metadata-preparation/cancel", {
+          method: "POST",
+          body: JSON.stringify({ id: preparation.id }),
+        }),
+      );
+      setNotice(
+        "Подготовка остановлена. Уже полученные результаты сохранены; следующие этапы не запускаются.",
+      );
+    } catch (err) {
+      setError(messageFor(err));
+    } finally {
+      setPreparing(false);
     }
   }
 
@@ -192,6 +283,45 @@ export function ConfirmedFieldsPanel({
           {scanning ? "Проверяем коллекцию…" : "Проверить коллекцию"}
         </button>
       </div>
+      {preparation.id && (
+        <div className="confirmed-preparation" role="status">
+          <strong>
+            {preparation.state === "active"
+              ? stages[preparation.stage || ""] || "Подготовка данных"
+              : preparation.state === "review"
+                ? complete
+                  ? "Подготовка завершена. Результаты учтены в плане."
+                  : "Данные подготовлены. Обновите план заполнения."
+                : "Подготовка остановлена. Проверьте причину в обработке."}
+          </strong>
+          <p className="muted small">
+            Записей: {preparation.total}. Аудиофайлы и сохранённые предложения не изменяются.
+          </p>
+          {preparation.state === "active" && preparation.progress && (
+            <p>
+              Текущий этап: {preparation.progress.completed} из {preparation.progress.total}.
+              Ошибок: {preparation.progress.failed}. Подробные действия и ETA - в обработке.
+            </p>
+          )}
+          {preparation.reason === "waiting_input_grace" && (
+            <p>
+              Ожидаем окончания периода стабильности файла. Подготовка продолжится автоматически.
+            </p>
+          )}
+          {preparation.state === "active" && (
+            <button
+              className="button subtle"
+              disabled={preparing}
+              onClick={() => void stopPreparation()}
+            >
+              Остановить подготовку
+            </button>
+          )}
+          <button className="button subtle" onClick={onJobs}>
+            Открыть ход подготовки
+          </button>
+        </div>
+      )}
       {scanning && (
         <div role="status">
           Проверено файлов: {progress.scanned} из {progress.total || "…"}
@@ -215,6 +345,51 @@ export function ConfirmedFieldsPanel({
           <p role="status">
             Проверено записей: {progress.scanned}. Доступно для заполнения: {ready.length}.
           </p>
+          {!!items.some((i) => i.preparation) && (
+            <div className="confirmed-preparation">
+              <h4>Подготовить недостающие данные</h4>
+              <p>
+                Проверим выбранные файлы и повторим поиск там, где не хватает доказательств. Миксы,
+                разговорные записи, спорные совпадения и занятые файлы пропускаются. Автоматической
+                записи нет.
+              </p>
+              <button
+                className="button secondary"
+                disabled={busy || preparing || preparation.state === "active"}
+                onClick={() => void prepare()}
+              >
+                Подготовить данные ·{" "}
+                {Math.min(
+                  50,
+                  items.filter(
+                    (i) =>
+                      i.preparation?.kind === items.find((v) => v.preparation)?.preparation?.kind &&
+                      i.preparation,
+                  ).length,
+                )}
+              </button>
+              <details>
+                <summary>Какие записи войдут в ближайшую партию</summary>
+                <ul>
+                  {items
+                    .filter(
+                      (i) =>
+                        i.preparation?.kind ===
+                          items.find((v) => v.preparation)?.preparation?.kind && i.preparation,
+                    )
+                    .slice(0, 50)
+                    .map((i) => (
+                      <li key={i.track_id}>
+                        <button className="button subtle" onClick={() => onOpen(i.track_id)}>
+                          {i.title || i.relative_path}
+                        </button>{" "}
+                        - {i.preparation!.reason}
+                      </li>
+                    ))}
+                </ul>
+              </details>
+            </div>
+          )}
           {!!ready.length && (
             <>
               <label className="confirmed-choice">

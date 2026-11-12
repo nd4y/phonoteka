@@ -41,3 +41,26 @@ collection delivery have separate acceptance evidence; this document is not a pa
 Each eligible record has a **Still needs review** section explaining its remaining gaps.
 Processing lists the fields actually written by a successful item. An interrupted outer attempt
 is not presented as successful even when a durable native commit receipt exists.
+
+## Preparing missing evidence
+
+When saved evidence is insufficient, Check collection offers Prepare data. Expand the upcoming
+batch to inspect up to 50 records sharing one search type. Preparation performs two real observations
+of only the selected existing files when stability is unconfirmed. It never marks unrelated records
+missing or relinks CUE sheets, and it does not shorten the stability grace period. Native audio
+recognition or metadata search then refreshes source results. Old fingerprints are not rebound to a new SHA.
+
+Processing provides cancellation, current actions and ETA. The preparation summary survives page reload.
+After completion, check the collection again and fill only the newly confirmed fields. Preparation
+accepts nothing and changes no audio files, saved proposals or listening decisions. It starts neither
+ASR nor automatic lyric acceptance.
+
+IDs, paths, SHA, permissions, Work mount, field locks and saved choices are rechecked. Changed dependencies,
+other unfinished work, cancellation, incomplete observations or interruption stop continuation.
+Replaying an accepted request returns its original run. A durable attempt receipt for the same revision
+and search type prevents automatic repeated spending after restart, failure, cancellation or no match.
+An explicit per-record retry remains available. Existing provider permissions, pacing and budgets remain
+in effect; IP rotation is not used to evade provider restrictions.
+
+Server checks: `tests/test_metadata_preparation.py`. A completed search does not promise a writable result:
+recording conflicts, ambiguous albums and unconfirmed artwork remain visible gap reasons.

@@ -141,3 +141,5 @@ If the catalog is temporarily busy after writing a Ready file, the worker retrie
 Clear the checkbox for any field you want to keep as it is.
 
 Confirmed-field batches show per-record gap reasons and the fields actually written in processing results.
+
+Confirmed-field filling can prepare missing evidence in a bounded batch of stability checks and source searches without writing audio files. Refresh the plan afterwards; disputed candidates remain pending. [Workflow and limits](docs/en/confirmed-fields.md#preparing-missing-evidence).

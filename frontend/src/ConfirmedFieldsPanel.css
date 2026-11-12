@@ -73,6 +73,18 @@
 .confirmed-fields li {
   margin-block: 0.6rem;
 }
+.confirmed-preparation {
+  background: var(--surface-container, #2e2b25);
+  border-radius: 1rem;
+  padding: 1rem;
+  margin-block: 1rem;
+  overflow-wrap: anywhere;
+}
+.confirmed-preparation button {
+  min-height: 44px;
+  max-width: 100%;
+  white-space: normal;
+}
 @media (max-width: 640px) {
   .confirmed-fields .panel-heading {
     display: grid;

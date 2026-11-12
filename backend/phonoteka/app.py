@@ -250,6 +250,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     automation.install(app,settings)
     scheduling.install(app,settings)
     preparation.install(app,settings)
+    from . import metadata_preparation
+    metadata_preparation.install(app,settings)
     exports.install(app,settings)
     comparison.install(app,settings)
     provider_policy.install(app,settings)

@@ -214,6 +214,8 @@ class Worker:
         return self.stopping or self.control_cancelled(self.job_control(job_id))
 
     def authorize_grant(self, job):
+        from . import metadata_preparation
+        metadata_preparation.authorize(self.settings, job)
         parent = json.loads(job['payload']).get('confirmed_fields_parent')
         if parent:
             previous = db.fetchone(self.settings.db_path, 'SELECT cancel_requested,state FROM jobs WHERE id=?', (parent,))
@@ -335,7 +337,7 @@ class Worker:
                 group.create_task(consumer())
             group.create_task(producer())
 
-    def scan_one(self, relative, scan_id):
+    def scan_one(self, relative, scan_id, expected=None):
         path = self.settings.work_root / relative
         before = path.stat()
         try:
@@ -356,6 +358,9 @@ class Worker:
         meta['hash_verified_at'] = db.utcnow()
         with db.transaction(self.settings.db_path) as conn:
             current = conn.execute("SELECT * FROM tracks WHERE relative_path=? AND is_current=1", (relative,)).fetchone()
+            if expected and (not current or current['id'] != expected['track_id']
+                             or current['sha256'] != expected['sha256'] or meta['sha256'] != expected['sha256']):
+                raise media.MediaError('preparation_stale', 'Файл изменился при подготовке. Обновите план.')
             now = db.utcnow()
             if current:
                 identity = current["id"]
@@ -447,6 +452,9 @@ class Worker:
                 conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), row['id']))
 
     async def scan(self, job):
+        from . import metadata_preparation
+        if json.loads(job['payload']).get('trigger') == metadata_preparation.CONTRACT:
+            return await metadata_preparation.scan(self, job)
         identity = await self.io(root_identity, self.settings.work_root)
         previous = db.setting(self.settings.db_path, "work_root_identity")
         if previous and json.loads(previous) != identity:
@@ -1052,6 +1060,8 @@ class Worker:
 
     async def process(self, job):
         from .providers import authorization
+        from . import metadata_preparation
+        metadata_preparation.authorize(self.settings, job)
         with authorization(lambda:self.authorize_grant(job)):
             return await self._process(job)
 
