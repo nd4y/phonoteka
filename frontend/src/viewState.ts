@@ -44,6 +44,7 @@ const filters = [
   ...Object.keys(musicGapFilters),
 ];
 export const viewKey = "phonoteka-view-v1";
+export const sourcesOpenKey = "phonoteka-editor-sources-v1";
 export const emptyView: ViewState = {
   page: "reports",
   query: "",
@@ -89,10 +90,27 @@ export function saveView(view: ViewState) {
     /* A disabled browser store must not prevent navigation. */
   }
 }
-export function clearView() {
+export function readSourcesOpen(): boolean {
   try {
-    sessionStorage.removeItem(viewKey);
+    return sessionStorage.getItem(sourcesOpenKey) === "true";
   } catch {
-    /* Logging out also works without browser storage. */
+    return false;
+  }
+}
+export function saveSourcesOpen(open: boolean) {
+  if (typeof open !== "boolean") return;
+  try {
+    sessionStorage.setItem(sourcesOpenKey, JSON.stringify(open));
+  } catch {
+    /* A disabled browser store must not prevent changing the editor tab. */
+  }
+}
+export function clearView() {
+  for (const key of [viewKey, sourcesOpenKey]) {
+    try {
+      sessionStorage.removeItem(key);
+    } catch {
+      /* Logging out also works without browser storage. */
+    }
   }
 }

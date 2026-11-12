@@ -155,3 +155,7 @@ The preparation card shows its current state. Pausing log scrolling leaves the j
 If a fallback uses the final fingerprint allowance, preparation retains the evidence for review without waiting for another recognition request beyond that allowance.
 
 When Shazam's allowance is exhausted, preparation also checks valid AcoustID cache entries without sending on a miss. This new check has a separate durable receipt; old receipts and limits remain intact. A temporary plan-read timeout retries only the current page once.
+
+Check file opens the file details while preserving the current tab. Saved scan size and an explanation for failed 0-1-byte WebM inputs distinguish a missing usable source from a tagging task.
+
+The Sources tab is restored after a reload in the current window. Back closes it first, and logout clears the saved view preferences.
