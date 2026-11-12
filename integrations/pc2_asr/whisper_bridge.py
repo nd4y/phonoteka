@@ -20,6 +20,16 @@ RUSSIAN_REVISION='gigaam-0.2.0-v3_e2e_rnnt'
 RUSSIAN_SHA256='f60c62fe45902d967000770a12f260de7c5ac4d4b8e5e852f1df8c548e3958b5'
 RUSSIAN_VOCABULARY_SHA256='828c12c991019eef952a960661f25a92d6ad279591e2ea466b4aeddf1d20a18a'
 
+async def cleanup_temporary(temporary):
+    """Windows may briefly retain inherited log handles after worker-tree reap."""
+    delays=(0,.1,.3,1,2,4)
+    for attempt,delay in enumerate(delays):
+        if delay:await asyncio.sleep(delay)
+        try:await asyncio.to_thread(temporary.cleanup)
+        except PermissionError:
+            if attempt==len(delays)-1:raise
+        else:return
+
 def install(app,engine,registry=REGISTRY):
     root=pathlib.Path(__file__).resolve().parent
     keyfile=root/'whisper-private/api_key'
@@ -167,11 +177,11 @@ def install(app,engine,registry=REGISTRY):
                     if disconnect_task is not None:
                         disconnect_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):await disconnect_task
-                    active.set(0)
-                    if locked:engine._lock.release()
                     try:
-                        if temporary is not None:temporary.cleanup()
+                        if temporary is not None:await cleanup_temporary(temporary)
                     finally:
+                        active.set(0)
+                        if locked:engine._lock.release()
                         pending-=1;inflight.dec();requests.labels(operation,outcome).inc();timings.labels(operation).observe(time.monotonic()-start)
             # Middleware can cancel repeatedly on disconnect. Reap the worker and
             # release the shared lock before propagating cancellation to callers.

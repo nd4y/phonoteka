@@ -1,5 +1,8 @@
 # phonoteka
 
+ASR cancellation removes scratch files after the owned process tree is reaped.
+Transient Windows log locks get bounded cleanup retries; permanent errors remain visible.
+
 An optional pinned PC2 GigaAM profile recognizes Russian words and their real times;
 Whisper retains the final alignment gates. Unknown confidence and drafts remain
 explicit. [Russian ASR contract and acceptance](docs/en/pc2-russian-asr.md).
