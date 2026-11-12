@@ -20,11 +20,14 @@ R2 = '33333333-3333-4333-8333-333333333333'
 
 
 @pytest.fixture
-def library(settings):
+def library(settings, request):
     cfg = replace(settings, read_only=False, storage_verified=True, input_grace_seconds=0)
     path = synthetic(cfg)
     from mutagen.flac import FLAC
     audio = FLAC(path); audio['PRIVATE_TEST_VALUE'] = ['keep this']; audio.save()
+    if getattr(request, 'param', False):
+        audio['LYRICS'] = ['[00:00.100]Known first line\n[00:01.000]Known second line']
+        audio.save()
     with TestClient(create_app(cfg), base_url=cfg.app_url) as client:
         headers = authenticated(client, cfg)
         for _ in range(2):
@@ -385,3 +388,82 @@ def test_incomplete_or_conflicting_proof_stays_pending(library, change):
     update_analysis(cfg, tid, change)
     assert not plan(client)['ready']
     assert media.sha256_file(path) == sha
+
+
+@pytest.mark.parametrize('mutation', [None, 'offset', 'profile', 'provider', 'sample', 'identity', 'expired'])
+def test_shazam_consensus_requires_real_separated_bound_samples_and_current_usage(library, mutation):
+    # Pure proof-policy cases, not a claim that the two-second native fixture
+    # contains these longer synthetic recognition samples.
+    from phonoteka import recognition
+    cfg, client, headers, tid, sha, path = library
+    with db.transaction(cfg.db_path) as conn:
+        grant(conn, 'shazam', 'metadata')
+        row = conn.execute('SELECT metadata FROM tracks WHERE id=?', (tid,)).fetchone()
+        metadata = json.loads(row['metadata']); metadata['duration'] = 60
+        data = json.loads(conn.execute('SELECT payload FROM analyses WHERE track_id=?', (tid,)).fetchone()['payload'])
+        data['candidates'] = [c for c in data['candidates'] if c['provider'] != 'acoustid']
+        data['candidates'][0]['duration'] = 60
+        fingerprint = {'id': 'shazam:synthetic', 'provider': 'shazam', 'kind': 'metadata',
+            'provider_recording_id': 'synthetic', 'tags': {'title': 'Original', 'artist': 'Artist'},
+            'identification': 'audio_fingerprint', 'match': {'state': 'fingerprint_match'},
+            'extractor_profile': recognition.POLICY, 'sample_sha256': 'b'*64, 'sample_offset': 15}
+        data['candidates'].append(fingerprint)
+        data = provider_policy.prepare_analysis(conn, data)
+        fingerprint = data['candidates'][-1]
+        data['recording_confirmation'] = 'agreement'
+        data['recognition_segments'] = [{'state': 'match', 'provider': 'shazam', 'provider_recording_id': 'synthetic',
+            'extractor_profile': recognition.POLICY, 'offset': offset, 'sample_sha256': sample*64}
+            for offset, sample in [(0, 'a'), (15, 'b')]]
+        if mutation == 'offset': data['recognition_segments'][0]['offset'] = -1
+        elif mutation == 'profile': data['recognition_segments'][0]['extractor_profile'] = 'unknown'
+        elif mutation == 'provider': data['recognition_segments'][0]['provider'] = 'different'
+        elif mutation == 'sample': fingerprint['sample_sha256'] = 'c'*64
+        elif mutation == 'identity': data['recognition_segments'][0]['provider_recording_id'] = 'other'
+        elif mutation == 'expired': fingerprint['usage']['acquired_at'] = 0
+        matches, fingerprints, reason = confirmed_fields.recording(conn, data, metadata)
+        assert bool(matches) is (mutation is None)
+        assert bool(reason) is (mutation is not None)
+
+
+def test_explicit_selected_release_can_fill_its_album_without_choosing_another_edition(library):
+    cfg, client, headers, tid, sha, path = library
+    update_analysis(cfg, tid, lambda a: a['candidates'][1]['releases'][1].update(title='Another album'))
+    with db.transaction(cfg.db_path) as conn:
+        meta = json.loads(conn.execute('SELECT metadata FROM tracks WHERE id=?', (tid,)).fetchone()['metadata'])
+        meta['tags']['musicbrainz_albumid'] = [R1]
+        conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), tid))
+    entry = plan(client)
+    assert entry['ready'] and next(c['after'] for c in entry['changes'] if c['field'] == 'album') == 'Confirmed album'
+
+
+def test_pending_album_change_blocks_art_for_existing_album(library):
+    cfg, client, headers, tid, sha, path = library
+    with db.transaction(cfg.db_path) as conn:
+        meta = json.loads(conn.execute('SELECT metadata FROM tracks WHERE id=?', (tid,)).fetchone()['metadata'])
+        meta['tags']['album'] = ['Confirmed album']
+        conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), tid))
+    response = client.post(f'/api/tracks/{tid}/proposal', json={'tags': {'album': 'Different pending album'}}, headers={**headers, 'If-Match': sha})
+    assert response.status_code == 201
+    entry = plan(client)
+    assert not entry['ready'] and any(x['field'] == 'cover' and x['code'] == 'pending_choice' for x in entry['remaining'])
+
+
+@pytest.mark.parametrize('library', [True], indirect=True)
+def test_prior_actual_lyric_decisions_survive_identical_audio_and_text(library):
+    cfg, client, headers, tid, sha, path = library
+    before = client.get(f'/api/tracks/{tid}').json()
+    assert before['lrc']
+    accepted = accept_publication_review(client, headers, tid, profile='lyrics_required')
+    assert accepted['human_timing_verified'] and accepted['listened_sections']
+    response = enqueue(client, headers, plan(client), publish=True)
+    assert response.status_code == 202, response.text
+    drain(cfg)
+    current = client.get(f'/api/tracks/{tid}').json()
+    review = client.get(f'/api/tracks/{tid}/lyrics-review').json()
+    assert current['sha256'] != sha and current['lrc'] == before['lrc']
+    assert review['accepted_current_revision'] and review['human_timing_verified']
+    assert review['decisions'] == accepted['decisions']
+    assert review['listened_sections'] == accepted['listened_sections']
+    assert review['words_revision'] == accepted['words_revision']
+    assert review['timings_revision'] == accepted['timings_revision']
+    assert media.sha256_file(cfg.publication_root/'Ready'/path.name) == current['sha256']

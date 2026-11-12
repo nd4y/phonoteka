@@ -11,7 +11,7 @@ import re
 
 from fastapi import Query, Request
 
-from . import catalog_sources, db, enrichment_gaps, field_policy, input_readiness, lyrics_document, media, provider_policy, security
+from . import catalog_sources, db, enrichment_gaps, field_policy, input_readiness, lyrics_document, media, provider_policy, recognition, security
 from .providers import normalized, scalar
 
 CONTRACT = 'confirmed-metadata-fields-v1'
@@ -76,14 +76,17 @@ def recording(conn, analysis, metadata):
     duration = metadata.get('duration')
     if (analysis.get('recording_confirmation') == 'agreement' and 2 <= len(segments) <= 3
             and number(duration) and duration > 0
-            and all(s.get('state') == 'match' and number(s.get('offset')) and 0 <= s['offset'] < duration
+            and all(s.get('state') == 'match' and s.get('provider') == 'shazam'
+                    and s.get('extractor_profile') == recognition.POLICY
+                    and number(s.get('offset')) and 0 <= s['offset'] < duration
                     and HASH.fullmatch(str(s.get('sample_sha256', ''))) for s in segments)
             and max(s['offset'] for s in segments) - min(s['offset'] for s in segments) >= 5
             and len({s['sample_sha256'] for s in segments}) == len(segments)):
         for c in fps:
-            if c.get('provider') != 'shazam': continue
+            if c.get('provider') != 'shazam' or c.get('extractor_profile') != recognition.POLICY: continue
             ids = [(s.get('candidate') or {}).get('provider_recording_id') or s.get('provider_recording_id') for s in segments]
-            if c.get('provider_recording_id') and set(ids) == {c['provider_recording_id']}:
+            bound = any(s['sample_sha256'] == c.get('sample_sha256') and s['offset'] == c.get('sample_offset') for s in segments)
+            if bound and c.get('provider_recording_id') and set(ids) == {c['provider_recording_id']}:
                 shazam.append(c)
     fingerprints = acoustic + shazam
     if not fingerprints: return [], [], 'recording_unconfirmed'
@@ -120,8 +123,9 @@ def album_and_cover(conn, metadata, candidates, recordings):
                 releases.setdefault(r['id'], r['title'])
     names = {normalized(title) for title in releases.values()}
     album = scalar(metadata.get('tags', {}), 'album').strip()
-    if not album and len(names) == 1:
-        album = next(iter(releases.values()))
+    if not album:
+        if selected_id in releases: album = releases[selected_id]
+        elif len(names) == 1: album = next(iter(releases.values()))
     release_ids = {rid for rid, title in releases.items() if normalized(title) == normalized(album)} if album else set()
     if selected_id:
         release_ids &= {selected_id}
@@ -221,6 +225,10 @@ def evaluate(settings, conn, row, active, *, busy=None, retired=None):
                 reason = 'pending_choice'
         if not reason and field == 'cover' and not album_unchanged and not any(change['field'] == 'album' for change in changes):
             reason = 'album_unconfirmed'
+        if not reason and field == 'cover' and 'album' in previous:
+            cover_album = scalar(tags, 'album') or scalar((album or {}).get('tags', {}), 'album')
+            if field_policy.normalized_value('album', previous['album']) != field_policy.normalized_value('album', cover_album):
+                reason = 'pending_choice'
         if not reason and field == 'cover':
             inventory = metadata.get('slot_inventory', {})
             if inventory.get('truncated') or not HASH.fullmatch(str(inventory.get('inventory_sha256', ''))):

@@ -10,7 +10,7 @@ only. Existing values, field locks and conflicting saved choices remain intact. 
 decode audit and agreeing evidence are required:
 
 - a unique AcoustID score of at least 0.98 and a MusicBrainz recording with the same ID and duration within two seconds; or
-- agreement between two or three distinct, separated Shazam samples and matching MusicBrainz title, artist and duration.
+- agreement between two or three distinct, separated Shazam samples bound to the saved fingerprint by extraction profile, hash and position, and matching MusicBrainz title, artist and duration.
 
 Every compatible official edition must agree on the album name. Artwork requires a selected or
 unique edition, or identical image bytes for every compatible edition. Different covers remain
