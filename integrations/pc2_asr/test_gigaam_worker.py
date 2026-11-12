@@ -59,4 +59,36 @@ class GenericRecognitionContract(unittest.TestCase):
     def test_reference_text_cannot_turn_independent_recognition_into_prompted_output(self):
         with self.assertRaisesRegex(ValueError,'independent recognition profile'):self.run_fixture(reference='invented reference')
 
+class ScratchCleanupContract(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        spec=importlib.util.spec_from_file_location('generic_engine_bridge',pathlib.Path(__file__).with_name('whisper_bridge.py'))
+        self.bridge=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.bridge)
+
+    async def test_transient_locked_log_is_retried_after_process_reap(self):
+        import threading
+        main_thread=threading.get_ident();calls=[]
+        def cleanup():
+            self.assertNotEqual(threading.get_ident(),main_thread)
+            calls.append(1)
+            if len(calls)<3:raise PermissionError('synthetic inherited log handle')
+        with mock.patch.object(self.bridge.asyncio,'sleep',new_callable=mock.AsyncMock) as sleep:
+            await self.bridge.cleanup_temporary(types.SimpleNamespace(cleanup=cleanup))
+        self.assertEqual(len(calls),3)
+        self.assertEqual([c.args[0] for c in sleep.await_args_list],[.1,.3])
+
+    async def test_permanent_lock_fails_after_the_bounded_cleanup_budget(self):
+        cleanup=mock.Mock(side_effect=PermissionError('synthetic permanent lock'))
+        with mock.patch.object(self.bridge.asyncio,'sleep',new_callable=mock.AsyncMock) as sleep:
+            with self.assertRaisesRegex(PermissionError,'permanent lock'):
+                await self.bridge.cleanup_temporary(types.SimpleNamespace(cleanup=cleanup))
+        self.assertEqual(cleanup.call_count,6)
+        self.assertEqual([c.args[0] for c in sleep.await_args_list],[.1,.3,1,2,4])
+
+    async def test_other_filesystem_errors_are_not_hidden_or_retried(self):
+        cleanup=mock.Mock(side_effect=OSError('synthetic device failure'))
+        with mock.patch.object(self.bridge.asyncio,'sleep',new_callable=mock.AsyncMock) as sleep:
+            with self.assertRaisesRegex(OSError,'device failure'):
+                await self.bridge.cleanup_temporary(types.SimpleNamespace(cleanup=cleanup))
+        self.assertEqual(cleanup.call_count,1);sleep.assert_not_awaited()
+
 if __name__=='__main__':unittest.main()

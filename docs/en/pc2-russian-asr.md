@@ -27,6 +27,13 @@ and alignment. Only analysis PCM is sent for recognition, and the existing short
 PCM/reference windows are sent for final alignment. Client source code, metadata
 and the collection database stay outside the engine host.
 
+After the owned process tree is reaped, scratch removal retries transient Windows
+permission errors up to six attempts with at most 7.4 seconds of delayed backoff.
+The GPU lock and active request counters remain held during cleanup. Persistent
+permission errors and other filesystem errors are propagated rather than ignored.
+Runtime cancellation acceptance checks the actual owned Python process IDs,
+GPU memory and scratch files, not just a zero active counter.
+
 The pinned GigaAM package is 0.2.0, model `v3_e2e_rnnt`:
 
 - Checkpoint SHA-256: `f60c62fe45902d967000770a12f260de7c5ac4d4b8e5e852f1df8c548e3958b5`.
