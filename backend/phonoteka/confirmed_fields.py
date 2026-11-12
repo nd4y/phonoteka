@@ -426,6 +426,11 @@ def install(app, settings):
             total = conn.execute('SELECT COUNT(*) FROM tracks WHERE is_current=1').fetchone()[0]
             busy = active_tracks(conn)
             retired = catalog_sources.completed_sources(conn)
-            items = [public(evaluate(settings, conn, row, active, busy=busy, retired=retired)) for row in rows[:limit]]
+            from . import metadata_preparation
+            items = []
+            for row in rows[:limit]:
+                result = public(evaluate(settings, conn, row, active, busy=busy, retired=retired))
+                result['preparation'] = metadata_preparation.candidate(settings, conn, row, active, result)
+                items.append(result)
         return {'contract': CONTRACT, 'items': items, 'next_after': rows[limit - 1]['id'] if len(rows) > limit else None,
                 'scanned': len(items), 'total': total}
