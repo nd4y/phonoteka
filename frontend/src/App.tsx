@@ -760,6 +760,8 @@ export default function App() {
   const catalogRead = useRef<AbortController | null>(null);
   const detailSequence = useRef(0);
   const statusSequence = useRef({ issued: 0, committed: 0 });
+  const statusBusy = useRef(false);
+  statusBusy.current = jobs.some((job) => activeStates.includes(job.state));
   const refreshSession = useCallback(async () => {
     try {
       const value = await api<Session>("/auth/session");
@@ -950,7 +952,11 @@ export default function App() {
   }, [session?.authenticated]);
   useEffect(() => {
     if (!session?.authenticated) return;
-    return startStatusPolling(loadStatus, () => !document.hidden);
+    return startStatusPolling(
+      loadStatus,
+      () => !document.hidden,
+      () => (statusBusy.current ? 4000 : 30000),
+    );
   }, [loadStatus, session?.authenticated]);
   const completedJobs = jobs
     .filter((job) => !activeStates.includes(job.state))

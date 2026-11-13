@@ -525,6 +525,98 @@ def cleanup_cache(settings):
     return {"analyses_cleaned": changed, "music_deleted": False, "rollback_versions_deleted": False}
 
 
+def _cleanup_due(conn, entity, payload, now):
+    """Next retained-content expiry; policy and payload changes invalidate via triggers."""
+    usages, deadlines = [], []
+    if entity == 'analyses':
+        for candidate in payload.get('candidates', []):
+            if isinstance(candidate, dict) and any(candidate.get(key) for key in CONTENT_FIELDS):
+                usages.append(candidate.get('usage') or {})
+        if payload.get('alignment'):
+            usages.extend(payload.get('alignment_usage', []))
+    elif entity == 'jobs':
+        for item in payload.get('items', []):
+            if item.get('proposal'):
+                usages.extend(references(item['proposal']))
+            if item.get('reference_text'):
+                usages.extend(references({'field_sources': item.get('reference_sources', {})}))
+    elif entity == 'settings':
+        if payload.get('reference'):
+            usage = payload.get('usage', {})
+            usages.append(usage)
+            expires = usage.get('expires_at', 0)
+            if expires >= now:
+                deadlines.append(expires)
+    else:
+        usages.extend(references(payload))
+    while usages:
+        usage = usages.pop()
+        if not isinstance(usage, dict):
+            continue
+        usages.extend(usage.get('inherited_restrictions', []))
+        if usage.get('origin') in {'preexisting', 'owner_supplied'} or usage.get('embedded_media'):
+            continue
+        current = rule(conn, usage.get('provider', 'unknown'), usage.get('data_type', 'metadata'))
+        ttl = min(usage.get('cache_ttl', current.get('cache_ttl', 0)), current.get('cache_ttl', 0))
+        due = usage.get('acquired_at', now) + ttl
+        if due >= now:
+            deadlines.append(due + .001)
+    return min(deadlines) if deadlines else None
+
+
+def cleanup_batch(settings, *, limit=32, now=None):
+    """Drain a durable due queue, never rescan unchanged large payloads in idle loops.
+
+    Public reads/writes still enforce rights synchronously. The original full
+    cleanup is retained for explicit policy changes and backup maintenance.
+    """
+    if type(limit) is not int or not 1 <= limit <= 64:
+        raise ValueError('cleanup_batch_limit')
+    now = time.time() if now is None else now
+    tables = {
+        'analyses': ('track_id', 'payload', _clean_cached_analysis),
+        'proposals': ('id', 'payload', _clean_cached_proposal),
+        'jobs': ('id', 'payload', _clean_cached_job),
+        'settings': ('key', 'value', _clean_release_review),
+    }
+    changed = scanned = 0
+    with db.transaction(settings.db_path) as conn:
+        denied = [p for p in TERMS if not any(rule(conn, p, kind).get('allow_cache') for kind in DATA_TYPES)]
+        keys = [r[0] for r in conn.execute('SELECT key FROM provider_cache WHERE expires<=? ORDER BY expires LIMIT ?', (now, limit))]
+        for provider in denied:
+            if len(keys) == limit:
+                break
+            keys += [r[0] for r in conn.execute('SELECT key FROM provider_cache WHERE provider=? LIMIT ?', (provider, limit)) if r[0] not in keys][:limit-len(keys)]
+        for key in keys:
+            conn.execute('DELETE FROM provider_cache WHERE key=?', (key,))
+        due = conn.execute('SELECT entity,identity FROM policy_cleanup WHERE due<=? ORDER BY due,entity,identity LIMIT ?', (now, limit)).fetchall()
+        for entry in due:
+            entity, identity = entry['entity'], entry['identity']
+            key, column, clean = tables[entity]
+            columns = key + ',' + column + (',state,completed' if entity == 'jobs' else '')
+            row = conn.execute(f'SELECT {columns} FROM {entity} WHERE {key}=?', (identity,)).fetchone()
+            if row is None:
+                conn.execute('DELETE FROM policy_cleanup WHERE entity=? AND identity=?', (entity, identity))
+                continue
+            if entity == 'jobs' and row['state'] == 'running':
+                # Its state transition atomically marks it dirty again.
+                conn.execute('UPDATE policy_cleanup SET due=NULL WHERE entity=? AND identity=?', (entity, identity))
+                continue
+            scanned += 1
+            updated = clean(conn, row)
+            changed += updated
+            raw = conn.execute(f'SELECT {column} FROM {entity} WHERE {key}=?', (identity,)).fetchone()[0] if updated else row[column]
+            next_due = _cleanup_due(conn, entity, loads(raw), now)
+            # A cleaner's own payload update fires the dirty trigger. This final
+            # update is in the same writer transaction; concurrent changes cannot be lost.
+            conn.execute('UPDATE policy_cleanup SET due=? WHERE entity=? AND identity=?', (next_due, entity, identity))
+        pending = bool(conn.execute('SELECT 1 FROM policy_cleanup WHERE due<=? LIMIT 1', (now,)).fetchone())
+        pending = pending or bool(conn.execute('SELECT 1 FROM provider_cache WHERE expires<=? LIMIT 1', (now,)).fetchone())
+        pending = pending or any(conn.execute('SELECT 1 FROM provider_cache WHERE provider=? LIMIT 1', (p,)).fetchone() for p in denied)
+    return {'scanned': scanned, 'changed': changed, 'pending': pending,
+            'music_deleted': False, 'rollback_versions_deleted': False}
+
+
 def provenance_report(settings):
     result = []
     with db.connect(settings.db_path) as conn:

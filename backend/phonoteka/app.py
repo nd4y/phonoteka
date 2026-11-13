@@ -655,7 +655,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 AND total>(SELECT COUNT(*) FROM job_items WHERE job_id=jobs.id)
                 THEN 1 ELSE 0 END DESC,"""
             order += 'CASE WHEN ' + active_states + ' THEN created_at ELSE updated_at END DESC,'
-        rows = db.fetchall(settings.db_path, "SELECT * FROM jobs" + where + " ORDER BY " + order + "created_at DESC,id DESC LIMIT ? OFFSET ?", (*params,page_size,(page-1)*page_size))
+        # Sort only scalar job state. Payloads can contain thousands of frozen
+        # proposals; public status is maintained atomically when they change.
+        columns = 'jobs.id,kind,state,stage,total,completed,failed,cancel_requested,created_at,updated_at,error'
+        rows = db.fetchall(settings.db_path, "SELECT " + columns + ",s.public_payload AS payload FROM jobs INDEXED BY jobs_status_cover JOIN job_status s ON s.job_id=jobs.id" + where + " ORDER BY " + order + "created_at DESC,jobs.id DESC LIMIT ? OFFSET ?", (*params,page_size,(page-1)*page_size))
         total = db.fetchone(settings.db_path, "SELECT COUNT(*) AS n FROM jobs" + where, params)["n"]
         activity = job_activity.summaries(settings, rows)
         return {"items": [public_job(settings, row, activity=activity[row['id']]) for row in rows], "total": total, "page": page, "page_size": page_size}
