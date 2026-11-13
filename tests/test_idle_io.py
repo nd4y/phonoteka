@@ -75,6 +75,7 @@ def test_compatible_extension_seeds_legacy_and_old_v2_writes(tmp_path):
         conn.execute('INSERT INTO tracks(id,relative_path,sha256,metadata,created_at,updated_at) VALUES(?,?,?,?,?,?)',
                      ('legacy-track','fixture.mp3','a'*64,'{}',db.utcnow(),db.utcnow()))
         conn.execute('INSERT INTO analyses VALUES(?,?,?,?)', ('legacy-track','a'*64,'{"sources":[{"provider":"lrclib","state":"candidates"}]}',db.utcnow()))
+        conn.execute('INSERT INTO provider_cache VALUES(?,?,?,?)', ('legacy-cache','musicbrainz','юю',1900000000))
     db.initialize(path)
     with db.connect(path) as conn:
         db.verify_schema(conn)
@@ -83,9 +84,11 @@ def test_compatible_extension_seeds_legacy_and_old_v2_writes(tmp_path):
         assert conn.execute('SELECT id FROM track_status').fetchone()[0] == 'legacy-track'
         conn.execute('UPDATE jobs SET payload=? WHERE id=?', ('{"pause_requested":false}', 'legacy'))
         conn.execute('UPDATE tracks SET metadata=? WHERE id=?', ('{"format":"flac"}', 'legacy-track'))
+        conn.execute('UPDATE provider_cache SET payload=? WHERE key=?', ('ююю','legacy-cache'))
     db.initialize(path)
     assert json.loads(db.fetchone(path, 'SELECT public_payload FROM job_status')['public_payload'])['pause_requested'] is False
     assert db.fetchone(path, 'SELECT format FROM track_status')['format'] == 'flac'
+    assert db.fetchone(path, 'SELECT payload_length FROM provider_cache_status')['payload_length'] == 3
 
 
 def test_cleanup_processes_due_changes_once_and_keeps_expiry(client, settings, monkeypatch):
@@ -204,7 +207,7 @@ def test_metrics_use_compact_status_and_preserve_current_revision_and_cache_leng
         conn.execute('INSERT INTO provider_cache VALUES(?,?,?,?)', ('unicode', 'musicbrainz', 'ю' * 1000, 1900000000))
     with db.connect(settings.db_path) as conn:
         def authorize(action, table, column, *_):
-            forbidden = table in {'jobs','analyses'} and column == 'payload' or table == 'tracks' and column == 'metadata'
+            forbidden = table in {'jobs','analyses','provider_cache'} and column == 'payload' or table == 'tracks' and column == 'metadata'
             return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and forbidden else sqlite3.SQLITE_OK
         conn.set_authorizer(authorize)
         values = metric_values(conn, settings)
@@ -213,6 +216,12 @@ def test_metrics_use_compact_status_and_preserve_current_revision_and_cache_leng
     assert values[('phonoteka_provider_retry_wait_seconds', (('kind','scan'),))] == 12
     assert values[('phonoteka_provider_cache_bytes', (('provider','musicbrainz'),))] == 1000
     with db.transaction(settings.db_path) as conn:
+        conn.execute('UPDATE provider_cache SET payload=?,expires=? WHERE key=?', ('ю'*2000,1900000000,'unicode'))
+        assert metric_values(conn, settings)[('phonoteka_provider_cache_bytes', (('provider','musicbrainz'),))] == 2000
+        conn.execute('UPDATE provider_cache SET expires=? WHERE key=?', (1700000000,'unicode'))
+        assert metric_values(conn, settings)[('phonoteka_provider_cache_bytes', (('provider','musicbrainz'),))] == 0
+        conn.execute('DELETE FROM provider_cache WHERE key=?', ('unicode',))
+        assert not conn.execute('SELECT 1 FROM provider_cache_status WHERE key=?', ('unicode',)).fetchone()
         conn.execute('UPDATE analyses SET input_sha256=? WHERE track_id=?', ('b'*64, track_id))
         assert source not in metric_values(conn, settings)
         conn.execute('UPDATE analyses SET input_sha256=?,payload=? WHERE track_id=?', (revision, db.encode({'sources': [{'provider': 'lrclib','state': 'no_match'}]}), track_id))
@@ -248,8 +257,11 @@ def test_analysis_projection_rolls_back_and_cannot_bypass_schema_guard(client, s
     assert not db.fetchone(settings.db_path, 'SELECT 1 FROM analysis_status')
     with db.transaction(settings.db_path) as conn:
         conn.execute('INSERT INTO analyses VALUES(?,?,?,?)', (track_id, revision, '{"sources":[]}', db.utcnow()))
+        conn.execute('INSERT INTO provider_cache VALUES(?,?,?,?)', ('guard','musicbrainz','{}',1900000000))
         conn.create_function('phonoteka_schema_version', 0, lambda: 1)
         with pytest.raises(sqlite3.IntegrityError, match='schema_write_guard'):
             conn.execute('DELETE FROM analysis_status')
         with pytest.raises(sqlite3.IntegrityError, match='schema_write_guard'):
             conn.execute('DELETE FROM track_status')
+        with pytest.raises(sqlite3.IntegrityError, match='schema_write_guard'):
+            conn.execute('DELETE FROM provider_cache_status')

@@ -29,6 +29,9 @@ def install(conn):
     """Called only inside initialize's atomic v2 extension/write-barrier transaction."""
     conn.execute('CREATE TABLE IF NOT EXISTS job_status (job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE, public_payload TEXT NOT NULL)')
     conn.execute('CREATE TABLE IF NOT EXISTS analysis_status (track_id TEXT PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE, input_sha256 TEXT NOT NULL, sources TEXT NOT NULL)')
+    conn.execute('''CREATE TABLE IF NOT EXISTS provider_cache_status (key TEXT PRIMARY KEY REFERENCES provider_cache(key) ON DELETE CASCADE,
+        provider TEXT NOT NULL,expires REAL NOT NULL,payload_length INTEGER NOT NULL)''')
+    conn.execute('CREATE INDEX IF NOT EXISTS provider_cache_status_provider ON provider_cache_status(provider,expires,payload_length)')
     # JSON-derived values have no affinity, preserving SQLite JSON scalar types.
     conn.execute('''CREATE TABLE IF NOT EXISTS track_status (id TEXT PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
         sha256 TEXT NOT NULL,is_current INTEGER NOT NULL,format,status TEXT NOT NULL,youtube,has_art,
@@ -38,7 +41,6 @@ def install(conn):
     conn.execute('CREATE INDEX IF NOT EXISTS policy_cleanup_due ON policy_cleanup(due,entity,identity)')
     conn.execute('CREATE INDEX IF NOT EXISTS provider_cache_expiry ON provider_cache(expires)')
     conn.execute('CREATE INDEX IF NOT EXISTS provider_cache_provider ON provider_cache(provider)')
-    conn.execute('CREATE INDEX IF NOT EXISTS provider_cache_stats ON provider_cache(provider,expires,length(payload))')
     conn.execute('CREATE INDEX IF NOT EXISTS job_items_status ON job_items(job_id,state)')
     # Scalar columns after payload can still traverse its SQLite overflow pages.
     # Keep the complete list-page projection in a small covering index instead.
@@ -78,6 +80,15 @@ def install(conn):
     conn.execute('''CREATE TRIGGER IF NOT EXISTS track_status_delete AFTER DELETE ON tracks BEGIN
         DELETE FROM track_status WHERE id=OLD.id; END''')
     conn.execute('INSERT INTO track_status SELECT '+_track_values('t.')+' FROM tracks t WHERE NOT EXISTS (SELECT 1 FROM track_status s WHERE s.id=t.id)')
+    for event in ('INSERT', 'UPDATE OF provider,expires,payload'):
+        name = 'insert' if event == 'INSERT' else 'update'
+        condition = '' if name == 'insert' else ' WHEN ' + ' OR '.join(f'NEW.{k} IS NOT OLD.{k}' for k in ('provider','expires','payload'))
+        conn.execute(f'''CREATE TRIGGER IF NOT EXISTS provider_cache_status_{name} AFTER {event} ON provider_cache{condition} BEGIN
+            INSERT INTO provider_cache_status VALUES(NEW.key,NEW.provider,NEW.expires,length(NEW.payload))
+            ON CONFLICT(key) DO UPDATE SET provider=excluded.provider,expires=excluded.expires,payload_length=excluded.payload_length; END''')
+    conn.execute('''CREATE TRIGGER IF NOT EXISTS provider_cache_status_delete AFTER DELETE ON provider_cache BEGIN
+        DELETE FROM provider_cache_status WHERE key=OLD.key; END''')
+    conn.execute('INSERT INTO provider_cache_status SELECT c.key,c.provider,c.expires,length(c.payload) FROM provider_cache c WHERE NOT EXISTS (SELECT 1 FROM provider_cache_status s WHERE s.key=c.key)')
     for table, key, column in (('analyses', 'track_id', 'payload'), ('proposals', 'id', 'payload'), ('jobs', 'id', 'payload'), ('settings', 'key', 'value')):
         restriction = "NEW.key GLOB 'release_review:*'" if table == 'settings' else '1'
         for event in ('INSERT', f'UPDATE OF {column}'):

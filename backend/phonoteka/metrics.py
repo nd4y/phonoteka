@@ -107,7 +107,7 @@ class DatabaseCollector:
         cooldown = {}; cache = {}
         for r in conn.execute("SELECT key,value FROM settings WHERE key LIKE 'provider_breaker:%'"):
             cooldown[r['key'].split(':',1)[1]]=max(0,json.loads(r['value']).get('until',0)-now)
-        for r in conn.execute('SELECT provider,COUNT(*) n,COALESCE(SUM(length(payload)),0) bytes FROM provider_cache INDEXED BY provider_cache_stats WHERE expires>? GROUP BY provider',(now,)):
+        for r in conn.execute('SELECT provider,COUNT(*) n,COALESCE(SUM(payload_length),0) bytes FROM provider_cache_status WHERE expires>? GROUP BY provider',(now,)):
             cache[r['provider']]=(r['n'],r['bytes'])
         result.append(gauge('provider_daily_limit_enabled','Local rolling daily quota is enabled; remote rate limits always apply',[((),int(self.settings.provider_daily_limit>0))]))
         for name,help,fn in [('provider_requests_24h','Requests reserved in rolling 24h; gauge',lambda p:used.get(p,0)),('provider_budget_remaining','Remaining local rolling daily request budget; +Inf when disabled',lambda p:max(0,self.settings.provider_daily_limit-used.get(p,0)) if self.settings.provider_daily_limit else float('inf')),('provider_cooldown_seconds','Provider cooldown remaining',lambda p:cooldown.get(p,0)),('provider_cache_entries','Non-expired cache entries',lambda p:cache.get(p,(0,0))[0]),('provider_cache_bytes','Non-expired cache payload bytes',lambda p:cache.get(p,(0,0))[1])]:
