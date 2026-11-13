@@ -117,7 +117,12 @@ class DatabaseCollector:
         result.append(gauge('recognition_budget_spent_calls','Fingerprint reservations shared across providers and batches',[((),recognition['spent'])]))
         formats=('mp3','flac','m4a','mp4','ogg','opus','wav','aiff','aac','webm','mka','wma','ape','wv','cue','dsf','dff','ac3','unknown')
         format_counts={}; statuses={}; youtube={}
-        for r in conn.execute("SELECT json_extract(metadata,'$.format') format,status,json_extract(metadata,'$.youtube.state') youtube,COUNT(*) n FROM tracks INDEXED BY tracks_metrics WHERE is_current=1 GROUP BY format,status,youtube"):
+        # Materialize only projected scalars before GROUP BY. SQLite otherwise
+        # defers JSON evaluation and copies the full metadata into its sorter.
+        for r in conn.execute("""WITH features AS MATERIALIZED (
+          SELECT json_extract(metadata,'$.format') format,status,json_extract(metadata,'$.youtube.state') youtube
+          FROM tracks INDEXED BY tracks_metrics WHERE is_current=1)
+          SELECT format,status,youtube,COUNT(*) n FROM features GROUP BY format,status,youtube"""):
             f=bounded(r['format'],formats);format_counts[f]=format_counts.get(f,0)+r['n']
             s=bounded(r['status'],('indexed','ready','published','needs_review','missing'));statuses[s]=statuses.get(s,0)+r['n']
             s=bounded(r['youtube'] or 'unknown',('unknown','recorded','owner_confirmed','candidates','conflict','unlinked'));youtube[s]=youtube.get(s,0)+r['n']
