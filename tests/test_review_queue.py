@@ -139,6 +139,38 @@ def test_unanimous_machine_recheck_only_changes_classification():
     assert 'publication' not in result
 
 
+@pytest.mark.parametrize('case', [
+    'verdict_null', 'verdict_list', 'segments_null', 'segments_scalar',
+    'segment_null', 'segment_list', 'candidate_string', 'candidate_list',
+    'sample_list', 'sample_invalid', 'isrc_list', 'provider_dict', 'recording_id_list',
+    'offset_negative', 'offset_at_end', 'offset_after_end', 'offset_boolean',
+])
+def test_malformed_recheck_keeps_block_without_exception_or_mutation(case):
+    meta = recording_review.annotate({'tags': {'title': ['Original']}, 'lrc': 'unchanged'}, 'a'*64, True)
+    before = copy.deepcopy(meta)
+    verdict = agreed()
+    if case == 'verdict_null': verdict = None
+    elif case == 'verdict_list': verdict = []
+    elif case == 'segments_null': verdict['segments'] = None
+    elif case == 'segments_scalar': verdict['segments'] = 3
+    elif case == 'segment_null': verdict['segments'][0] = None
+    elif case == 'segment_list': verdict['segments'][0] = ['match']
+    elif case == 'candidate_string': verdict['segments'][0]['candidate'] = 'recording'
+    elif case == 'candidate_list': verdict['segments'][0]['candidate'] = ['recording']
+    elif case == 'sample_list': verdict['segments'][0]['sample_sha256'] = ['a'*64]
+    elif case == 'sample_invalid': verdict['segments'][0]['sample_sha256'] = 'not-a-sha256'
+    elif case == 'isrc_list': verdict['segments'][0]['candidate']['isrc'] = ['SAME']
+    elif case == 'provider_dict': verdict['segments'][0]['candidate']['provider'] = {'name': 'shazam'}
+    elif case == 'recording_id_list': verdict['segments'][0]['candidate']['provider_recording_id'] = ['same']
+    elif case == 'offset_negative': verdict['segments'][0]['offset'] = -1
+    elif case == 'offset_at_end': verdict['segments'][2]['offset'] = 240
+    elif case == 'offset_after_end': verdict['segments'][2]['offset'] = 300
+    elif case == 'offset_boolean': verdict['segments'][0]['offset'] = True
+    result = recording_review.resolve_recheck(meta, 'a'*64, verdict, 240)
+    assert result is meta and meta == before
+    assert recording_review.possible_mix(result, 'a'*64)
+
+
 @pytest.mark.parametrize('outcome', ['agreement', 'conflict', 'manual_race'])
 def test_worker_recheck_saves_evidence_without_applying_audio(client, settings, monkeypatch, outcome):
     headers = authenticated(client, settings); tid, sha = seed(settings); mix(settings, tid, sha)

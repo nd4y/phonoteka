@@ -1,5 +1,10 @@
 # phonoteka
 
+Incomplete fingerprint titles or artists have a separate reason instead of a recording-conflict
+message. They remain ineligible for automatic preparation and writes. Malformed recheck evidence
+keeps automatic classification blocked.
+[Evidence checks](docs/en/confirmed-fields.md#incomplete-and-malformed-evidence).
+
 Preparation packs up to 50 records of one processing kind. A small group of new recognition checks
 does not postpone the existing cache backlog: cache checks fill the remaining slots with unchanged
 per-record limits. [Preparation order](docs/en/confirmed-fields.md).
