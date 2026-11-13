@@ -139,7 +139,7 @@ def candidate(settings, conn, row, active, result):
     if result['ready'] or set(result['blocked']) - SAFE_BLOCKS:
         return None
     gaps = [g for g in result['remaining'] if g['field'] in fields.FIELDS]
-    if not gaps or any(g['code'] in {'recording_conflict', 'field_locked', 'pending_choice', 'field_lock_stale'} for g in gaps):
+    if not gaps or any(g['code'] in {'recording_conflict', 'recording_incomplete', 'field_locked', 'pending_choice', 'field_lock_stale'} for g in gaps):
         return None
     metadata = json.loads(row['metadata'])
     saved = conn.execute('SELECT * FROM analyses WHERE track_id=?', (row['id'],)).fetchone()
@@ -147,7 +147,7 @@ def candidate(settings, conn, row, active, result):
     if analysis.get('possible_mix') or analysis.get('critical_conflicts') or analysis.get('unresolved_conflicts'):
         return None
     matches, fingerprints, error = fields.recording(conn, analysis, metadata)
-    if error == 'recording_conflict':
+    if error in {'recording_conflict', 'recording_incomplete'}:
         return None
     kind = 'analyze' if matches or fingerprints else 'recognize'
     if not settings.external_metadata or kind == 'recognize' and not settings.external_fingerprints:

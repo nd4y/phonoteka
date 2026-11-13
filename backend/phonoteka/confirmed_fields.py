@@ -23,6 +23,7 @@ HASH = re.compile(r'[a-f0-9]{64}')
 MESSAGES = {
     'recording_unconfirmed': 'Нет однозначного совпадения аудио и музыкального каталога.',
     'recording_conflict': 'Источники или данные файла указывают на разные записи.',
+    'recording_incomplete': 'У совпадения по отпечатку неполные название или исполнитель. Автоматическая запись и подготовка заблокированы.',
     'album_unconfirmed': 'Для этой записи найдены разные альбомы или альбом не установлен.',
     'cover_edition_unconfirmed': 'Не подтверждена обложка подходящего издания.',
     'candidate_unavailable': 'Подходящего доступного варианта для этого поля пока нет.',
@@ -100,8 +101,11 @@ def recording(conn, analysis, metadata):
     if not fingerprints: return [], [], 'recording_unconfirmed'
     identities = {(normalized(scalar(c.get('tags', {}), 'title')), normalized(scalar(c.get('tags', {}), 'artist')))
                   for c in fingerprints + credible_acoustid + credible_shazam}
-    if len(identities) != 1 or any(not title or not artist for title, artist in identities):
+    complete = {(title, artist) for title, artist in identities if title and artist}
+    if len(complete) > 1 or not identities:
         return [], [], 'recording_conflict'
+    if len(complete) != len(identities):
+        return [], [], 'recording_incomplete'
     title, artist = next(iter(identities))
     current = metadata.get('tags', {})
     if any(scalar(current, f).strip() and normalized(scalar(current, f)) != expected

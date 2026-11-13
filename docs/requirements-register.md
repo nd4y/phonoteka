@@ -3088,3 +3088,18 @@ checkbox у каждой записи уже выбранной партии д�
 / Let users temporarily uncheck records in the fixed preparation preview, without replacement
 entries or persistent classification changes. Submit only selected original tokens, reset choices
 on a fresh plan and preserve every existing server admission and acceptance rule.
+
+### 2026-11-13 - Неполные данные и повреждённая повторная проверка
+
+Уточнение UI-REVIEW-15/16: отсутствующие название или исполнитель у кандидата по отпечатку
+показывать как неполные доказательства (`recording_incomplete`), сохраняя запрет автоматической
+подготовки и применения. Не смешивать отсутствие данных с настоящим противоречием; разные
+полные идентичности по-прежнему блокируются как конфликт, даже рядом с неполным кандидатом.
+Некорректные формы результата/фрагмента/кандидата, образцы без SHA-256, нестроковые идентификаторы
+и некорректные смещения не должны вызывать исключение или снимать признак возможного микса.
+Сохранять решения пользователя, пороги, бюджет, слова/таймкоды, публикацию и трейсинг.
+Проверить исходный отказ, исправленные регрессии на build-01, CI и отдельно установленный UI.
+/ Report incomplete fingerprint identity separately while preserving both preparation and write
+blocks; retain genuine complete-identity conflicts. Malformed recording-recheck evidence must
+leave classification unchanged instead of raising or unlocking it. Preserve owner decisions,
+acceptance thresholds, budgets and tracing; verify native regressions, CI and installed behavior.

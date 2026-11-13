@@ -2,6 +2,7 @@
 import json
 import uuid
 import math
+import re
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -48,16 +49,22 @@ def resolve_recheck(metadata, revision, verdict, duration):
     """
     current = decision(metadata, revision)
     if current.get('origin') == 'owner' or not possible_mix(metadata, revision): return metadata
+    if not isinstance(verdict, dict): return metadata
     segments = verdict.get('segments', [])
-    if (not isinstance(duration, (int, float)) or not math.isfinite(duration) or not 30 <= duration <= 600
-            or verdict.get('state') != 'agreement' or len(segments) != 3
-            or any(s.get('state') != 'match' or not s.get('candidate') for s in segments)):
+    if (type(duration) not in (int, float) or not math.isfinite(duration) or not 30 <= duration <= 600
+            or verdict.get('state') != 'agreement' or not isinstance(segments, list) or len(segments) != 3
+            or any(not isinstance(s, dict) or s.get('state') != 'match'
+                   or not isinstance(s.get('candidate'), dict) or not s['candidate'] for s in segments)):
         return metadata
     offsets = [s.get('offset') for s in segments]
-    if any(not isinstance(x, (int, float)) or not math.isfinite(x) for x in offsets): return metadata
+    if any(type(x) not in (int, float) or not math.isfinite(x) or not 0 <= x < duration for x in offsets): return metadata
     if len(set(offsets)) != 3 or max(offsets) - min(offsets) < duration * .5: return metadata
-    if len({s.get('sample_sha256') for s in segments}) != 3 or any(not s.get('sample_sha256') for s in segments): return metadata
+    samples = [s.get('sample_sha256') for s in segments]
+    if any(not isinstance(value, str) or not re.fullmatch('[a-f0-9]{64}', value) for value in samples): return metadata
+    if len(set(samples)) != 3: return metadata
     candidates = [s['candidate'] for s in segments]
+    if any(not isinstance(c.get(key), str) or not c[key] for c in candidates
+           for key in ('provider', 'provider_recording_id', 'isrc')): return metadata
     isrcs = {c.get('isrc') for c in candidates}
     ids = {(c.get('provider'), c.get('provider_recording_id')) for c in candidates}
     if len(isrcs) != 1 or not all(c.get('isrc') for c in candidates) or len(ids) != 1 or not all(c.get('provider_recording_id') for c in candidates): return metadata

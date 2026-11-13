@@ -1,5 +1,6 @@
 """Native scoped observations, durable orchestration and fail-closed preparation."""
 import asyncio
+import copy
 from dataclasses import replace
 import json
 import time
@@ -38,6 +39,49 @@ def start(client, headers, key=None):
     assert value['preparation'], value
     return client.post('/api/metadata-preparation', json={'tokens': {value['track_id']: value['preparation']['token']}},
                        headers={**headers, 'Idempotency-Key': key or str(uuid.uuid4())})
+
+
+@pytest.mark.parametrize('missing', ['title', 'artist', 'both'])
+def test_incomplete_fingerprint_identity_has_precise_reason_and_stays_blocked(library, missing):
+    cfg, client, headers, tid, sha, path = library
+    assert cfg.external_metadata and cfg.external_fingerprints
+    with db.transaction(cfg.db_path) as conn:
+        saved = conn.execute('SELECT payload FROM analyses WHERE track_id=?', (tid,)).fetchone()
+        data = json.loads(saved['payload'])
+        fingerprint = next(c for c in data['candidates'] if c.get('provider') == 'acoustid')
+        for field in ('title', 'artist') if missing == 'both' else (missing,):
+            fingerprint['tags'].pop(field)
+        conn.execute('UPDATE analyses SET payload=? WHERE track_id=?', (db.encode(data), tid))
+        before_jobs = conn.execute('SELECT count(*) FROM jobs').fetchone()[0]
+    value = entry(client)
+    assert not value['ready'] and value['changes'] == [] and value['preparation'] is None
+    core = [v for v in value['remaining'] if v['field'] in prep.fields.FIELDS]
+    assert core and {v['code'] for v in core} == {'recording_incomplete'}
+    assert all('неполные' in v['message'] for v in core)
+    with db.connect(cfg.db_path) as conn:
+        assert conn.execute('SELECT count(*) FROM jobs').fetchone()[0] == before_jobs
+        assert conn.execute("SELECT count(*) FROM settings WHERE key GLOB 'recognition_usage:*' OR key GLOB 'provider_attempt:*'").fetchone()[0] == 0
+    assert media.sha256_file(path) == sha
+
+
+def test_complete_fingerprint_disagreement_stays_conflict_with_partial_candidate(library):
+    cfg, client, headers, tid, sha, path = library
+    with db.transaction(cfg.db_path) as conn:
+        data = json.loads(conn.execute('SELECT payload FROM analyses WHERE track_id=?', (tid,)).fetchone()[0])
+        original = next(c for c in data['candidates'] if c.get('provider') == 'acoustid')
+        conflicting = copy.deepcopy(original)
+        conflicting['id'] += ':different-artist'
+        conflicting['tags']['artist'] = 'Another Artist'
+        partial = copy.deepcopy(original)
+        partial['id'] += ':partial'
+        partial['tags'].pop('artist')
+        data['candidates'].extend([conflicting, partial])
+        conn.execute('UPDATE analyses SET payload=? WHERE track_id=?', (db.encode(data), tid))
+    value = entry(client)
+    assert not value['ready'] and value['changes'] == [] and value['preparation'] is None
+    core = [v for v in value['remaining'] if v['field'] in prep.fields.FIELDS]
+    assert core and {v['code'] for v in core} == {'recording_conflict'}
+    assert media.sha256_file(path) == sha
 
 
 def test_two_real_scans_keep_other_rows_and_files_untouched_and_queue_search(library):

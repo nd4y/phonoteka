@@ -123,3 +123,21 @@ Submission sends only the selected records' original tokens. The choice belongs 
 plan, is not persisted across plans and never changes file classification. A fresh plan selects
 its own next batch again. Metadata-first priority, the 50-record bound, one server job kind,
 receipts, limits, acceptance and tracing remain unchanged.
+
+## Incomplete and malformed evidence
+
+When a fingerprint match lacks a title or artist, the plan reports `recording_incomplete`:
+insufficient data rather than a claim that sources identify different recordings. Automatic
+preparation and application remain blocked. Different complete title/artist pairs, recording
+identifiers or ISRCs still conflict; an incomplete candidate cannot conceal that disagreement.
+
+A recording recheck must neither fail nor remove the restriction on malformed evidence. It needs
+an object verdict, three object segments with object candidates, valid sample SHA-256 values,
+string identifiers and finite numeric offsets inside the audio duration. Nulls, lists in place
+of objects, boolean offsets and offsets outside the audio keep classification unchanged. Existing
+duration, three-separated-fragment consensus, identity and ISRC requirements remain in force;
+owner decisions are never replaced. Rechecking does not accept tags, lyrics, timings or publication.
+
+Regressions cover the precise incomplete-data reason, preservation of genuine disagreement,
+no new job or budget spending, and unchanged audio. Malformed verdict tests require the original
+classification and metadata to remain intact without an exception.
