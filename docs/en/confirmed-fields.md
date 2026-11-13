@@ -110,3 +110,16 @@ up to the same 50-record limit. A newly available single record therefore does n
 existing cache backlog. Relative order within each group and each original frozen entry are retained.
 The preview explains mixed budgets; exhausted records cannot send new requests. Server admission,
 stability checks, cancellation, receipts, source permissions and review rules remain unchanged.
+
+### Selecting records before preparation
+
+All records in the next batch start checked. Clear mixes, speech or other records you do not
+want to prepare now. Unchecked entries remain in the same preview so you can select them again;
+other files do not fill the freed slots. The button count and budget explanation cover only
+checked records. An empty choice cannot start preparation; checkboxes are disabled while reading
+the plan, submitting work or running preparation.
+
+Submission sends only the selected records' original tokens. The choice belongs to the current
+plan, is not persisted across plans and never changes file classification. A fresh plan selects
+its own next batch again. Metadata-first priority, the 50-record bound, one server job kind,
+receipts, limits, acceptance and tracing remain unchanged.
