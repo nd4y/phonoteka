@@ -175,6 +175,30 @@ def test_cleanup_inherited_proposal_deadline_and_policy_shortening(client, setti
     assert 'lrc' not in stored
 
 
+def test_cleanup_denied_provenance_without_acquisition_time_stays_parked(client, settings, monkeypatch):
+    track_id, revision = seed(settings)
+    clock = [time.time()]
+    monkeypatch.setattr(policy.time, 'time', lambda: clock[0])
+    with db.transaction(settings.db_path) as conn:
+        usage = {'provider': 'lrclib', 'data_type': 'metadata', 'origin': 'provider_acquired'}
+        payload = {'tags': {}, 'sources': [usage], 'policy_omitted_fields': ['title']}
+        conn.execute('INSERT INTO proposals VALUES(?,?,?,?,?)', ('denied-no-time', track_id, revision, db.encode(payload), db.utcnow()))
+    assert policy.cleanup_batch(settings)['scanned'] == 1
+    assert db.fetchone(settings.db_path, "SELECT due FROM policy_cleanup WHERE identity='denied-no-time'")['due'] is None
+    # Neither restart nor later idle rounds should manufacture a fresh deadline.
+    db.initialize(settings.db_path)
+    clock[0] += 60
+    assert policy.cleanup_batch(settings)['scanned'] == 0
+    with db.transaction(settings.db_path) as conn:
+        # A real payload edit must still invalidate the parked entry.
+        conn.execute("UPDATE proposals SET payload=? WHERE id='denied-no-time'", (db.encode({**payload, 'tags': {'title': 'Fixture'}}),))
+    assert policy.cleanup_batch(settings)['scanned'] == 1
+    stored = json.loads(db.fetchone(settings.db_path, "SELECT payload FROM proposals WHERE id='denied-no-time'")['payload'])
+    assert not stored['tags']
+    clock[0] += 60
+    assert policy.cleanup_batch(settings)['scanned'] == 0
+
+
 def test_cleanup_bounds_backlog_and_never_touches_audio(client, settings):
     with db.transaction(settings.db_path) as conn:
         for index in range(80):

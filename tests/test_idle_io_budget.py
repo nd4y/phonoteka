@@ -47,6 +47,11 @@ def test_idle_io_same_workload(client, settings):
         for index in range(20):
             conn.execute('INSERT INTO provider_cache VALUES(?,?,?,?)',
                          ('cache-'+str(index), 'musicbrainz', 'ю' * (256 * 1024), 1900000000))
+        # Production has many large, unrelated provider settings. LIKE prefixes
+        # must filter keys before reading values, including the shared prefix.
+        for index in range(12000):
+            conn.execute('INSERT INTO settings VALUES(?,?)',
+                         ('provider_fixture:'+str(index), db.encode({'padding': 's'*1024})))
     improved = hasattr(provider_policy, 'cleanup_batch')
     if improved:
         while provider_policy.cleanup_batch(settings, limit=64)['pending']:
@@ -78,6 +83,7 @@ def test_idle_io_same_workload(client, settings):
               'job_payload_bytes': len(payload.encode()), 'analysis_payload_bytes': len(analysis.encode()),
               'cache_entries': 20, 'cache_payload_characters': 256*1024,
               'track_metadata_bytes': len(metadata.encode()), 'job_items': count*10,
+              'unrelated_settings': 12000, 'setting_payload_bytes': 1024,
               'db_bytes': settings.db_path.stat().st_size, 'polls': 5, 'idle_cleanup_rounds': 3,
               'polling': measure(polling), 'housekeeping': measure(housekeeping), 'metrics': measure(metrics),
               'metric_samples': len(metric_samples), 'metric_sha256': hashlib.sha256(json.dumps(metric_samples,sort_keys=True).encode()).hexdigest()}

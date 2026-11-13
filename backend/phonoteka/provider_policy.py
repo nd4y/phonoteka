@@ -558,6 +558,10 @@ def _cleanup_due(conn, entity, payload, now):
             continue
         current = rule(conn, usage.get('provider', 'unknown'), usage.get('data_type', 'metadata'))
         ttl = min(usage.get('cache_ttl', current.get('cache_ttl', 0)), current.get('cache_ttl', 0))
+        # Already cleaned, non-retainable provenance has no future expiry.
+        # Missing acquired_at must not create a new now+epsilon deadline forever.
+        if ttl <= 0:
+            continue
         due = usage.get('acquired_at', now) + ttl
         if due >= now:
             deadlines.append(due + .001)
