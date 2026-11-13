@@ -101,3 +101,12 @@ Cancellation, other stop reasons, missing or inconsistent history, any created s
 sent or uncertain search request prevent this recovery. Current exclusions and guards still apply.
 Provider counters, cache expiry, lyric acceptance and tracing remain unchanged. A completed check or
 search attempt does not mean that tags, artwork or timed lyrics have been filled.
+
+### Filling a preparation batch
+
+Metadata-only searches remain a separate first-priority batch. A recognition batch lists records with
+remaining or unknown request capacity first, then uses the remaining slots for cache-only checks,
+up to the same 50-record limit. A newly available single record therefore does not postpone an
+existing cache backlog. Relative order within each group and each original frozen entry are retained.
+The preview explains mixed budgets; exhausted records cannot send new requests. Server admission,
+stability checks, cancellation, receipts, source permissions and review rules remain unchanged.
