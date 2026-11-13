@@ -47,7 +47,7 @@ class DatabaseCollector:
 
     def application(self, conn, now):
         result = []
-        jobs = list(conn.execute('SELECT kind,state,stage,total,completed,failed,created_at,json_extract(payload,\'$.retry_at\') retry_at FROM jobs'))
+        jobs = list(conn.execute("SELECT kind,state,stage,total,completed,failed,created_at,json_extract(s.public_payload,'$.retry_at') retry_at FROM jobs INDEXED BY jobs_status_cover JOIN job_status s ON s.job_id=jobs.id"))
         counts = {}; remaining = {}; waiting = {}; oldest = {}; storage_jobs={};storage_remaining={};storage_retry={};provider_wait_jobs={}
         for r in jobs:
             kind = bounded(r['kind'],KINDS); state = bounded(r['state'],STATES)
@@ -96,7 +96,7 @@ class DatabaseCollector:
             result.append(gauge(name,help,[((),value)]))
         item_counts={}
         item_states=('running','succeeded','deferred','failed','needs_review','conflict','interrupted')
-        for r in conn.execute('SELECT j.kind,i.state,COUNT(*) n FROM job_items i JOIN jobs j ON j.id=i.job_id GROUP BY j.kind,i.state'):
+        for r in conn.execute('SELECT j.kind,i.state,COUNT(*) n FROM job_items i INDEXED BY job_items_status JOIN jobs j INDEXED BY jobs_status_cover ON j.id=i.job_id GROUP BY j.kind,i.state'):
             key=(bounded(r['kind'],KINDS),bounded(r['state'],item_states));item_counts[key]=item_counts.get(key,0)+r['n']
         result.append(gauge('job_items','Persisted latest item state, not a monotonic counter',[((k,s),item_counts.get((k,s),0)) for k in KINDS for s in item_states],['kind','state']))
         heartbeat_row=conn.execute("SELECT value FROM settings WHERE key='worker_heartbeat'").fetchone()
@@ -107,7 +107,7 @@ class DatabaseCollector:
         cooldown = {}; cache = {}
         for r in conn.execute("SELECT key,value FROM settings WHERE key LIKE 'provider_breaker:%'"):
             cooldown[r['key'].split(':',1)[1]]=max(0,json.loads(r['value']).get('until',0)-now)
-        for r in conn.execute('SELECT provider,COUNT(*) n,COALESCE(SUM(length(payload)),0) bytes FROM provider_cache WHERE expires>? GROUP BY provider',(now,)):
+        for r in conn.execute('SELECT provider,COUNT(*) n,COALESCE(SUM(length(payload)),0) bytes FROM provider_cache INDEXED BY provider_cache_stats WHERE expires>? GROUP BY provider',(now,)):
             cache[r['provider']]=(r['n'],r['bytes'])
         result.append(gauge('provider_daily_limit_enabled','Local rolling daily quota is enabled; remote rate limits always apply',[((),int(self.settings.provider_daily_limit>0))]))
         for name,help,fn in [('provider_requests_24h','Requests reserved in rolling 24h; gauge',lambda p:used.get(p,0)),('provider_budget_remaining','Remaining local rolling daily request budget; +Inf when disabled',lambda p:max(0,self.settings.provider_daily_limit-used.get(p,0)) if self.settings.provider_daily_limit else float('inf')),('provider_cooldown_seconds','Provider cooldown remaining',lambda p:cooldown.get(p,0)),('provider_cache_entries','Non-expired cache entries',lambda p:cache.get(p,(0,0))[0]),('provider_cache_bytes','Non-expired cache payload bytes',lambda p:cache.get(p,(0,0))[1])]:
@@ -117,7 +117,7 @@ class DatabaseCollector:
         result.append(gauge('recognition_budget_spent_calls','Fingerprint reservations shared across providers and batches',[((),recognition['spent'])]))
         formats=('mp3','flac','m4a','mp4','ogg','opus','wav','aiff','aac','webm','mka','wma','ape','wv','cue','dsf','dff','ac3','unknown')
         format_counts={}; statuses={}; youtube={}
-        for r in conn.execute("SELECT json_extract(metadata,'$.format') format,status,json_extract(metadata,'$.youtube.state') youtube,COUNT(*) n FROM tracks WHERE is_current=1 GROUP BY format,status,youtube"):
+        for r in conn.execute("SELECT json_extract(metadata,'$.format') format,status,json_extract(metadata,'$.youtube.state') youtube,COUNT(*) n FROM tracks INDEXED BY tracks_metrics WHERE is_current=1 GROUP BY format,status,youtube"):
             f=bounded(r['format'],formats);format_counts[f]=format_counts.get(f,0)+r['n']
             s=bounded(r['status'],('indexed','ready','published','needs_review','missing'));statuses[s]=statuses.get(s,0)+r['n']
             s=bounded(r['youtube'] or 'unknown',('unknown','recorded','owner_confirmed','candidates','conflict','unlinked'));youtube[s]=youtube.get(s,0)+r['n']
@@ -126,12 +126,12 @@ class DatabaseCollector:
           SUM(CASE WHEN length(COALESCE(json_extract(metadata,'$.lrc'),''))>0 THEN 1 ELSE 0 END) lrc,
           SUM(CASE WHEN json_type(metadata,'$.input_error')='object' THEN 1 ELSE 0 END) input_error,
           SUM(CASE WHEN json_extract(metadata,'$.write_supported') AND NOT COALESCE(json_extract(metadata,'$.cue_album_image'),0) THEN 1 ELSE 0 END) writable
-          FROM tracks WHERE is_current=1""").fetchone()
+          FROM tracks INDEXED BY tracks_metrics WHERE is_current=1""").fetchone()
         result.append(gauge('collection_features','Current file features',[((key,),quality[key] or 0) for key in quality.keys()],['feature']))
         sources={}
         for r in conn.execute("""SELECT json_extract(s.value,'$.provider') provider,json_extract(s.value,'$.state') state,COUNT(*) n
-          FROM analyses a JOIN tracks t ON t.id=a.track_id AND t.sha256=a.input_sha256 AND t.is_current=1,
-          json_each(a.payload,'$.sources') s GROUP BY provider,state"""):
+          FROM analysis_status a JOIN tracks t INDEXED BY tracks_metrics ON t.id=a.track_id AND t.sha256=a.input_sha256 AND t.is_current=1,
+          json_each(a.sources) s GROUP BY provider,state"""):
             p=bounded(r['provider'],PROVIDERS);s=bounded(r['state'],('fingerprint_match','no_match','candidates','provider_unavailable','provider_cooldown','rate_limited','budget_exhausted','provider_disabled','recognition_attempt_budget_exhausted','recognition_identity_required'))
             sources[p,s]=sources.get((p,s),0)+r['n']
         result.append(gauge('analysis_sources','Current revision analysis outcomes',[((p,s),n) for (p,s),n in sources.items()],['provider','state']))

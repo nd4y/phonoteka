@@ -59,8 +59,8 @@ def test_cleanup_releases_writer_between_batches_and_skips_unchanged_usage(clien
 
     monkeypatch.setattr(db, "transaction", observe_writes)
     assert policy.cleanup_cache(settings)["analyses_cleaned"] == 35
-    # Each changed analysis also atomically invalidates its small cleanup row.
-    assert sorted(count for count in writes if count) == [6, 32, 32]
+    # Each changed analysis updates its status and invalidates cleanup atomically.
+    assert sorted(count for count in writes if count) == [9, 48, 48]
     with db.connect(settings.db_path) as conn:
         rows = conn.execute("SELECT track_id,payload FROM analyses").fetchall()
         for row in rows:

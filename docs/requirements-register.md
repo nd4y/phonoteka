@@ -3118,3 +3118,8 @@ retaining prompt active/visibility updates. Replace repeated full policy sweeps 
 bounded changed/expiry work, preserving retention enforcement, restart and compatible rollback.
 Compare the same before/after workload on build-01, then verify exact-main CI and deployed st1.
 Do not change tracing.
+
+Для тех же обращений в простое сбор метрик должен читать компактные проекции задач и
+источников анализа и индекс длины кэша, сохраняя значения, метки, частоту и текущую ревизию.
+/ For the same idle read path, collect metrics from compact job/analysis-source projections
+and indexed cache length while preserving values, labels, scrape cadence and revision filtering.

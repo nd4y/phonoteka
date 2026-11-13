@@ -4,6 +4,8 @@ The job list reads a small public-status projection and a covering index of scal
 
 The interface polls status about every 30 seconds while idle and every four seconds during active work. Preparation uses 30 seconds while idle and five seconds while active. Hidden tabs pause recurring network requests; returning to a visible tab refreshes status. Starting work still refreshes immediately.
 
+The metrics collector uses the same job projection, a transactional analysis-source projection and an indexed cache-payload length. Scraping no longer decodes historical job inputs or full analysis responses. Metric names, labels, values, current-revision filtering, scrape cadence and tracing remain unchanged.
+
 Background policy cleanup uses a durable queue of changed records and retained-content expiry deadlines. Each batch examines at most 32 records and deletes at most 32 expired or disallowed response-cache entries. A backlog drains cooperatively between normal queue checks. Unchanged future records are not repeatedly decoded. Inserts, payload edits, policy changes and completion of running jobs invalidate their queue entries atomically. Restart retains pending work. Access and write-time rights checks remain synchronous; a queued cleanup never grants use of expired content. Explicit policy changes retain the full cleanup path.
 
 The status and cleanup tables are additive schema-2 extensions installed in the existing atomic initialization transaction. The base schema, version ledger and write barriers remain intact. Compatible older schema-2 writers can still update jobs and trigger invalidation after an image rollback; the extra indexes may remain. No tracing configuration or inference runtime changes are required.
