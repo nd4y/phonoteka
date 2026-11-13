@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, api, messageFor, requestId } from "./api";
 import type { Job } from "./types";
-import { preparationBatch, type EvidencePreparation } from "./preparationBatch";
+import {
+  preparationBatch,
+  preparationSelection,
+  selectedPreparationBatch,
+  setPreparationSelected,
+  type EvidencePreparation,
+  type PreparationSelection,
+} from "./preparationBatch";
 import { readPlanPage } from "./readPlanPage";
 import { preparationStopMessage } from "./jobs";
 import "./ConfirmedFieldsPanel.css";
@@ -85,6 +92,7 @@ export function ConfirmedFieldsPanel({
   const [error, setError] = useState(""),
     [notice, setNotice] = useState("");
   const [preparation, setPreparation] = useState<Preparation>({});
+  const [prepSelection, setPrepSelection] = useState<PreparationSelection | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [reconcileNeeded, setReconcileNeeded] = useState(false);
   const reconcileKey = useRef("");
@@ -136,6 +144,7 @@ export function ConfirmedFieldsPanel({
     setNotice("");
     setItems([]);
     setSelected(new Set());
+    setPrepSelection(null);
     setVisible(30);
     setProgress({ scanned: 0, total: 0 });
     keys.current.clear();
@@ -169,6 +178,7 @@ export function ConfirmedFieldsPanel({
       if (version !== serial.current) return;
       setItems(collected);
       setSelected(new Set(collected.filter((i) => i.ready).map((i) => i.track_id)));
+      setPrepSelection(preparationSelection(collected));
       setComplete(!cancelled.current && !after);
       if (cancelled.current)
         setNotice("Проверка остановлена. Для записи нужен полный актуальный план.");
@@ -187,9 +197,17 @@ export function ConfirmedFieldsPanel({
   }
 
   async function prepare() {
-    if (lock.current || preparing || rootProblem || preparation.state === "active" || !complete)
+    if (
+      lock.current ||
+      busy ||
+      scanning ||
+      preparing ||
+      rootProblem ||
+      preparation.state === "active" ||
+      !complete
+    )
       return;
-    const chosen = preparationBatch(items);
+    const chosen = selectedPreparationBatch(items, prepSelection);
     if (!chosen.length) return;
     lock.current = true;
     setPreparing(true);
@@ -314,6 +332,9 @@ export function ConfirmedFieldsPanel({
 
   const ready = items.filter((i) => i.ready);
   const nextBatch = preparationBatch(items);
+  const chosenPreparation = selectedPreparationBatch(items, prepSelection);
+  const chosenPreparationIds = new Set(chosenPreparation.map((i) => i.track_id));
+  const preparationPending = busy || preparing || scanning || preparation.state === "active";
   const stoppedMessage =
     preparation.state === "stopped" ? preparationStopMessage(preparation.reason) : "";
   const pending = new Map<string, { field: string; message: string; count: number }>();
@@ -436,41 +457,74 @@ export function ConfirmedFieldsPanel({
             <div className="confirmed-preparation">
               <h4>Подготовить недостающие данные</h4>
               <p className="muted small">
-                {nextBatch[0].preparation?.kind === "analyze"
-                  ? "Сначала уточним источники по уже найденным отпечаткам."
-                  : nextBatch[0].preparation?.fingerprint_requests_remaining === 0
-                    ? "Новые запросы распознавания недоступны. Проверим пригодный к повторному использованию кэш; лимит не сбрасывается."
-                    : "Проверим аудио в пределах оставшегося бюджета распознавания."}
+                {!chosenPreparation.length
+                  ? "Ничего не выбрано. Отметьте записи для подготовки в списке ниже."
+                  : chosenPreparation[0].preparation?.kind === "analyze"
+                    ? "Сначала уточним источники по уже найденным отпечаткам."
+                    : chosenPreparation[0].preparation?.fingerprint_requests_remaining === 0
+                      ? "Новые запросы распознавания недоступны. Проверим пригодный к повторному использованию кэш; лимит не сбрасывается."
+                      : "Проверим аудио в пределах оставшегося бюджета распознавания."}
               </p>
-              {nextBatch.some((i) => i.preparation?.fingerprint_requests_remaining === 0) &&
-                nextBatch.some((i) => i.preparation?.fingerprint_requests_remaining !== 0) && (
+              {chosenPreparation.some((i) => i.preparation?.fingerprint_requests_remaining === 0) &&
+                chosenPreparation.some(
+                  (i) => i.preparation?.fingerprint_requests_remaining !== 0,
+                ) && (
                   <p className="muted small">
                     Записи без оставшегося бюджета в этой партии проверяются только по кэшу. Лимит
                     запросов не сбрасывается.
                   </p>
                 )}
               <p>
-                Проверим выбранные файлы и повторим поиск там, где не хватает доказательств. Миксы,
-                разговорные записи, спорные совпадения и занятые файлы пропускаются. Автоматической
-                записи нет.
+                Проверим только отмеченные файлы и повторим поиск там, где не хватает доказательств.
+                Результаты останутся на проверке. Автоматической записи нет.
+              </p>
+              <p className="muted small">
+                Выбрано: {chosenPreparation.length} из {nextBatch.length}. Снимите отметку с микса,
+                разговорной или другой ненужной записи. Это выбор только для текущей подготовки;
+                классификация файлов не меняется.
               </p>
               <button
                 className="button secondary"
-                disabled={busy || preparing || !!rootProblem || preparation.state === "active"}
+                disabled={preparationPending || !!rootProblem || !chosenPreparation.length}
                 onClick={() => void prepare()}
               >
-                Подготовить данные · {nextBatch.length}
+                Подготовить данные · {chosenPreparation.length}
               </button>
               <details>
-                <summary>Какие записи войдут в ближайшую партию</summary>
-                <ul>
+                <summary>Выбрать записи для подготовки</summary>
+                <p className="muted small">
+                  Снятые отметки не заменяют записи другими. Новый план снова выбирает все записи
+                  своей ближайшей партии.
+                </p>
+                <ul className="confirmed-preparation-list">
                   {nextBatch.map((i) => (
                     <li key={i.track_id}>
+                      <label className="confirmed-choice">
+                        <input
+                          type="checkbox"
+                          aria-label={`Подготовить запись ${i.title || i.relative_path} · ${i.relative_path}`}
+                          aria-describedby={`confirmed-preparation-${i.track_id}`}
+                          disabled={preparationPending}
+                          checked={chosenPreparationIds.has(i.track_id)}
+                          onChange={(e) => {
+                            const checked = e.currentTarget.checked;
+                            setPrepSelection((old) =>
+                              setPreparationSelected(items, old, i.track_id, checked),
+                            );
+                          }}
+                        />
+                        <strong>{i.title || i.relative_path}</strong>
+                        {i.artist && <span>{i.artist}</span>}
+                      </label>
+                      <p
+                        id={`confirmed-preparation-${i.track_id}`}
+                        className="muted small confirmed-path"
+                      >
+                        {i.relative_path} - {i.preparation!.reason}
+                      </p>
                       <button className="button subtle" onClick={() => onOpen(i.track_id)}>
-                        {i.title || i.relative_path}
-                      </button>{" "}
-                      {i.artist ? ` · ${i.artist}` : ""} · {i.relative_path} -{" "}
-                      {i.preparation!.reason}
+                        Открыть запись
+                      </button>
                     </li>
                   ))}
                 </ul>

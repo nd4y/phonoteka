@@ -4,6 +4,10 @@ Preparation packs up to 50 records of one processing kind. A small group of new 
 does not postpone the existing cache backlog: cache checks fill the remaining slots with unchanged
 per-record limits. [Preparation order](docs/en/confirmed-fields.md).
 
+Before starting, clear individual records in the next batch, such as mixes or speech.
+Unchecked records are not replaced with other entries; a fresh plan resets this temporary
+choice. File classification and review rules remain unchanged.
+
 If changed data stops preparation before search, refresh the plan. After checking the saved history,
 the application can offer one fresh pass with new file-stability checks. Cancelled preparations,
 started searches and uncertain request outcomes are not replayed.
