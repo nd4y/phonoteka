@@ -80,9 +80,12 @@ def test_compatible_extension_seeds_legacy_and_old_v2_writes(tmp_path):
         db.verify_schema(conn)
         assert json.loads(conn.execute('SELECT public_payload FROM job_status').fetchone()[0])['pause_requested'] is True
         assert json.loads(conn.execute('SELECT sources FROM analysis_status').fetchone()[0]) == [{'provider':'lrclib','state':'candidates'}]
+        assert conn.execute('SELECT id FROM track_status').fetchone()[0] == 'legacy-track'
         conn.execute('UPDATE jobs SET payload=? WHERE id=?', ('{"pause_requested":false}', 'legacy'))
+        conn.execute('UPDATE tracks SET metadata=? WHERE id=?', ('{"format":"flac"}', 'legacy-track'))
     db.initialize(path)
     assert json.loads(db.fetchone(path, 'SELECT public_payload FROM job_status')['public_payload'])['pause_requested'] is False
+    assert db.fetchone(path, 'SELECT format FROM track_status')['format'] == 'flac'
 
 
 def test_cleanup_processes_due_changes_once_and_keeps_expiry(client, settings, monkeypatch):
@@ -201,7 +204,8 @@ def test_metrics_use_compact_status_and_preserve_current_revision_and_cache_leng
         conn.execute('INSERT INTO provider_cache VALUES(?,?,?,?)', ('unicode', 'musicbrainz', 'ю' * 1000, 1900000000))
     with db.connect(settings.db_path) as conn:
         def authorize(action, table, column, *_):
-            return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table in {'jobs','analyses'} and column == 'payload' else sqlite3.SQLITE_OK
+            forbidden = table in {'jobs','analyses'} and column == 'payload' or table == 'tracks' and column == 'metadata'
+            return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and forbidden else sqlite3.SQLITE_OK
         conn.set_authorizer(authorize)
         values = metric_values(conn, settings)
     source = ('phonoteka_analysis_sources', (('provider','lrclib'), ('state','candidates')))
@@ -217,10 +221,26 @@ def test_metrics_use_compact_status_and_preserve_current_revision_and_cache_leng
         assert values[('phonoteka_analysis_sources', (('provider','lrclib'), ('state','no_match')))] == 1
         conn.execute('DELETE FROM analyses WHERE track_id=?', (track_id,))
         assert not conn.execute('SELECT 1 FROM analysis_status WHERE track_id=?', (track_id,)).fetchone()
+        conn.execute('UPDATE tracks SET metadata=?,status=? WHERE id=?', (db.encode({'format':'flac','has_art':True,'lrc':'[00:01]fixture','input_error':{},'write_supported':True}), 'ready', track_id))
+        values = metric_values(conn, settings)
+        assert values[('phonoteka_collection_formats', (('format','flac'),))] == 1
+        for feature in ('cover','lrc','input_error','writable'):
+            assert values[('phonoteka_collection_features', (('feature',feature),))] == 1
+        conn.execute('UPDATE tracks SET is_current=0 WHERE id=?', (track_id,))
+        assert metric_values(conn, settings)[('phonoteka_collection_files', ())] == 0
+        conn.execute('UPDATE tracks SET is_current=1 WHERE id=?', (track_id,))
+        conn.execute('DELETE FROM tracks WHERE id=?', (track_id,))
+        assert not conn.execute('SELECT 1 FROM track_status WHERE id=?', (track_id,)).fetchone()
 
 
 def test_analysis_projection_rolls_back_and_cannot_bypass_schema_guard(client, settings):
     track_id, revision = seed(settings)
+    before = db.fetchone(settings.db_path, 'SELECT * FROM track_status WHERE id=?', (track_id,))
+    with pytest.raises(RuntimeError):
+        with db.transaction(settings.db_path) as conn:
+            conn.execute('UPDATE tracks SET metadata=? WHERE id=?', ('{"format":"flac"}', track_id))
+            raise RuntimeError('rollback')
+    assert db.fetchone(settings.db_path, 'SELECT * FROM track_status WHERE id=?', (track_id,)) == before
     with pytest.raises(RuntimeError):
         with db.transaction(settings.db_path) as conn:
             conn.execute('INSERT INTO analyses VALUES(?,?,?,?)', (track_id, revision, '{"sources":[]}', db.utcnow()))
@@ -231,3 +251,5 @@ def test_analysis_projection_rolls_back_and_cannot_bypass_schema_guard(client, s
         conn.create_function('phonoteka_schema_version', 0, lambda: 1)
         with pytest.raises(sqlite3.IntegrityError, match='schema_write_guard'):
             conn.execute('DELETE FROM analysis_status')
+        with pytest.raises(sqlite3.IntegrityError, match='schema_write_guard'):
+            conn.execute('DELETE FROM track_status')

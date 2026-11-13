@@ -3120,6 +3120,8 @@ Compare the same before/after workload on build-01, then verify exact-main CI an
 Do not change tracing.
 
 Для тех же обращений в простое сбор метрик должен читать компактные проекции задач и
-источников анализа и индекс длины кэша, сохраняя значения, метки, частоту и текущую ревизию.
-/ For the same idle read path, collect metrics from compact job/analysis-source projections
-and indexed cache length while preserving values, labels, scrape cadence and revision filtering.
+источников анализа, статистики файлов и индекс длины кэша, сохраняя значения, метки, частоту
+и текущую ревизию. Не зависеть от плана JSON-выражений разных версий SQLite.
+/ For the same idle read path, collect metrics from compact job, analysis-source and file-statistics
+projections and indexed cache length while preserving values, labels, scrape cadence and revision
+filtering. Avoid relying on JSON expression plans across SQLite versions.

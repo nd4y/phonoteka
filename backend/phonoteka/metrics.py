@@ -117,25 +117,23 @@ class DatabaseCollector:
         result.append(gauge('recognition_budget_spent_calls','Fingerprint reservations shared across providers and batches',[((),recognition['spent'])]))
         formats=('mp3','flac','m4a','mp4','ogg','opus','wav','aiff','aac','webm','mka','wma','ape','wv','cue','dsf','dff','ac3','unknown')
         format_counts={}; statuses={}; youtube={}
-        # Materialize only projected scalars before GROUP BY. SQLite otherwise
-        # defers JSON evaluation and copies the full metadata into its sorter.
-        for r in conn.execute("""WITH features AS MATERIALIZED (
-          SELECT json_extract(metadata,'$.format') format,status,json_extract(metadata,'$.youtube.state') youtube
-          FROM tracks INDEXED BY tracks_metrics WHERE is_current=1)
-          SELECT format,status,youtube,COUNT(*) n FROM features GROUP BY format,status,youtube"""):
+        if conn.execute('SELECT 1 FROM track_status WHERE is_current=1 AND valid_json=0 LIMIT 1').fetchone():
+            raise ValueError('Invalid current track metadata')
+        # Stored scalars avoid planner-dependent JSON reads on older SQLite.
+        for r in conn.execute('SELECT format,status,youtube,COUNT(*) n FROM track_status WHERE is_current=1 GROUP BY format,status,youtube'):
             f=bounded(r['format'],formats);format_counts[f]=format_counts.get(f,0)+r['n']
             s=bounded(r['status'],('indexed','ready','published','needs_review','missing'));statuses[s]=statuses.get(s,0)+r['n']
             s=bounded(r['youtube'] or 'unknown',('unknown','recorded','owner_confirmed','candidates','conflict','unlinked'));youtube[s]=youtube.get(s,0)+r['n']
         result += [gauge('collection_files','Current catalogue entries',[((),sum(statuses.values()))]),gauge('collection_formats','Current formats',[((k,),v) for k,v in format_counts.items()],['format']),gauge('collection_states','Current catalogue states',[((k,),v) for k,v in statuses.items()],['state']),gauge('youtube_links','Current YouTube provenance states',[((k,),youtube.get(k,0)) for k in ('unknown','recorded','owner_confirmed','candidates','conflict','unlinked')],['state'])]
-        quality=conn.execute("""SELECT SUM(CASE WHEN json_extract(metadata,'$.has_art') THEN 1 ELSE 0 END) cover,
-          SUM(CASE WHEN length(COALESCE(json_extract(metadata,'$.lrc'),''))>0 THEN 1 ELSE 0 END) lrc,
-          SUM(CASE WHEN json_type(metadata,'$.input_error')='object' THEN 1 ELSE 0 END) input_error,
-          SUM(CASE WHEN json_extract(metadata,'$.write_supported') AND NOT COALESCE(json_extract(metadata,'$.cue_album_image'),0) THEN 1 ELSE 0 END) writable
-          FROM tracks INDEXED BY tracks_metrics WHERE is_current=1""").fetchone()
+        quality=conn.execute("""SELECT SUM(CASE WHEN has_art THEN 1 ELSE 0 END) cover,
+          SUM(CASE WHEN lrc_length>0 THEN 1 ELSE 0 END) lrc,
+          SUM(CASE WHEN input_error='object' THEN 1 ELSE 0 END) input_error,
+          SUM(CASE WHEN write_supported AND NOT cue_album_image THEN 1 ELSE 0 END) writable
+          FROM track_status WHERE is_current=1""").fetchone()
         result.append(gauge('collection_features','Current file features',[((key,),quality[key] or 0) for key in quality.keys()],['feature']))
         sources={}
         for r in conn.execute("""SELECT json_extract(s.value,'$.provider') provider,json_extract(s.value,'$.state') state,COUNT(*) n
-          FROM analysis_status a JOIN tracks t INDEXED BY tracks_metrics ON t.id=a.track_id AND t.sha256=a.input_sha256 AND t.is_current=1,
+          FROM analysis_status a JOIN track_status t ON t.id=a.track_id AND t.sha256=a.input_sha256 AND t.is_current=1,
           json_each(a.sources) s GROUP BY provider,state"""):
             p=bounded(r['provider'],PROVIDERS);s=bounded(r['state'],('fingerprint_match','no_match','candidates','provider_unavailable','provider_cooldown','rate_limited','budget_exhausted','provider_disabled','recognition_attempt_budget_exhausted','recognition_identity_required'))
             sources[p,s]=sources.get((p,s),0)+r['n']
