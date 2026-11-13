@@ -11,6 +11,7 @@ import {
 } from "./preparationBatch";
 import { readPlanPage } from "./readPlanPage";
 import { preparationStopMessage } from "./jobs";
+import { startPreparationPolling } from "./preparationPolling";
 import "./ConfirmedFieldsPanel.css";
 
 type Change = {
@@ -99,27 +100,21 @@ export function ConfirmedFieldsPanel({
   const rootProblem = reconcileNeeded || preparation.root_reconciliation_required;
   const prepKey = useRef({ body: "", key: "" });
   const prepVersion = useRef(0);
+  const prepActive = preparation.state === "active";
   useEffect(() => {
     let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    async function poll() {
+    const stop = startPreparationPolling(async (signal) => {
       const version = prepVersion.current;
-      try {
-        const value = await api<Preparation>("/metadata-preparation");
-        if (!disposed) {
-          if (version === prepVersion.current) setPreparation(value);
-          timer = setTimeout(() => void poll(), 5000);
-        }
-      } catch {
-        if (!disposed) timer = setTimeout(() => void poll(), 10000);
+      const value = await api<Preparation>("/metadata-preparation", { signal });
+      if (!disposed && version === prepVersion.current) {
+        setPreparation(value);
       }
-    }
-    void poll();
+    }, prepActive);
     return () => {
       disposed = true;
-      clearTimeout(timer);
+      stop();
     };
-  }, []);
+  }, [prepActive]);
   const serial = useRef(0),
     cancelled = useRef(false),
     lock = useRef(false);
@@ -225,6 +220,7 @@ export function ConfirmedFieldsPanel({
       prepVersion.current++;
       setPreparation(value);
       setComplete(false);
+      onRefresh();
     } catch (err) {
       if (err instanceof ApiError && err.code === "root_identity_changed") setReconcileNeeded(true);
       setError(messageFor(err));

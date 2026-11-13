@@ -3103,3 +3103,18 @@ on a fresh plan and preserve every existing server admission and acceptance rule
 blocks; retain genuine complete-identity conflicts. Malformed recording-recheck evidence must
 leave classification unchanged instead of raising or unlocking it. Preserve owner decisions,
 acceptance thresholds, budgets and tracing; verify native regressions, CI and installed behavior.
+
+2026-11-13: Устранить лишний ввод-вывод в простое. Частый список задач не должен читать
+и сортировать замороженные payload. Проекция состояния обновляется атомарно и сохраняет
+пагинацию, активный порядок, авторизацию, отмену и подсказки восстановления. В простое
+уменьшить частоту сетевого опроса; при запуске, активной работе и возвращении во вкладку
+сохранять своевременное обновление. Полный фоновый обход заменить постоянной очередью
+изменённых/истекающих записей с ограниченными партиями, сохранением срока и запрета
+использования истёкшего контента, перезапуска и совместимого отката. Проверить одинаковую
+нагрузку до/после на build-01, CI main и установленный st1. Трейсинг не менять.
+/ Remove idle job-payload reads/sorts using atomic public-state projection; preserve pagination,
+active order, authorization, cancellation and recovery hints. Back off idle network polling while
+retaining prompt active/visibility updates. Replace repeated full policy sweeps with durable
+bounded changed/expiry work, preserving retention enforcement, restart and compatible rollback.
+Compare the same before/after workload on build-01, then verify exact-main CI and deployed st1.
+Do not change tracing.

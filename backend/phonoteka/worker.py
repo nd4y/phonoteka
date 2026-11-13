@@ -1380,7 +1380,7 @@ class Worker:
             self.state = "idle"
             await asyncio.to_thread(self.heartbeat)
             heartbeat_task = asyncio.create_task(self.heartbeats())
-            next_schedule=0
+            next_schedule=next_cleanup=0
             try:
                 while not self.stopping:
                     if heartbeat_task.done():
@@ -1388,8 +1388,10 @@ class Worker:
                         # silently losing the heartbeat task permanently.
                         heartbeat_task.result()
                     try:
+                        if time.monotonic()>=next_cleanup:
+                            cleaned = await self.io(provider_policy.cleanup_batch,self.settings)
+                            next_cleanup=time.monotonic()+(.5 if cleaned['pending'] else 30)
                         if time.monotonic()>=next_schedule:
-                            await self.io(provider_policy.cleanup_cache,self.settings)
                             from . import provider_attempts
                             await self.io(provider_attempts.recover_stale,self.settings)
                             await self.io(scheduling.tick,self.settings)

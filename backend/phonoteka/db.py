@@ -87,16 +87,20 @@ def initialize(path: Path, *, settings=None) -> None:
             raise RuntimeError("Unsupported database schema; compatible image required")
         if version==SCHEMA_VERSION:
             verify_schema(db)
-            # The v2 base and its ledger checksum are immutable. Add tracing as
-            # an atomic extension, retaining the write barriers used by v2 images.
+            # The v2 base and its ledger checksum are immutable. Compatible
+            # extensions retain the write barriers used by v2 images.
             db.execute('BEGIN IMMEDIATE')
             create_trace_schema(db)
+            from .idle_schema import install
+            install(db)
             install_schema_guard(db, SCHEMA_VERSION, None)
             db.commit()
             return
         db.execute('BEGIN IMMEDIATE')
         create_base_schema(db)
         create_trace_schema(db)
+        from .idle_schema import install
+        install(db)
         install_schema_guard(db,0,None)
         db.execute('PRAGMA user_version=2')
         db.commit()

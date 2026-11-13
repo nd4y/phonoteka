@@ -1,5 +1,10 @@
 # phonoteka
 
+Idle status polling is less frequent, and the job list reads a small projection
+instead of frozen inputs. Background cleanup checks changed or expiring records
+in bounded batches while preserving rights and retention checks.
+[Idle disk activity](docs/en/idle-io.md).
+
 Incomplete fingerprint titles or artists have a separate reason instead of a recording-conflict
 message. They remain ineligible for automatic preparation and writes. Malformed recheck evidence
 keeps automatic classification blocked.
