@@ -3,6 +3,8 @@
 Idle status polling is less frequent, and the job list reads a small projection
 instead of frozen inputs. Background cleanup checks changed or expiring records
 in bounded batches while preserving rights and retention checks.
+Service-setting prefix lookups use an index, and already cleaned records with
+zero retention stay parked until their inputs or policy change.
 [Idle disk activity](docs/en/idle-io.md).
 
 Incomplete fingerprint titles or artists have a separate reason instead of a recording-conflict

@@ -42,6 +42,9 @@ def install(conn):
     conn.execute('CREATE INDEX IF NOT EXISTS provider_cache_expiry ON provider_cache(expires)')
     conn.execute('CREATE INDEX IF NOT EXISTS provider_cache_provider ON provider_cache(provider)')
     conn.execute('CREATE INDEX IF NOT EXISTS job_items_status ON job_items(job_id,state)')
+    # LIKE uses ASCII case-insensitivity by default. Filter keys in this small
+    # index before loading unrelated values, preserving existing predicates.
+    conn.execute('CREATE INDEX IF NOT EXISTS settings_prefix ON settings(key COLLATE NOCASE)')
     # Scalar columns after payload can still traverse its SQLite overflow pages.
     # Keep the complete list-page projection in a small covering index instead.
     conn.execute('CREATE INDEX IF NOT EXISTS jobs_status_cover ON jobs(id,kind,state,stage,total,completed,failed,cancel_requested,created_at,updated_at,error)')
