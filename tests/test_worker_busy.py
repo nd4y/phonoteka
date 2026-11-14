@@ -145,7 +145,6 @@ def test_busy_commit_progress_keeps_final_publication_guard(settings, monkeypatc
 @pytest.mark.skipif(sys.platform != 'linux', reason='Durable publication requires Linux')
 @pytest.mark.parametrize('blocked_state', ['running', 'succeeded'])
 def test_busy_publication_checkpoint_retries_without_copying_twice(settings, monkeypatch, blocked_state):
-    short_busy_timeout(monkeypatch)
     cfg = replace(settings, read_only=False, storage_verified=True, file_workers=2)
     paths = [synthetic(cfg, ext) for ext in ('flac', 'mp3')]
     versions = {path.name: media.sha256_file(path) for path in paths}
@@ -162,6 +161,9 @@ def test_busy_publication_checkpoint_retries_without_copying_twice(settings, mon
             identity = job(client, owner, 'publish', track_ids)['id']
             save = worker.item_result
             attempts = []
+
+            # Fault injection targets publication, not its two-file scan setup.
+            short_busy_timeout(monkeypatch)
 
             def contended(job_id, key, state, result):
                 if key == track_ids[0] and state == blocked_state:
@@ -182,6 +184,26 @@ def test_busy_publication_checkpoint_retries_without_copying_twice(settings, mon
             for path in paths:
                 assert media.sha256_file(path) == versions[path.name]
                 assert media.sha256_file(cfg.publication_root / 'Ready' / path.name) == versions[path.name]
+    finally:
+        worker.pool.shutdown()
+
+
+def test_claim_observes_fatal_stop_after_lane_finishes(settings):
+    worker = Worker(settings)
+    try:
+        with TestClient(create_app(settings), base_url=settings.app_url) as client:
+            owner = authenticated(client, settings)
+            identity = job(client, owner, 'scan')['id']
+
+            class FinishedLane:
+                def done(self):
+                    worker.stopping = True
+                    return True
+
+            worker.normal_task = FinishedLane()
+            assert worker.claim_job() is None
+            assert db.fetchone(settings.db_path, 'SELECT state FROM jobs WHERE id=?', (identity,))['state'] == 'queued'
+            assert not db.fetchone(settings.db_path, "SELECT 1 FROM events WHERE kind='job_started'")
     finally:
         worker.pool.shutdown()
 

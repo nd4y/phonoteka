@@ -6,6 +6,7 @@ Neither a timeout nor a process restart can return the reserved call allowance.
 from contextlib import contextmanager
 from contextvars import ContextVar
 import json
+import math
 import re
 import time
 import uuid
@@ -67,16 +68,36 @@ def unknown_in_request():
 
 
 def _maintain(conn,now,force=False):
+    # Forced recovery still observes every dirty or due ledger. Unchanged
+    # terminal history cannot become stale before its next persisted deadline.
+    schedule=conn.execute('SELECT due FROM attempt_sweep_schedule WHERE singleton=1').fetchone()
+    if schedule and (schedule['due'] is None or schedule['due']>now):return
     row=conn.execute("SELECT value FROM settings WHERE key='provider_attempt_sweep_at'").fetchone()
     if not force and row and now<float(row[0])+60:return
+    deadlines=[]
     for row in conn.execute("SELECT key,value FROM settings WHERE key LIKE 'provider_attempt:%'").fetchall():
         value=json.loads(row['value'])
-        if value['state'] in {'reserved','sent'} and value['reserved_at']+STALE_SECONDS<now:
-            value.update(state='unknown_outcome',code='executor_lost',finished_at=now)
-            conn.execute('UPDATE settings SET value=? WHERE key=?',(db.encode(value),row['key']))
-        elif value['state'] not in {'reserved','sent'} and value.get('finished_at',now)+RETENTION_SECONDS<now:
-            conn.execute('DELETE FROM settings WHERE key=?',(row['key'],))
+        if value['state'] in {'reserved','sent'}:
+            deadline=value['reserved_at']+STALE_SECONDS
+            if deadline<now:
+                value.update(state='unknown_outcome',code='executor_lost',finished_at=now)
+                conn.execute('UPDATE settings SET value=? WHERE key=?',(db.encode(value),row['key']))
+                deadline=now+RETENTION_SECONDS
+        else:
+            # Missing finished_at never expired in the original sweep; a later
+            # payload edit still invalidates this parked record atomically.
+            if 'finished_at' not in value:continue
+            deadline=value['finished_at']+RETENTION_SECONDS
+            if deadline<now:
+                conn.execute('DELETE FROM settings WHERE key=?',(row['key'],))
+                continue
+        try:
+            if math.isfinite(deadline):deadlines.append(float(deadline))
+        except OverflowError:
+            pass  # An unbounded positive timestamp cannot expire at a finite clock.
     conn.execute("INSERT OR REPLACE INTO settings VALUES('provider_attempt_sweep_at',?)",(str(now),))
+    # Source-row invalidation and the new deadline share the writer transaction.
+    conn.execute('UPDATE attempt_sweep_schedule SET due=? WHERE singleton=1',(min(deadlines) if deadlines else None,))
 
 
 def recover_stale(settings,now=None):

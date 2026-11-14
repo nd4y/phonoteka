@@ -45,6 +45,15 @@ def install(conn):
     # LIKE uses ASCII case-insensitivity by default. Filter keys in this small
     # index before loading unrelated values, preserving existing predicates.
     conn.execute('CREATE INDEX IF NOT EXISTS settings_prefix ON settings(key COLLATE NOCASE)')
+    conn.execute('CREATE TABLE IF NOT EXISTS attempt_sweep_schedule (singleton INTEGER PRIMARY KEY CHECK(singleton=1), due REAL)')
+    conn.execute('INSERT OR IGNORE INTO attempt_sweep_schedule VALUES(1,0)')
+    for event, name, condition in (
+        ('INSERT', 'insert', "NEW.key LIKE 'provider_attempt:%'"),
+        ('UPDATE OF key,value', 'update', "(NEW.key LIKE 'provider_attempt:%' OR OLD.key LIKE 'provider_attempt:%') AND (NEW.key IS NOT OLD.key OR NEW.value IS NOT OLD.value)"),
+        ('DELETE', 'delete', "OLD.key LIKE 'provider_attempt:%'"),
+    ):
+        conn.execute(f'''CREATE TRIGGER IF NOT EXISTS attempt_sweep_settings_{name} AFTER {event} ON settings
+            WHEN {condition} BEGIN UPDATE attempt_sweep_schedule SET due=0 WHERE singleton=1; END''')
     # Scalar columns after payload can still traverse its SQLite overflow pages.
     # Keep the complete list-page projection in a small covering index instead.
     conn.execute('CREATE INDEX IF NOT EXISTS jobs_status_cover ON jobs(id,kind,state,stage,total,completed,failed,cancel_requested,created_at,updated_at,error)')

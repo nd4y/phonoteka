@@ -164,6 +164,7 @@ class Worker:
             await asyncio.sleep(delay)
 
     def claim_job(self):
+        if self.stopping:return None
         with db.transaction(self.settings.db_path) as conn:
             # Rotate a bounded projection through queued/paused jobs, including
             # provider waits not yet due. Expired grants cannot stay silently
@@ -178,6 +179,9 @@ class Worker:
                 if reason:automation.wait_for_authorization(conn,control['id'],reason)
             busy = bool(self.inference_task and not self.inference_task.done())
             ordinary_busy = bool(self.normal_task and not self.normal_task.done())
+            # A fatal mutation may finish while this threaded claim is waiting.
+            # Observe its stop flag after sampling the completed lane.
+            if self.stopping:return None
             for _ in range(64):
                 row = conn.execute("SELECT * FROM jobs WHERE state='queued' AND COALESCE(json_extract(payload,'$.retry_at'),0)<=? AND (?=0 OR kind NOT IN ('transcribe','align')) AND (?=0 OR kind IN ('transcribe','align')) ORDER BY created_at,rowid LIMIT 1",(time.time(),int(busy),int(ordinary_busy))).fetchone()
                 if not row:return None
@@ -1376,6 +1380,9 @@ class Worker:
             verify_storage(self.settings)
             if self.settings.writable:
                 stack.enter_context(media.writer_guard(self.settings.storage_guard_dir, self.settings.instance_id))
+            # Keep WAL/SHM alive between short polls without holding a read
+            # transaction. Close/checkpoint before releasing the storage guards.
+            stack.enter_context(db.connect(self.settings.db_path))
             await self.io(self.recover_jobs)
             self.state = "idle"
             await asyncio.to_thread(self.heartbeat)
