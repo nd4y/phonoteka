@@ -5,6 +5,8 @@ instead of frozen inputs. Background cleanup checks changed or expiring records
 in bounded batches while preserving rights and retention checks.
 Service-setting prefix lookups use an index, and already cleaned records with
 zero retention stay parked until their inputs or policy change.
+Attempt-ledger maintenance also waits for a changed record or its next stale/retention
+deadline, instead of decoding unchanged terminal history every queue check.
 [Idle disk activity](docs/en/idle-io.md).
 
 Incomplete fingerprint titles or artists have a separate reason instead of a recording-conflict

@@ -3125,3 +3125,18 @@ Do not change tracing.
 / For the same idle read path, collect metrics from compact job, analysis-source, file-statistics
 and cache-length projections while preserving values, labels, scrape cadence and revision
 filtering. Avoid relying on JSON expression plans across SQLite versions.
+
+2026-11-14: Та же оптимизация простоя распространяется на журнал HTTP-попыток.
+Не перечитывать неизменённую завершённую историю до ближайшего срока, атомарно
+сбрасывать сохранённый срок при изменении журнала. Сохранить пороги 180 секунд,
+30 дней и допуск раз в 60 секунд, обработку неизвестных исходов и потраченные лимиты.
+При обязательных проверках устранить гонку: завершение аварийной операции записи
+не должно позволять уже ожидающему опросу захватить следующую задачу после остановки.
+/ The same idle optimization covers the HTTP-attempt ledger: retain a durable next
+deadline and invalidate it atomically on ledger edits. Preserve the 180-second,
+30-day and 60-second rules, unknown outcomes and spent allowances. Mandatory safety
+checks also prevent a threaded claim from overtaking a fatal mutation stop.
+
+Соединение без активной транзакции сохраняет жизненный цикл WAL/SHM между опросами;
+оно закрывается до снятия защиты хранилища. / An idle connection retains WAL/SHM
+between polls and closes before storage guards are released.
