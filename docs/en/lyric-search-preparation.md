@@ -6,6 +6,12 @@ older file revision. Use **Check collection**, inspect the selected records, and
 start **Prepare data**. The reason beside each song explains this metadata-only
 lookup. Preparation remains limited to 50 selected records per run.
 
+New lyric-only runs query LRCLIB directly. They do not wait for MusicBrainz,
+artwork or optional catalog services when tags and artwork are already present.
+Existing evidence for the same file revision keeps its original permissions and
+expiry; a lyric lookup does not refresh it. In-progress older runs retain their
+original scope and receipts. LRCLIB errors still use the normal paced retry.
+
 This path uses the existing catalog search and its provider permissions, quotas,
 cooldowns and authorization checks. It sends no new audio fingerprints and never
 resets a spent recognition allowance. Existing preparation receipts, including

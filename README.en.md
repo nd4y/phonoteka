@@ -2,7 +2,8 @@
 
 Preparation also finds songs whose only remaining gap is a stale lyric search.
 It refreshes catalog data without new audio fingerprints; resulting lyrics stay
-on review. [Refreshing lyric searches](docs/en/lyric-search-preparation.md).
+on review. New lyric-only preparation queries LRCLIB without waiting for unrelated
+metadata services. [Refreshing lyric searches](docs/en/lyric-search-preparation.md).
 
 Idle status polling is less frequent, and the job list reads a small projection
 instead of frozen inputs. Background cleanup checks changed or expiring records

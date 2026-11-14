@@ -54,8 +54,9 @@ def test_refresh_keeps_expended_allowance_and_audio_and_new_words_need_review(li
     seen = []
     before = db.fetchall(cfg.db_path, "SELECT key,value FROM settings WHERE key GLOB 'recognition_usage:*'")
     writes = db.fetchone(cfg.db_path, "SELECT count(*) AS n FROM jobs WHERE kind IN ('apply','publish')")['n']
-    async def search(self, job, item):
+    async def search(self, job, item, *, lyrics_only=False):
         assert job['kind'] == 'analyze'
+        assert lyrics_only is True
         seen.append(item['track_id'])
         with db.transaction(cfg.db_path) as conn:
             data = provider_policy.prepare_analysis(conn, {'candidates': [lyrics()], 'sources': []})
@@ -100,7 +101,7 @@ def test_existing_receipts_never_become_replay_permissions(library, previous_kin
 @pytest.mark.parametrize('stop', ['cancel', 'failure'])
 def test_new_refresh_cannot_repeat_after_cancel_or_failed_search(library, monkeypatch, stop):
     cfg, client, headers, tid, sha, path = lyric_only(library)
-    async def failed(self, job, item):
+    async def failed(self, job, item, *, lyrics_only=False):
         raise media.MediaError('provider_unavailable', 'Synthetic metadata lookup failure')
     monkeypatch.setattr(Worker, 'analyze_item', failed)
     value = entry(client)

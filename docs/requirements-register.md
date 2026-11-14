@@ -3163,3 +3163,21 @@ words or timings automatically. Preserve existing receipts, unknown outcomes,
 source pauses, quotas, permission checks, current drafts and locked content.
 Verify native admission and refusal cases, unchanged audio and recognition
 allowances, GitHub checks and the installed UI journey. Keep tracing unchanged.
+
+## 2026-11-15 - Поиск текста без зависимости от других каталогов
+
+По результатам реального прохода UI устранить ожидание MusicBrainz при подготовке
+только недостающего текста. Для новых таких записей сервер сохраняет ограниченный
+состав поиска вместе с выбранными файлами; разрешён только LRCLIB. Не менять
+состав уже запущенных старых партий. Сохранённые доказательства других источников
+для той же аудиоверсии сохраняют прежние сроки и разрешения. Ошибки LRCLIB,
+квоты и запреты обрабатываются штатно. Не повторять потраченные квитанции,
+не менять аудио, трейсинг, модели ASR и удерживаемые задачи. Проверить настоящий
+worker с транспортом провайдера, а затем новый запуск в установленном UI.
+
+Remove unrelated MusicBrainz waits from future lyric-only preparation. Freeze the
+LRCLIB-only scope in the server-selected manifest; retain older in-progress runs.
+Preserve same-revision non-lyric evidence with its original usage and expiry,
+normal LRCLIB pacing, errors and limits, all receipts and review gates. Verify
+the real worker/provider transport and installed UI. Keep audio, tracing, ASR
+models and held jobs unchanged.
