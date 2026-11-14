@@ -3140,3 +3140,26 @@ checks also prevent a threaded claim from overtaking a fatal mutation stop.
 Соединение без активной транзакции сохраняет жизненный цикл WAL/SHM между опросами;
 оно закрывается до снятия защиты хранилища. / An idle connection retains WAL/SHM
 between polls and closes before storage guards are released.
+
+## 2026-11-15 - Подготовка песен с устаревшим поиском текста
+
+Продолжая согласованное заполнение коллекции через UI, устранить пропуск песен,
+у которых заполнены теги и обложка, но отсутствует синхронный текст, а прежний
+поиск текста истёк или относится к другой версии файла. Включать их в явно
+выбранную подготовку метаданных, не более 50 записей за запуск, без отправки
+новых аудиоотпечатков и без автоматической записи слов или таймкодов.
+
+Сохранять квоты, разрешения источников и все прежние квитанции, включая
+неудачные, остановленные и неопределённые попытки. Не повторять запрос при
+неизвестном исходе или паузе источника. Исключать миксы, речь, подтверждённые
+инструменталы, закреплённый и существующий обычный текст, актуальные черновики.
+Найденные варианты остаются на проверке. Приёмка: нативные положительные и
+запрещающие сценарии, отсутствие новых записей в аудио и расхода бюджета
+распознавания, сборка GitHub и реальный проход через UI. Трейсинг не менять.
+
+Include lyric-only expired or stale searches in explicit metadata preparation,
+bounded to 50 selected individual songs. Send no new fingerprints and accept no
+words or timings automatically. Preserve existing receipts, unknown outcomes,
+source pauses, quotas, permission checks, current drafts and locked content.
+Verify native admission and refusal cases, unchanged audio and recognition
+allowances, GitHub checks and the installed UI journey. Keep tracing unchanged.

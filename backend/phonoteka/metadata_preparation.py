@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import confirmed_fields as fields, db, field_policy, input_readiness, media, provider_attempts, security, webhooks
+from . import confirmed_fields as fields, db, enrichment_gaps, field_policy, input_readiness, lyrics_review, media, provider_attempts, provider_policy, security, webhooks
 
 KEY = 'metadata_preparation'
 CONTRACT = 'metadata-preparation-v1'
@@ -16,6 +16,7 @@ WAITING = {'queued', 'running', 'paused', 'waiting_authorization', 'waiting', 'd
 SAFE_BLOCKS = {'input_stabilizing', 'analysis_missing', 'analysis_stale', 'audio_audit_required'}
 CACHE_FALLBACK_PROFILE = 'exhausted-acoustid-cache-v1'
 UNSEARCHED_RECOVERY_PROFILE = 'unsearched-preparation-stale-v1'
+LYRICS_REFRESH_PROFILE = 'lyric-only-expired-search-v1'
 
 
 def load(conn, identity=None):
@@ -135,13 +136,42 @@ def unsearched_recovery(settings, conn, row, active, signature, receipt, kind, c
         return None
 
 
+def lyric_refresh(conn, settings, row, metadata):
+    """Refresh missing lyric evidence, never infer words or accept an instrumental."""
+    if enrichment_gaps.missing_fields(metadata) != ['synced_lyrics']:
+        return False
+    if metadata.get('lyrics') or 'lrc' in field_policy.load(conn, row['id'])['locks']:
+        return False
+    if lyrics_review.load(conn, row['id']).get('instrumental_confirmed'):
+        return False
+    rule = provider_policy.rule(conn, 'lrclib', 'lyrics')
+    if not all(rule.get('allow_' + operation) for operation in ('fetch', 'cache', 'embed')):
+        return False
+    proposal = conn.execute('SELECT * FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1', (row['id'],)).fetchone()
+    if proposal and proposal['input_sha256'] == row['sha256']:
+        draft = json.loads(proposal['payload'])
+        if draft.get('lrc') or (draft.get('lyrics_document') or {}).get('lines'):
+            return False
+    analysis = enrichment_gaps.project(conn, [row['id']]).get(row['id'])
+    if analysis and any(not isinstance(source, dict) or source.get('provider') == 'lrclib' and
+                        source.get('state') in enrichment_gaps.RETRY_STATES | enrichment_gaps.CONFIG_STATES | {'unknown_outcome'}
+                        for source in analysis['sources']):
+        return False
+    # Only the lyric field is missing, so no AcoustID connection is consulted.
+    reasons = enrichment_gaps.describe(conn, settings, row, analysis=analysis, proposal=proposal, connection={})
+    return len(reasons) == 1 and reasons[0]['code'] in {'results_expired', 'search_stale'}
+
+
 def candidate(settings, conn, row, active, result):
     if result['ready'] or set(result['blocked']) - SAFE_BLOCKS:
         return None
     gaps = [g for g in result['remaining'] if g['field'] in fields.FIELDS]
-    if not gaps or any(g['code'] in {'recording_conflict', 'recording_incomplete', 'field_locked', 'pending_choice', 'field_lock_stale'} for g in gaps):
+    if any(g['code'] in {'recording_conflict', 'recording_incomplete', 'field_locked', 'pending_choice', 'field_lock_stale'} for g in gaps):
         return None
     metadata = json.loads(row['metadata'])
+    refresh_lyrics = not gaps and lyric_refresh(conn, settings, row, metadata)
+    if not gaps and not refresh_lyrics:
+        return None
     saved = conn.execute('SELECT * FROM analyses WHERE track_id=?', (row['id'],)).fetchone()
     analysis = json.loads(saved['payload']) if saved and saved['input_sha256'] == row['sha256'] else {}
     if analysis.get('possible_mix') or analysis.get('critical_conflicts') or analysis.get('unresolved_conflicts'):
@@ -149,7 +179,7 @@ def candidate(settings, conn, row, active, result):
     matches, fingerprints, error = fields.recording(conn, analysis, metadata)
     if error in {'recording_conflict', 'recording_incomplete'}:
         return None
-    kind = 'analyze' if matches or fingerprints else 'recognize'
+    kind = 'analyze' if refresh_lyrics or matches or fingerprints else 'recognize'
     if not settings.external_metadata or kind == 'recognize' and not settings.external_fingerprints:
         return None
     identity = (metadata.get('audit') or {}).get('audio_identity')
@@ -160,12 +190,22 @@ def candidate(settings, conn, row, active, result):
     # one capability-specific evaluation; it cannot reserve or send AcoustID.
     # Failed/cancelled receipts for this profile still prevent automatic replay.
     dependency = [CONTRACT, row['id'], row['sha256'], kind, guards(conn, row)]
+    if refresh_lyrics:
+        # A new capability is not permission to replay a previous attempt.
+        # Keep every old receipt, including failed, cancelled and unknown runs.
+        previous = [dependency, [*dependency[:3], 'recognize', dependency[4]]]
+        previous.append(previous[1] + [CACHE_FALLBACK_PROFILE])
+        if any(conn.execute('SELECT 1 FROM settings WHERE key=?', ('metadata_prepared:' + fields.digest(value),)).fetchone() for value in previous):
+            return None
+        dependency.append(LYRICS_REFRESH_PROFILE)
     if kind == 'recognize' and remaining == 0:
         dependency.append(CACHE_FALLBACK_PROFILE)
     signature = fields.digest(dependency)
     receipt = conn.execute('SELECT value FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone()
     recovery_of = None
     if receipt:
+        if refresh_lyrics:
+            return None
         recovered = unsearched_recovery(settings, conn, row, active, signature, receipt[0], kind, dependency[4])
         if not recovered:
             return None
@@ -175,7 +215,8 @@ def candidate(settings, conn, row, active, result):
             'fingerprint_requests_remaining': remaining if kind == 'recognize' else None,
             'kind': kind, 'scan': bool(recovery_of) or not stable,
             **({'recovery_of': recovery_of} if recovery_of else {}),
-            'reason': 'Предыдущая подготовка остановилась до поиска. Заново проверим файлы и доступные данные.' if recovery_of else
+            'reason': 'Обновим устаревший поиск текста. Распознавание по отпечатку не запускается; текст останется на проверке.' if refresh_lyrics else
+                      'Предыдущая подготовка остановилась до поиска. Заново проверим файлы и доступные данные.' if recovery_of else
                       'Проверим сохранённые отпечатки. Новые запросы распознавания недоступны.' if kind == 'recognize' and remaining == 0 else
                       'Проверим стабильность и найдём недостающие данные.' if not stable else
                       'Повторим поиск по аудио.' if kind == 'recognize' else 'Уточним данные музыкальных источников.'}
