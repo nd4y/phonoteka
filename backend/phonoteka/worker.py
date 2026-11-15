@@ -21,7 +21,7 @@ import time
 import uuid
 from contextvars import copy_context
 
-from . import work_folders, db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy, provider_attempts, input_readiness, automation, recording_review, processing_activity
+from . import work_folders, db, media, cue, cue_export, inference_client, intake, recognition, loudness, scheduling, exports, youtube, field_policy, provider_policy, provider_attempts, input_readiness, automation, recording_review, processing_activity, scan_inventory
 from .providers import Providers, ProviderError
 from .enrichment_gaps import can_search_album, matches_music_gap
 from .config import Settings
@@ -354,12 +354,13 @@ class Worker:
         if meta.get('format')!='cue' and not meta.get('input_error'):
             meta['youtube']=youtube.merge(youtube.discover(path,self.settings,meta))
         after = path.stat()
-        if (before.st_size,before.st_mtime_ns,before.st_ino) != (after.st_size,after.st_mtime_ns,after.st_ino):
+        if scan_inventory.signature(before) != scan_inventory.signature(after):
             raise media.MediaError("file_changing", "File changed during inventory")
         # inspect_audio/fallback/CUE inventory performed a complete SHA-256 read.
         # Publish this timestamp only after the inventory's stability check; an
         # old record's date is never carried onto an external replacement.
         meta['hash_verified_at'] = db.utcnow()
+        meta['inventory_stat'] = scan_inventory.signature(after)
         with db.transaction(self.settings.db_path) as conn:
             current = conn.execute("SELECT * FROM tracks WHERE relative_path=? AND is_current=1", (relative,)).fetchone()
             if expected and (not current or current['id'] != expected['track_id']
@@ -408,18 +409,22 @@ class Worker:
                 conn.execute("UPDATE tracks SET status='error' WHERE id=?", (identity,))
         return {"track_id": identity, "sha256": meta["sha256"], "relative_path": relative, **({'input_error':meta['input_error']} if meta.get('input_error') else {})}
 
-    def confirm_scan_inputs(self, scan_id, coverage_complete, prefix=""):
+    def confirm_scan_inputs(self, scan_id, coverage_complete, prefix="", unchanged=None):
         """Unrelated invalid audio does not invalidate a fully observed good file.
 
         Root/enumeration/cancellation failures never establish a second pass.
         Unseen and changed entries lose readiness, including after partial scans.
         """
+        unchanged = unchanged or {}
         with db.transaction(self.settings.db_path) as conn:
             for row in conn.execute('SELECT id,scan_id,metadata FROM tracks WHERE is_current=1 AND instr(relative_path,?)=1',(prefix,)).fetchall():
                 meta=json.loads(row['metadata'])
                 if row['scan_id'] == scan_id:
                     value=input_readiness.confirm(meta,scan_id,complete=coverage_complete,
                         grace_seconds=self.settings.input_grace_seconds)
+                elif unchanged.get(row['id']) == meta.get('sha256'):
+                    # Retain the previous independent proofs, never mint a new one.
+                    continue
                 else:
                     value=input_readiness.observed(meta,{},None)
                 if value is not None:
@@ -445,6 +450,7 @@ class Worker:
                     links.setdefault(path, []).append({'id': row['id'], 'title': document.get('title') or Path(row['relative_path']).stem, 'track_count': count})
             for row in rows:
                 meta = json.loads(row['metadata'])
+                before = db.encode(meta)
                 if meta.get('format') == 'cue' or not row['relative_path'].startswith(prefix):
                     continue
                 # A damaged sheet must not silently unlock a known album image.
@@ -453,7 +459,9 @@ class Worker:
                 meta['cue_sheets'] = links.get(row['relative_path'], [])
                 meta['cue_album_image'] = any(x['track_count'] > 1 for x in meta['cue_sheets'])
                 recording_review.annotate(meta,row['sha256'],False)
-                conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), row['id']))
+                encoded = db.encode(meta)
+                if encoded != before:
+                    conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (encoded, row['id']))
 
     async def scan(self, job):
         from . import metadata_preparation
@@ -462,6 +470,7 @@ class Worker:
             return await work_reconciliation.run(self, job)
         if json.loads(job['payload']).get('trigger') == metadata_preparation.CONTRACT:
             return await metadata_preparation.scan(self, job)
+        self.authorize_grant(job)
         identity = await self.io(root_identity, self.settings.work_root)
         previous = db.setting(self.settings.db_path, "work_root_identity")
         if previous and json.loads(previous) != identity:
@@ -474,9 +483,17 @@ class Worker:
         prefix = folder + "/" if folder else ""
         paths, errors = await self.io(enumerate_audio, source)
         paths = [prefix + path for path in paths] if folder else paths
-        done={r['item_key'] for r in db.fetchall(self.settings.db_path,"SELECT item_key FROM job_items WHERE job_id=? AND state IN ('succeeded','failed','conflict','needs_review')",(job['id'],))}
-        with db.transaction(self.settings.db_path) as conn:
-            conn.execute("UPDATE jobs SET total=? WHERE id=?", (len(paths),job["id"]))
+        done_items = {r['item_key']: dict(r) for r in db.fetchall(self.settings.db_path,"SELECT item_key,state,result FROM job_items WHERE job_id=? AND state IN ('succeeded','failed','conflict','needs_review')",(job['id'],))}
+        # Old accepted jobs retain their full-scan behavior. The API freezes the
+        # new default explicitly, so an upgrade cannot reinterpret a queued job.
+        mode = json.loads(job.get('payload') or '{}').get('params', {}).get('scan_mode', 'full')
+        pending, skipped, done = await self.io(scan_inventory.plan, self.settings, paths, done_items) if mode == 'incremental' else (paths, {}, set(done_items))
+        def save_summary():
+            with db.transaction(self.settings.db_path) as conn:
+                payload = json.loads(conn.execute('SELECT payload FROM jobs WHERE id=?', (job['id'],)).fetchone()[0])
+                payload['scan_inventory'] = {'mode': mode, 'discovered': len(paths), 'unchanged': len(skipped)}
+                conn.execute('UPDATE jobs SET total=?,payload=? WHERE id=?', (len(pending) + len(set(done_items) - set(paths)),db.encode(payload),job['id']))
+        await self.io(save_summary)
         halted=False
         def stop_admission():
             nonlocal halted
@@ -491,16 +508,26 @@ class Worker:
                 self.item_result(job["id"], relative, "failed" if result.get("input_error") else "succeeded", result)
             except Exception as exc:
                 self.item_result(job["id"], relative, "failed", self.failure(exc))
-        await self.bounded_items((path for path in paths if path not in done), one, should_stop=stop_admission)
+        await self.bounded_items((path for path in pending if path not in done), one, should_stop=stop_admission)
+        if skipped:
+            skipped, changed = await self.io(scan_inventory.recheck, self.settings, skipped)
+            if changed:
+                pending += changed
+                await self.io(save_summary)
+                await self.bounded_items(changed, one, should_stop=stop_admission)
         stats = db.fetchone(self.settings.db_path, "SELECT * FROM jobs WHERE id=?", (job["id"],))
         final_identity = await self.io(root_identity, self.settings.work_root)
         if folder and root_identity(work_folders.directory(self.settings.work_root, folder)) != scope_identity:
             raise media.MediaError("root_identity_changed", "Выбранная папка изменилась при сканировании")
-        await self.io(self.confirm_scan_inputs,job['id'],not errors and not self.cancelled(job['id']) and final_identity == identity, prefix)
+        await self.io(self.confirm_scan_inputs,job['id'],not errors and not self.cancelled(job['id']) and final_identity == identity, prefix,
+                      {value['track_id']: value['sha256'] for value in skipped.values()})
         complete = not errors and not stats["failed"] and not self.cancelled(job["id"]) and final_identity == identity
         if complete:
+            present = set(paths)
             with db.transaction(self.settings.db_path) as conn:
-                conn.execute("UPDATE tracks SET status='missing',updated_at=? WHERE is_current=1 AND instr(relative_path,?)=1 AND (scan_id IS NULL OR scan_id<>?)", (db.utcnow(),prefix,job["id"]))
+                for row in conn.execute('SELECT id,relative_path FROM tracks WHERE is_current=1 AND instr(relative_path,?)=1', (prefix,)).fetchall():
+                    if row['relative_path'] not in present:
+                        conn.execute("UPDATE tracks SET status='missing',updated_at=? WHERE id=?", (db.utcnow(),row['id']))
         await self.io(self.link_cue_sheets, prefix)
         db.set_setting(self.settings.db_path, "last_folder_scan" if folder else "last_scan", db.encode({"id": job["id"], "state": "complete" if complete else "partial", "errors": errors[:50], "coverage_complete": not errors and not self.cancelled(job["id"]) and final_identity == identity, "at": db.utcnow()}))
         state = "cancelled_partial" if self.cancelled(job["id"]) and stats["completed"] else "cancelled" if self.cancelled(job["id"]) else "succeeded" if complete else "completed_with_errors"

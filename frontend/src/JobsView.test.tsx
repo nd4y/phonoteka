@@ -23,6 +23,26 @@ const render = (value: Job) =>
   );
 
 describe("cancelled task presentation", () => {
+  it("separates unchanged inventory from actual scan attempts", () => {
+    const html = render({
+      ...job,
+      kind: "scan",
+      state: "succeeded",
+      stage: "succeeded",
+      total: 0,
+      completed: 0,
+      failed: 0,
+      progress: 100,
+      cancel_requested: false,
+      error: null,
+      scan_inventory: { mode: "incremental", discovered: 25, unchanged: 25 },
+    });
+    expect(html).toContain("Сканирование изменений");
+    expect(html).toContain("Без повторного чтения: 25");
+    expect(html).toContain("Изменений для проверки нет");
+    expect(html).toContain('value="100"');
+    expect(html).not.toContain("25 выполнено");
+  });
   it("shows an ordinary cancellation without a red error alert", () => {
     const html = render(job);
     expect(html).toContain("Отменено");

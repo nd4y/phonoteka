@@ -351,10 +351,14 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
             const expanded = selectedId === job.id;
             const authorizationWaiting = needsJobAuthorization(job);
             const processed = job.processed ?? Math.min(job.total, job.completed + job.failed);
+            const emptyScanDone =
+              !!job.scan_inventory && job.total === 0 && job.state === "succeeded";
             const percent =
               job.total > 0
                 ? Math.max(0, Math.min(100, Math.round((processed / job.total) * 100)))
-                : 0;
+                : emptyScanDone
+                  ? 100
+                  : 0;
             const Icon =
               tone === "cancelled"
                 ? X
@@ -473,9 +477,18 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
                     с неизвестным исходом будут отмечены для проверки.
                   </p>
                 )}
+                {job.scan_inventory && (
+                  <p className="muted small">
+                    {job.scan_inventory.mode === "incremental"
+                      ? "Сканирование изменений"
+                      : "Полное сканирование"}
+                    {" · "}Найдено: {count(job.scan_inventory.discovered)}
+                    {" · "}Без повторного чтения: {count(job.scan_inventory.unchanged)}
+                  </p>
+                )}
                 <div className="job-progress-heading">
                   <strong className="job-percent">
-                    {job.total ? `${percent}%` : active ? "-" : "0%"}
+                    {job.total || emptyScanDone ? `${percent}%` : active ? "-" : "0%"}
                   </strong>
                   <div>
                     <span>
@@ -483,7 +496,9 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
                         ? `${count(processed)} из ${count(job.total)} попыток`
                         : active
                           ? "Определяем объем работы"
-                          : "Файлов для обработки нет"}
+                          : emptyScanDone
+                            ? "Изменений для проверки нет"
+                            : "Файлов для обработки нет"}
                     </span>
                     <small>
                       {count(Math.max(0, job.completed - (job.skipped || 0)))} выполнено ·{" "}
@@ -510,7 +525,9 @@ export function JobsView({ jobs, refresh, onCancel, onOpenTrack }: Props) {
                   aria-valuetext={
                     job.total
                       ? `${percent}%, ${processed} из ${job.total} попыток`
-                      : "Объем определяется"
+                      : emptyScanDone
+                        ? "Изменений для проверки нет, завершено"
+                        : "Объем определяется"
                   }
                 />
                 <div className="job-current-action">
