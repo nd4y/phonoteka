@@ -1,5 +1,10 @@
 # phonoteka
 
+When a recording is already identified but artwork has not been requested,
+preparation can look up its known album without another audio fingerprint.
+Results remain review candidates; neither an edition nor an image is selected
+automatically. [Artwork preparation](docs/en/artwork-preparation.md).
+
 Ordinary scanning checks new, changed and unfinished inputs. Successfully
 inventoried unchanged files avoid another full audio read; a full verification
 remains available separately. [Scan modes](docs/en/incremental-scan.md).

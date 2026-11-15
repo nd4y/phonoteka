@@ -455,11 +455,13 @@ export function ConfirmedFieldsPanel({
               <p className="muted small">
                 {!chosenPreparation.length
                   ? "Ничего не выбрано. Отметьте записи для подготовки в списке ниже."
-                  : chosenPreparation[0].preparation?.kind === "analyze"
-                    ? "Уточним теги, обложки и тексты по известным данным записи. Новые аудиоотпечатки не отправляются."
-                    : chosenPreparation[0].preparation?.fingerprint_requests_remaining === 0
-                      ? "Новые запросы распознавания недоступны. Проверим пригодный к повторному использованию кэш; лимит не сбрасывается."
-                      : "Проверим аудио в пределах оставшегося бюджета распознавания."}
+                  : chosenPreparation.every((i) => i.preparation?.album_hint)
+                    ? "Запросим издания и обложки известных альбомов. Аудиоотпечатки не отправляются; текст и аудиофайлы не меняются."
+                    : chosenPreparation[0].preparation?.kind === "analyze"
+                      ? "Уточним теги, обложки и тексты по известным данным записи. Новые аудиоотпечатки не отправляются."
+                      : chosenPreparation[0].preparation?.fingerprint_requests_remaining === 0
+                        ? "Новые запросы распознавания недоступны. Проверим пригодный к повторному использованию кэш; лимит не сбрасывается."
+                        : "Проверим аудио в пределах оставшегося бюджета распознавания."}
               </p>
               {chosenPreparation.some((i) => i.preparation?.fingerprint_requests_remaining === 0) &&
                 chosenPreparation.some(

@@ -3,6 +3,7 @@ export type EvidencePreparation = {
   kind: "recognize" | "analyze";
   reason: string;
   fingerprint_requests_remaining?: number | null;
+  album_hint?: string;
 };
 
 export function preparationBatch<T extends { preparation?: EvidencePreparation | null }>(

@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import confirmed_fields as fields, db, enrichment_gaps, field_policy, input_readiness, lyrics_review, media, provider_attempts, provider_policy, security, webhooks
+from . import artwork_preparation, confirmed_fields as fields, db, enrichment_gaps, field_policy, input_readiness, lyrics_review, media, provider_attempts, provider_policy, security, webhooks
 
 KEY = 'metadata_preparation'
 CONTRACT = 'metadata-preparation-v1'
@@ -17,6 +17,7 @@ SAFE_BLOCKS = {'input_stabilizing', 'analysis_missing', 'analysis_stale', 'audio
 CACHE_FALLBACK_PROFILE = 'exhausted-acoustid-cache-v1'
 UNSEARCHED_RECOVERY_PROFILE = 'unsearched-preparation-stale-v1'
 LYRICS_REFRESH_PROFILE = 'lyric-only-expired-search-v1'
+ARTWORK_PROFILE = 'unqueried-known-album-artwork-v1'
 
 
 def load(conn, identity=None):
@@ -179,7 +180,25 @@ def candidate(settings, conn, row, active, result):
     matches, fingerprints, error = fields.recording(conn, analysis, metadata)
     if error in {'recording_conflict', 'recording_incomplete'}:
         return None
-    kind = 'analyze' if refresh_lyrics or matches or fingerprints else 'recognize'
+    art_hint = None
+    if matches and any(g['field'] == 'cover' for g in gaps):
+        rule = provider_policy.rule(conn, 'coverartarchive', 'cover')
+        catalog_rule = provider_policy.rule(conn, 'musicbrainz', 'metadata')
+        pending = conn.execute('SELECT input_sha256,payload FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1', (row['id'],)).fetchone()
+        proposal = json.loads(pending['payload']) if pending and pending['input_sha256'] == row['sha256'] else {}
+        edition_pending = (proposal.get('cover') or proposal.get('tags', {}).get('album')
+                           or proposal.get('tags', {}).get('musicbrainz_albumid'))
+        if (not edition_pending and 'cover' not in field_policy.load(conn, row['id'])['locks']
+                and all(rule.get('allow_' + operation) for operation in ('fetch', 'cache', 'embed'))
+                and all(catalog_rule.get('allow_' + operation) for operation in ('fetch', 'cache'))):
+            # The original generic lookup may have had no album. A distinct,
+            # album-scoped lookup adds artwork evidence without identifying the
+            # audio again or selecting a release. A newer failed search must
+            # be examined rather than replayed through this new capability.
+            projected = enrichment_gaps.project(conn, [row['id']]).get(row['id'], {})
+            if not projected.get('last_failed_search'):
+                art_hint = artwork_preparation.album_hint(metadata, analysis, matches)
+    kind = 'analyze' if refresh_lyrics or art_hint or matches or fingerprints else 'recognize'
     if not settings.external_metadata or kind == 'recognize' and not settings.external_fingerprints:
         return None
     identity = (metadata.get('audit') or {}).get('audio_identity')
@@ -190,6 +209,8 @@ def candidate(settings, conn, row, active, result):
     # one capability-specific evaluation; it cannot reserve or send AcoustID.
     # Failed/cancelled receipts for this profile still prevent automatic replay.
     dependency = [CONTRACT, row['id'], row['sha256'], kind, guards(conn, row)]
+    if art_hint:
+        dependency.append([ARTWORK_PROFILE, fields.digest(art_hint)])
     if refresh_lyrics:
         # A new capability is not permission to replay a previous attempt.
         # Keep every old receipt, including failed, cancelled and unknown runs.
@@ -204,7 +225,7 @@ def candidate(settings, conn, row, active, result):
     receipt = conn.execute('SELECT value FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone()
     recovery_of = None
     if receipt:
-        if refresh_lyrics:
+        if refresh_lyrics or art_hint:
             return None
         recovered = unsearched_recovery(settings, conn, row, active, signature, receipt[0], kind, dependency[4])
         if not recovered:
@@ -215,8 +236,10 @@ def candidate(settings, conn, row, active, result):
             'fingerprint_requests_remaining': remaining if kind == 'recognize' else None,
             'kind': kind, 'scan': bool(recovery_of) or not stable,
             **({'lyric_search_only': True} if refresh_lyrics else {}),
+            **({'album_hint': art_hint} if art_hint else {}),
             **({'recovery_of': recovery_of} if recovery_of else {}),
-            'reason': 'Обновим устаревший поиск текста. Распознавание по отпечатку не запускается; текст останется на проверке.' if refresh_lyrics else
+            'reason': 'Запросим обложки известного альбома. Аудиоотпечаток, текст и файлы не меняются; выбор издания останется на проверке.' if art_hint else
+                      'Обновим устаревший поиск текста. Распознавание по отпечатку не запускается; текст останется на проверке.' if refresh_lyrics else
                       'Предыдущая подготовка остановилась до поиска. Заново проверим файлы и доступные данные.' if recovery_of else
                       'Проверим сохранённые отпечатки. Новые запросы распознавания недоступны.' if kind == 'recognize' and remaining == 0 else
                       'Проверим стабильность и найдём недостающие данные.' if not stable else
@@ -482,6 +505,7 @@ def install(app, settings):
                 chosen.append({'track_id': tid, 'sha256': row['sha256'], 'relative_path': row['relative_path'],
                                'scan': item['scan'], 'guards': guards(conn, row),
                                **({'lyric_search_only': True} if item.get('lyric_search_only') is True else {}),
+                               **({'album_hint': item['album_hint']} if item.get('album_hint') else {}),
                                **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})
                 conn.execute('INSERT INTO settings VALUES(?,?)', ('metadata_prepared:' + item['receipt'],
                              db.encode({'run_id': key, **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})))
