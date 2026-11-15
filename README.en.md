@@ -195,3 +195,5 @@ The Sources tab is restored after a reload in the current window. Back closes it
 ### Preparation stop explanation
 
 When recording data or settings change, or a file is busy, both processing and preparation explain the stop and ask you to refresh the fill plan. Completed results remain available; the plan recalculates actions from current evidence.
+
+OTLP export groups shared packet metadata while preserving trace contents and existing size limits. Settings and Jaeger stay unchanged. [Export performance verification](docs/en/trace-export-performance.md).

@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import sys
 import threading
 import time
 import uuid
@@ -187,6 +188,48 @@ def attributes(**values):
     return {'phonoteka.' + key.replace('_', '.'): value for key, value in values.items()}
 
 
+def _wire_batches(encoded):
+    """Share OTLP resource/scope metadata without relaxing either wire bound.
+
+    A small group fitting the individual limit proves every contained span fits.
+    Larger groups use the previous exact single-envelope check. Metadata,
+    including unknown protobuf fields, is copied unchanged.
+    """
+    packets = []; dropped = 0
+    for resource in encoded.resource_spans:
+        resource_meta = type(resource)(); resource_meta.CopyFrom(resource)
+        resource_meta.ClearField('scope_spans')
+        for scope in resource.scope_spans:
+            envelope = type(encoded)()
+            target = envelope.resource_spans.add(); target.CopyFrom(resource_meta)
+            group = target.scope_spans.add(); group.CopyFrom(scope); group.ClearField('spans')
+            for offset in range(0, len(scope.spans), 16):
+                items = scope.spans[offset:offset+16]
+                group.spans.extend(items)
+                if envelope.ByteSize() <= 8192:
+                    packets.append((envelope.SerializeToString(), len(items)))
+                    group.ClearField('spans'); continue
+                group.ClearField('spans')
+                for item in items:
+                    group.spans.add().CopyFrom(item)
+                    data = envelope.SerializeToString(); group.ClearField('spans')
+                    if len(data) > 8192: dropped += 1
+                    else: packets.append((data, 1))
+    return packets, dropped
+
+
+def _background_cpu_priority():
+    # Linux nice is per native thread. Never renice the application process or
+    # raise an inherited priority; restricted/other platforms keep exporting.
+    if sys.platform != 'linux' or not hasattr(os, 'setpriority'): return
+    try:
+        identity = threading.get_native_id()
+        current = os.getpriority(os.PRIO_PROCESS, identity)
+        if current < 19: os.setpriority(os.PRIO_PROCESS, identity, min(19, current+5))
+    except OSError:
+        pass
+
+
 class BoundedProcessor(SpanProcessor):
     """Queue is capped by count AND bytes; network work is off the event loop.
 
@@ -231,6 +274,7 @@ class BoundedProcessor(SpanProcessor):
             self.failed += count
 
     def _run(self):
+        _background_cpu_priority()
         while True:
             with self.lock:
                 if not self.stopping and len(self.queue) < 128: self.lock.wait(timeout=1)
@@ -241,31 +285,20 @@ class BoundedProcessor(SpanProcessor):
                 self.sending = bool(batch)
             if not batch: continue
             try:
-                chunks = []; size = 0
+                chunks = []; size = count = 0
                 try:
                     encoded = encode_spans(batch)
+                    packets, rejected = _wire_batches(encoded)
                 except Exception:
                     self.dropped += len(batch); continue
-                # Encode Python attributes/resources once per batch. Reuse its
-                # protobuf metadata when checking individual wire-size bounds.
-                for resource in encoded.resource_spans:
-                    envelope = type(encoded)()
-                    target = envelope.resource_spans.add(); target.CopyFrom(resource)
-                    target.ClearField('scope_spans')
-                    for scope in resource.scope_spans:
-                        target.ClearField('scope_spans')
-                        group = target.scope_spans.add(); group.CopyFrom(scope); group.ClearField('spans')
-                        for item in scope.spans:
-                            group.spans.add().CopyFrom(item)
-                            data = envelope.SerializeToString(); group.ClearField('spans')
-                            if len(data) > 8192:
-                                self.dropped += 1; continue
-                            if size+len(data) > 480*1024:
-                                self._send(b''.join(chunks), len(chunks)); chunks = []; size = 0
-                            chunks.append(data); size += len(data)
+                self.dropped += rejected
+                for data, spans in packets:
+                    if size+len(data) > 480*1024:
+                        self._send(b''.join(chunks), count); chunks = []; size = count = 0
+                    chunks.append(data); size += len(data); count += spans
                 # ExportTraceServiceRequest has repeated resource_spans only.
-                # Protobuf concatenation merges these without encoding twice.
-                if chunks: self._send(b''.join(chunks), len(chunks))
+                # Concatenation preserves distinct resource/scope packets.
+                if chunks: self._send(b''.join(chunks), count)
             finally:
                 with self.lock: self.sending = False; self.lock.notify_all()
 
