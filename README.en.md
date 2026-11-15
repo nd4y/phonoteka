@@ -4,6 +4,9 @@ Ordinary scanning checks new, changed and unfinished inputs. Successfully
 inventoried unchanged files avoid another full audio read; a full verification
 remains available separately. [Scan modes](docs/en/incremental-scan.md).
 
+Trace export avoids redundant copies and attribute conversions while preserving
+HTTP/DNS coverage, Jaeger and existing bounds. [Performance](docs/en/trace-export-performance.md).
+
 Preparation also finds songs whose only remaining gap is a stale lyric search.
 It refreshes catalog data without new audio fingerprints; resulting lyrics stay
 on review. New lyric-only preparation queries LRCLIB without waiting for unrelated
