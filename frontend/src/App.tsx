@@ -1614,7 +1614,7 @@ export default function App() {
                   <FolderSearch size={19} />
                   {activeJobs.some((job) => job.kind === "scan")
                     ? "Сканирование идет"
-                    : "Сканировать коллекцию"}
+                    : "Сканировать изменения"}
                 </button>
               )}
             </div>
@@ -1716,6 +1716,13 @@ export default function App() {
                     </p>
                   )}
                   <div className="button-row">
+                    <button
+                      className="button secondary"
+                      disabled={busy || activeJobs.some((job) => job.kind === "scan")}
+                      onClick={() => void submitJob("scan", [], { scan_mode: "full" })}
+                    >
+                      Полное сканирование
+                    </button>
                     <button className="button secondary" onClick={() => navigate("guide")}>
                       Подключение папки и поиск данных
                       <ArrowRight size={18} />
@@ -1747,6 +1754,10 @@ export default function App() {
                         : "Продолжить распознавание в выбранной категории"}
                     </button>
                   </div>
+                  <p className="muted small">
+                    По умолчанию читаются новые, изменившиеся и ещё не проверенные файлы. Полное
+                    сканирование повторно читает всю коллекцию и заново сверяет SHA-256.
+                  </p>
                   <details>
                     <summary>Повторить поиск во всей коллекции</summary>
                     <p className="muted small">

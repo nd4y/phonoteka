@@ -3199,3 +3199,30 @@ without changing span contents, 8 KiB/480 KiB/8 MiB bounds or mTLS. Verify decod
 equivalence, counters, unchanged NFR and the real 600-second receiver outage.
 Native testing, GitHub checks, deployment and trace readback remain separate
 acceptance stages.
+
+15.11.2026. По поручению владельца обычное сканирование по умолчанию читает
+новые, изменившиеся, ошибочные и ещё не подтверждённые файлы. Успешные
+неизменившиеся записи пропускаются без обновления даты SHA и независимых
+подтверждений. Сохранить полное сканирование отдельным действием, зависимости
+CUE, проверки подключения, отмену, возобновление и честные счётчики чтений
+и пропусков. Состав трасс, инфраструктуру трейсинга, ASR и правила принятия музыкальных данных не менять.
+[Описание](ru/incremental-scan.md), [English](en/incremental-scan.md).
+
+15 November 2026. The owner requested incremental scanning by default: fully
+read new, changed, failed and unfinished files, reuse successful unchanged
+inventories without advancing SHA dates or independent admission proofs. Keep
+explicit full scans, CUE dependencies, mount/cancellation/restart guards and
+separate actual-read and reuse counts. Leave tracing coverage/backends, ASR and musical acceptance
+unchanged. Code, CI, release and UI acceptance remain separate gates.
+
+Продолжение разрешённой оптимизации реализации трейсинга: устранить повторное
+копирование span при подготовке метаданных и лишние преобразования коротких
+ASCII-атрибутов. Сохранить неизвестные protobuf-поля, точные размеры сообщений,
+покрытие HTTP/DNS, настройки и прежний бюджет 5%. Проверять эквивалентность,
+сгенерированную нагрузку и реальный 600-секундный отказ без изменения теста.
+
+Continue the authorized tracing implementation optimization: remove redundant
+span copies while preparing metadata and unnecessary short-ASCII conversions.
+Preserve unknown protobuf fields, exact wire bounds, HTTP/DNS coverage, settings
+and the unchanged 5% budget. Verify equivalence, generated load and the real
+600-second outage without modifying the acceptance workload.

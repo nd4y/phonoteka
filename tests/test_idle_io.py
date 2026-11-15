@@ -24,11 +24,13 @@ def test_list_status_matches_full_rows_without_reading_frozen_payload(client, se
             insert_job(conn, f'list-{index}', {'items': [{'large': 'x' * 200000}],
                 'trigger': 'metadata-preparation-v1', 'params': {'reconcile_root': True},
                 'pause_requested': index == 1, 'authorization_version': version,
+                'scan_inventory': {'mode':'incremental','discovered':25,'unchanged':22,'not_public':'x'*200000},
                 'authorization_wait': {'reason': 'authorization_revoked'}, 'export_progress': {'completed': 2}},
                 kind='export_ready' if index == 0 else 'scan', state='waiting_authorization' if index == 2 else 'succeeded')
     expected = {r['id']: public_job(settings, r) for r in db.fetchall(settings.db_path, 'SELECT * FROM jobs')}
     assert expected['list-2']['authorization']['reason'] == 'authorization_revoked'
     assert expected['list-2']['authorization']['version'] == 0
+    assert expected['list-1']['scan_inventory'] == {'mode':'incremental','discovered':25,'unchanged':22}
     original = db.connect
 
     def light_connection(*args, **kwargs):
@@ -45,6 +47,30 @@ def test_list_status_matches_full_rows_without_reading_frozen_payload(client, se
     assert response.status_code == 200, response.text
     assert {r['id']: r for r in response.json()['items']} == expected
     assert response.json()['total'] == 4
+
+
+def test_existing_job_projection_is_upgraded_before_new_summary_writes(client, settings):
+    with db.transaction(settings.db_path) as conn:
+        conn.execute('DROP TRIGGER job_status_update')
+        conn.execute("CREATE TRIGGER job_status_update AFTER UPDATE OF payload ON jobs BEGIN UPDATE job_status SET public_payload='{}' WHERE job_id=NEW.id; END")
+        insert_job(conn, 'scan-extension', {'items':[{'large':'x'*200000}]})
+    db.initialize(settings.db_path)
+    with db.transaction(settings.db_path) as conn:
+        payload = {'items':[{'large':'x'*200000}], 'scan_inventory':{'mode':'incremental','discovered':25,'unchanged':22}}
+        conn.execute('UPDATE jobs SET payload=? WHERE id=?', (db.encode(payload),'scan-extension'))
+        saved = json.loads(conn.execute('SELECT public_payload FROM job_status WHERE job_id=?',('scan-extension',)).fetchone()[0])
+        assert saved['scan_inventory'] == payload['scan_inventory'] and 'items' not in saved
+        assert len(db.encode(saved)) < 1000
+
+
+def test_invalid_scan_summary_cannot_expand_small_status_projection(client, settings):
+    with db.transaction(settings.db_path) as conn:
+        insert_job(conn,'malformed-scan-summary',{'scan_inventory':{'mode':{'large':'x'*200000},'discovered':['x'*200000],'unchanged':'x'*200000}})
+        saved = conn.execute('SELECT public_payload FROM job_status WHERE job_id=?',('malformed-scan-summary',)).fetchone()[0]
+        assert len(saved) < 1000
+        assert json.loads(saved)['scan_inventory'] == {'mode':None,'discovered':None,'unchanged':None}
+    malformed = db.fetchone(settings.db_path,'SELECT * FROM jobs WHERE id=?',('malformed-scan-summary',))
+    assert 'scan_inventory' not in public_job(settings, malformed)
 
 
 def test_status_projection_changes_atomically_and_cannot_bypass_schema_guard(client, settings):

@@ -5,6 +5,12 @@ together. Identifiers, parents, links, timestamps, events, attributes and status
 remain intact. This changes OTLP packing and adds no settings. Jaeger and HTTP/DNS
 coverage stay unchanged.
 
+Metadata copies discard cloned spans before copying scope metadata again.
+Small packets use one serialization pass for their exact wire-size check.
+Short plain ASCII attribute strings retain the same byte limit without an
+unnecessary UTF-8 encode/decode round trip; Unicode and string subclasses keep
+their previous normalization. Input protobuf messages remain unchanged.
+
 On Linux the exporter lowers only its own thread's CPU priority. The application
 thread retains its priority. If OS policy denies the priority change, export
 continues at its previous priority. Other processes are unaffected.

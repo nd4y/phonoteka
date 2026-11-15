@@ -68,6 +68,27 @@ def test_grouping_preserves_every_span_and_all_resource_scope_metadata():
     assert all(len(data) <= 480*1024 for data, _ in packets)
 
 
+def test_grouping_does_not_mutate_reused_input_protobuf():
+    value = message(resources=2, scopes=2, spans=17, payload=200)
+    before = value.SerializeToString()
+    first, dropped = tracing._wire_batches(value)
+    second, again = tracing._wire_batches(value)
+    assert dropped == again == 0 and first == second
+    assert value.SerializeToString() == before
+    assert flattened(parsed(first)) == flattened([ExportTraceServiceRequest.FromString(before)])
+
+
+@pytest.mark.parametrize('text,expected', [('a'*256,'a'*256), ('a'*257,'a'*256), ('é'*130,'é'*128), ('🙂'*65,'🙂'*64)])
+def test_attribute_utf8_byte_boundary_is_preserved(text, expected):
+    assert tracing.safe({'http.route':text,'private.lyrics':'must not export'}) == {'http.route':expected}
+
+
+def test_string_subclasses_keep_original_attribute_normalization():
+    class Text(str): pass
+    value = tracing.safe({'http.route':Text('generated')})
+    assert value == {'http.route':'generated'} and type(value['http.route']) is str
+
+
 def test_original_single_span_wire_boundary_includes_metadata():
     value = message(spans=2); resource = value.resource_spans[0]; scope = resource.scope_spans[0]
     low, high = 0, 9000

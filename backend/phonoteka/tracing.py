@@ -179,7 +179,8 @@ def safe(attributes):
     for key, value in attributes.items():
         if key not in ALLOWED or value is None: continue
         if key in IDS and not (isinstance(value, str) and OPAQUE.fullmatch(value)): continue
-        if isinstance(value, str): value = value.encode('utf-8')[:256].decode('utf-8', 'ignore')
+        if isinstance(value, str) and not (type(value) is str and value.isascii() and len(value) <= 256):
+            value = value.encode('utf-8')[:256].decode('utf-8', 'ignore')
         if type(value) in (str, bool, int, float): result[key] = value
     return result
 
@@ -198,16 +199,22 @@ def _wire_batches(encoded):
     packets = []; dropped = 0
     for resource in encoded.resource_spans:
         resource_meta = type(resource)(); resource_meta.CopyFrom(resource)
+        scope_metas = []
+        for copied_scope in resource_meta.scope_spans:
+            copied_scope.ClearField('spans')
+            scope_meta = type(copied_scope)(); scope_meta.CopyFrom(copied_scope)
+            scope_metas.append(scope_meta)
         resource_meta.ClearField('scope_spans')
-        for scope in resource.scope_spans:
+        for scope, scope_meta in zip(resource.scope_spans, scope_metas):
             envelope = type(encoded)()
             target = envelope.resource_spans.add(); target.CopyFrom(resource_meta)
-            group = target.scope_spans.add(); group.CopyFrom(scope); group.ClearField('spans')
+            group = target.scope_spans.add(); group.CopyFrom(scope_meta)
             for offset in range(0, len(scope.spans), 16):
                 items = scope.spans[offset:offset+16]
                 group.spans.extend(items)
-                if envelope.ByteSize() <= 8192:
-                    packets.append((envelope.SerializeToString(), len(items)))
+                data = envelope.SerializeToString()
+                if len(data) <= 8192:
+                    packets.append((data, len(items)))
                     group.ClearField('spans'); continue
                 group.ClearField('spans')
                 for item in items:

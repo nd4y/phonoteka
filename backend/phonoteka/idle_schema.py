@@ -11,6 +11,15 @@ def _status(source):
     source = f"CASE WHEN json_valid({source}) THEN {source} ELSE '{{}}' END"
     keys = ('trigger', 'retry_at', 'pause_requested', 'authorization_wait', 'authorization_version', 'export_progress')
     pairs = [f"'{key}',{_json_value(source, '$.' + key)}" for key in keys]
+    # Keep the incremental summary bounded; never copy frozen items or any
+    # arbitrary nested object into the list-page projection.
+    mode = f"json_extract({source},'$.scan_inventory.mode')"
+    values = [f"'mode',CASE WHEN {mode} IN ('incremental','full') THEN {mode} END"]
+    for key in ('discovered','unchanged'):
+        value = f"json_extract({source},'$.scan_inventory.{key}')"
+        values.append(f"'{key}',CASE WHEN json_type({source},'$.scan_inventory.{key}')='integer' AND {value}>=0 THEN {value} END")
+    summary = ','.join(values)
+    pairs.append("'scan_inventory',json_object(" + summary + ")")
     pairs.append("'params',json_object('reconcile_root'," + _json_value(source, '$.params.reconcile_root') + ")")
     return 'json_object(' + ','.join(pairs) + ')'
 
@@ -64,6 +73,11 @@ def install(conn):
     for event in ('INSERT', 'UPDATE OF payload'):
         name = 'insert' if event == 'INSERT' else 'update'
         condition = '' if name == 'insert' else ' WHEN NEW.payload IS NOT OLD.payload'
+        existing = conn.execute('SELECT sql FROM sqlite_master WHERE type=\'trigger\' AND name=?', ('job_status_' + name,)).fetchone()
+        if existing and "'scan_inventory'" not in existing[0]:
+            # Compatible, atomic extension: old rows have no scan summary. New
+            # summary writes use the upgraded trigger, without rescanning history.
+            conn.execute('DROP TRIGGER job_status_' + name)
         conn.execute(f'''CREATE TRIGGER IF NOT EXISTS job_status_{name} AFTER {event} ON jobs{condition} BEGIN
             INSERT INTO job_status VALUES(NEW.id,{status}) ON CONFLICT(job_id) DO UPDATE SET public_payload=excluded.public_payload;
         END''')

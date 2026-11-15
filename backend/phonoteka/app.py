@@ -167,6 +167,11 @@ def public_job(settings: Settings, row: dict, detail=False, activity=None):
     result["progress"] = round(100 * (row["completed"] + row["failed"]) / total) if total else 0
     result["cancel_requested"] = bool(row["cancel_requested"])
     payload=json.loads(row['payload'])
+    if row['kind'] == 'scan':
+        from . import scan_inventory
+        inventory = scan_inventory.public(payload.get('scan_inventory'))
+        if inventory:
+            result['scan_inventory'] = inventory
     if payload.get('trigger') == 'metadata-preparation-v1' or payload.get('params', {}).get('reconcile_root') is True:
         result['skipped'] = db.fetchone(settings.db_path,
             "SELECT count(*) AS n FROM job_items WHERE job_id=? AND state='succeeded' AND json_extract(result,'$.skipped')=1",
@@ -179,6 +184,8 @@ def public_job(settings: Settings, row: dict, detail=False, activity=None):
         started = db.fetchone(settings.db_path, 'SELECT COUNT(*) AS started FROM job_items WHERE job_id=?', (row['id'],))['started']
         result['resume_remaining'] = started < total
     result.update(activity if activity is not None else job_activity.summaries(settings, [row])[row['id']])
+    if result.get('scan_inventory') and not total and row['state'] == 'succeeded':
+        result['progress'] = 100
     if detail:
         items = db.fetchall(settings.db_path, """SELECT j.item_key,j.state,j.result,t.id AS track_id,t.relative_path
             FROM job_items j LEFT JOIN tracks t ON t.id=COALESCE(json_extract(j.result,'$.track_id'),j.item_key)
@@ -738,8 +745,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     raise security.error(409, 'idempotency_conflict', 'Этот ключ уже использован для другого запроса')
                 existing = dict(conn.execute('SELECT * FROM jobs WHERE id=?', (previous['job_id'],)).fetchone())
                 return public_job(settings, existing)
-        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout", "review_tokens", "release_search", "cover_only", "field_tokens", "publish_confirmed", "reconcile_root"}:
+        if set(body.params) - {"proposal_id", "history_id", "expected_ready_sha256", "allow_incomplete", "exception_reason", "scope", "language", "generation", "youtube_lookup", "youtube_search", "release_id", "plan_id", "acceptance_mode", "release_review_id", "release_review_version", "publication_plan_id", "folder", "layout", "review_tokens", "release_search", "cover_only", "field_tokens", "publish_confirmed", "reconcile_root", "scan_mode"}:
             raise security.error(422, "invalid_params", "Неизвестный параметр задания")
+        if 'scan_mode' in body.params and (body.kind != 'scan' or 'reconcile_root' in body.params
+                or body.params['scan_mode'] not in ('incremental', 'full')):
+            raise security.error(422, 'invalid_scan_mode', 'Режим сканирования: incremental или full')
         if 'reconcile_root' in body.params:
             security.require_session(request, settings, True, owner_only=True)
             if body.kind != 'scan' or body.track_ids or body.params != {'reconcile_root': True} or body.params.get('reconcile_root') is not True:
@@ -1035,7 +1045,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     publication_sidecars.validate_enqueue(conn, body.params['plan_id'], ids, identity)
                 except media.MediaError as exc:
                     raise security.error(409, exc.code, exc.message) from exc
-            payload = {"items": items, "params": body.params}
+            params = dict(body.params)
+            if body.kind == 'scan' and 'reconcile_root' not in params:
+                params.setdefault('scan_mode', 'incremental')
+            payload = {"items": items, "params": params}
             from .tracing import carrier
             if carrier(): payload['_trace'] = carrier()
             if active.get('api_token_id'):

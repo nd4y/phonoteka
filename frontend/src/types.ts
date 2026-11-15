@@ -59,7 +59,11 @@ export type Track = {
   lyrics_document?: import("./lyrics-document").LyricsDocument;
   youtube?: YouTubeSource;
   cue_export?: { count: number; track_ids: string[] };
-  derived_from?: { sheet_id?: string; track_number?: number; recovery?: Record<string, unknown> };
+  derived_from?: {
+    sheet_id?: string;
+    track_number?: number;
+    recovery?: Record<string, unknown>;
+  };
   analysis?: Analysis | null;
   input_error?: { code: string; message: string };
   cue?: CueSheet;
@@ -96,7 +100,12 @@ export type EnrichmentGap = {
   candidate_count?: number | null;
   last_alignment_coverage?: number;
 };
-export type TrackPage = { items: Track[]; total: number; page: number; page_size: number };
+export type TrackPage = {
+  items: Track[];
+  total: number;
+  page: number;
+  page_size: number;
+};
 export type Summary = {
   cue_sheets?: number;
   cue_tracks?: number;
@@ -145,6 +154,11 @@ export type Job = {
   completed: number;
   failed: number;
   skipped?: number;
+  scan_inventory?: {
+    mode: "incremental" | "full";
+    discovered: number;
+    unchanged: number;
+  };
   cancel_requested: boolean;
   created_at: string;
   updated_at: string;
@@ -197,7 +211,12 @@ export type Analysis = {
     confidence_available?: boolean;
     word_probabilities?: boolean;
     segments?: Array<{ uncertain?: boolean }>;
-    words: Array<{ start: number; end: number; word: string; probability?: number }>;
+    words: Array<{
+      start: number;
+      end: number;
+      word: string;
+      probability?: number;
+    }>;
   };
   alignment?: {
     state: string;
