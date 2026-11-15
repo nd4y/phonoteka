@@ -69,6 +69,8 @@ def test_invalid_scan_summary_cannot_expand_small_status_projection(client, sett
         saved = conn.execute('SELECT public_payload FROM job_status WHERE job_id=?',('malformed-scan-summary',)).fetchone()[0]
         assert len(saved) < 1000
         assert json.loads(saved)['scan_inventory'] == {'mode':None,'discovered':None,'unchanged':None}
+    malformed = db.fetchone(settings.db_path,'SELECT * FROM jobs WHERE id=?',('malformed-scan-summary',))
+    assert 'scan_inventory' not in public_job(settings, malformed)
 
 
 def test_status_projection_changes_atomically_and_cannot_bypass_schema_guard(client, settings):

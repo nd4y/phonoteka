@@ -86,7 +86,7 @@ def recheck(settings, skipped):
 
 
 def public(value):
-    if (not isinstance(value, dict) or value.get('mode') not in {'incremental', 'full'}
+    if (not isinstance(value, dict) or value.get('mode') not in ('incremental', 'full')
             or any(type(value.get(k)) is not int or value[k] < 0 for k in ('discovered', 'unchanged'))
             or value['unchanged'] > value['discovered']):
         return None
