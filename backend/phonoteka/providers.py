@@ -338,11 +338,13 @@ class Providers:
         mime,_,_=media._cover(base64.b64decode(raw))
         return {'id':'caa:'+release_id,'provider':'coverartarchive','kind':'cover','cover':'data:'+mime+';base64,'+raw,'release_id':release_id,'source_url':url,'match':{'state':'needs_review','reasons':['confirm_release']}}
 
-    async def analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None):
+    async def analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None, lyrics_only=False):
         with provider_attempts.input_revision(meta.get('sha256')):
-            return await self._analyze(meta,relative,identified,authorize,album_hint=album_hint)
+            return await self._analyze(meta,relative,identified,authorize,album_hint=album_hint,lyrics_only=lyrics_only)
 
-    async def _analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None):
+    async def _analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None, lyrics_only=False):
+        if lyrics_only and album_hint:
+            raise media.MediaError('preparation_invalid','Поиск текста не уточняет издание альбома')
         query,provenance=query_tags(meta,relative)
         if album_hint:
             query['album']=album_hint
@@ -358,9 +360,9 @@ class Providers:
         if meta.get('input_error'):
             result.update(state='invalid_audio',sources=[{'provider':'local','state':'invalid_audio'}]);return result
         if not query['title']:
-            result['sources']=[{'provider':'musicbrainz','state':'insufficient_metadata'},{'provider':'lrclib','state':'insufficient_metadata'}]
+            result['sources']=[{'provider':p,'state':'insufficient_metadata'} for p in (('lrclib',) if lyrics_only else ('musicbrainz','lrclib'))]
             return result
-        searches=[('musicbrainz',self.musicbrainz,{'restrict_album':True})] if album_hint else [
+        searches=[('lrclib',self.lyrics,{})] if lyrics_only else [('musicbrainz',self.musicbrainz,{'restrict_album':True})] if album_hint else [
             ('musicbrainz',self.musicbrainz,{}),('lrclib',self.lyrics,{})]
         for provider,call,options in searches:
             authorize()
@@ -373,6 +375,9 @@ class Providers:
                 if exc.code=='provider_unavailable':
                     await asyncio.to_thread(self.unavailable,provider)
                 result['sources'].append({'provider':provider,'state':exc.code,'message':str(exc)})
+        if lyrics_only:
+            result['state']='candidates' if result['candidates'] else 'no_match' if all(x['state']=='no_match' for x in result['sources']) else 'incomplete'
+            return result
         matching=[c for c in result['candidates'] if c['kind']=='metadata' and c['match']['state']=='matching_metadata']
         albums=album_candidates(matching,query['album'])
         result['candidates'].extend(albums)

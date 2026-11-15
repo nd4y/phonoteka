@@ -214,6 +214,7 @@ def candidate(settings, conn, row, active, result):
     return {'token': fields.digest([signature, result['token'], remaining]), 'receipt': signature,
             'fingerprint_requests_remaining': remaining if kind == 'recognize' else None,
             'kind': kind, 'scan': bool(recovery_of) or not stable,
+            **({'lyric_search_only': True} if refresh_lyrics else {}),
             **({'recovery_of': recovery_of} if recovery_of else {}),
             'reason': 'Обновим устаревший поиск текста. Распознавание по отпечатку не запускается; текст останется на проверке.' if refresh_lyrics else
                       'Предыдущая подготовка остановилась до поиска. Заново проверим файлы и доступные данные.' if recovery_of else
@@ -369,7 +370,17 @@ def _retry_identity(worker, job, item):
 
 async def search(worker, job, item):
     try:
-        result = await worker.analyze_item(job, item)
+        if item.get('lyric_search_only') is True:
+            # Only a server-frozen preparation manifest can narrow the query.
+            # Old unflagged runs keep their original provider scope.
+            payload = json.loads(job['payload'])
+            if (job['kind'] != 'analyze' or payload.get('trigger') != CONTRACT
+                    or not payload.get('metadata_preparation_id') or item not in payload.get('items', [])):
+                raise media.MediaError('preparation_invalid', 'Текст не соответствует сохранённой подготовке')
+            await worker.io(authorize, worker.settings, job)
+            result = await worker.analyze_item(job, item, lyrics_only=True)
+        else:
+            result = await worker.analyze_item(job, item)
     except media.MediaError as exc:
         if exc.code != 'recognition_attempt_budget_exhausted':
             raise
@@ -470,6 +481,7 @@ def install(app, settings):
                 kind = item['kind']
                 chosen.append({'track_id': tid, 'sha256': row['sha256'], 'relative_path': row['relative_path'],
                                'scan': item['scan'], 'guards': guards(conn, row),
+                               **({'lyric_search_only': True} if item.get('lyric_search_only') is True else {}),
                                **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})
                 conn.execute('INSERT INTO settings VALUES(?,?)', ('metadata_prepared:' + item['receipt'],
                              db.encode({'run_id': key, **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})))

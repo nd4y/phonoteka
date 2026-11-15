@@ -816,7 +816,7 @@ class Worker:
         self.persist_mutation(job, item, result)
         return {key: val for key, val in result.items() if key not in {"backup_path", "journal_path"}}
 
-    async def analyze_item(self, job, item):
+    async def analyze_item(self, job, item, *, lyrics_only=False):
         fingerprint = job.get('kind','analyze')=='recognize'
         if not (self.settings.external_fingerprints if fingerprint else self.settings.external_metadata):
             raise media.MediaError('provider_disabled', 'Внешние метаданные отключены')
@@ -831,6 +831,8 @@ class Worker:
         await self.io(media._expect, path, item['sha256'])
         meta = json.loads(row['metadata'])
         album_hint = item.get('album_hint')
+        if lyrics_only and (fingerprint or album_hint):
+            raise media.MediaError('preparation_invalid','Поиск текста не распознаёт аудио и не уточняет альбом')
         if album_hint and not can_search_album(row,meta):
             raise media.MediaError('album_search_ineligible','Запись больше не подходит для уточнения альбома')
         recheck = bool(item.get('review_preparation') and fingerprint)
@@ -939,6 +941,7 @@ class Worker:
         elif self.settings.external_metadata:
             await self.io(self.item_action,job,item,'metadata_lookup')
             options = {'album_hint':album_hint} if album_hint else {}
+            if lyrics_only: options['lyrics_only']=True
             result = await self.providers.analyze(meta, item['relative_path'],identified,authorized,**options)
         else:
             result={'input_sha256':item['sha256'],'query_source':'audio_fingerprint','candidates':[],'sources':[],
@@ -976,7 +979,12 @@ class Worker:
                 old=json.loads(previous['payload'])
                 for key in ('asr','alignment'):
                     if key in old: result[key]=old[key]
-                if album_hint:
+                if lyrics_only:
+                    # Keep exact-revision metadata evidence and its original
+                    # usage/expiry. A lyric query never refreshes other sources.
+                    result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider')!='lrclib')
+                    result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider')!='lrclib')
+                elif album_hint:
                     replaced = {'musicbrainz','coverartarchive','local_cover'}
                     result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider') not in replaced)
                     result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider') not in replaced)
@@ -1004,7 +1012,7 @@ class Worker:
         if acoustid_cache_only_error:
             raise media.MediaError(acoustid_cache_only_error.code,str(acoustid_cache_only_error)) from acoustid_cache_only_error
         retry=[]
-        searched = {'shazam','acoustid'} if fingerprint else {'musicbrainz','coverartarchive'}
+        searched = {'lrclib'} if lyrics_only else {'shazam','acoustid'} if fingerprint else {'musicbrainz','coverartarchive'}
         if not fingerprint and not album_hint: searched.add('lrclib')
         for source in result['sources']:
             if source['provider'] not in searched:continue

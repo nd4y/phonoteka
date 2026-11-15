@@ -3163,3 +3163,39 @@ words or timings automatically. Preserve existing receipts, unknown outcomes,
 source pauses, quotas, permission checks, current drafts and locked content.
 Verify native admission and refusal cases, unchanged audio and recognition
 allowances, GitHub checks and the installed UI journey. Keep tracing unchanged.
+
+## 2026-11-15 - Поиск текста без зависимости от других каталогов
+
+По результатам реального прохода UI устранить ожидание MusicBrainz при подготовке
+только недостающего текста. Для новых таких записей сервер сохраняет ограниченный
+состав поиска вместе с выбранными файлами; разрешён только LRCLIB. Не менять
+состав уже запущенных старых партий. Сохранённые доказательства других источников
+для той же аудиоверсии сохраняют прежние сроки и разрешения. Ошибки LRCLIB,
+квоты и запреты обрабатываются штатно. Не повторять потраченные квитанции,
+не менять аудио, трейсинг, модели ASR и удерживаемые задачи. Проверить настоящий
+worker с транспортом провайдера, а затем новый запуск в установленном UI.
+
+Remove unrelated MusicBrainz waits from future lyric-only preparation. Freeze the
+LRCLIB-only scope in the server-selected manifest; retain older in-progress runs.
+Preserve same-revision non-lyric evidence with its original usage and expiry,
+normal LRCLIB pacing, errors and limits, all receipts and review gates. Verify
+the real worker/provider transport and installed UI. Keep audio, tracing, ASR
+models and held jobs unchanged.
+
+15.11.2026. Владелец отдельно разрешил оптимизацию реализации трейсинга после
+двух отказов прежнего CI-бюджета (p95 6,068% и 7,548%). Сохранить Jaeger,
+HTTP/DNS-трассы, настройки и порог 5%; не изменять очередь коллекции и музыкальную
+приёмку. Упаковывать общие метаданные OTLP без изменения данных span, ограничений
+8 КиБ/480 КиБ/8 МиБ и mTLS. Проверять эквивалентность декодированных сообщений,
+счётчики, прежние NFR и реальный отказ приёмника 600 секунд. Нативный прогон,
+GitHub, выкладку и чтение трасс подтверждать отдельно.
+[Описание](ru/trace-export-performance.md), [English](en/trace-export-performance.md).
+
+15 November 2026. The owner explicitly allowed implementation performance
+optimization after two failures of the existing CI budget (6.068% and 7.548%
+p95 overhead). Preserve Jaeger, HTTP/DNS coverage, settings and the 5% threshold;
+leave collection queues and musical acceptance intact. Group OTLP metadata
+without changing span contents, 8 KiB/480 KiB/8 MiB bounds or mTLS. Verify decoded
+equivalence, counters, unchanged NFR and the real 600-second receiver outage.
+Native testing, GitHub checks, deployment and trace readback remain separate
+acceptance stages.

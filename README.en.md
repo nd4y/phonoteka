@@ -2,7 +2,8 @@
 
 Preparation also finds songs whose only remaining gap is a stale lyric search.
 It refreshes catalog data without new audio fingerprints; resulting lyrics stay
-on review. [Refreshing lyric searches](docs/en/lyric-search-preparation.md).
+on review. New lyric-only preparation queries LRCLIB without waiting for unrelated
+metadata services. [Refreshing lyric searches](docs/en/lyric-search-preparation.md).
 
 Idle status polling is less frequent, and the job list reads a small projection
 instead of frozen inputs. Background cleanup checks changed or expiring records
@@ -194,3 +195,5 @@ The Sources tab is restored after a reload in the current window. Back closes it
 ### Preparation stop explanation
 
 When recording data or settings change, or a file is busy, both processing and preparation explain the stop and ask you to refresh the fill plan. Completed results remain available; the plan recalculates actions from current evidence.
+
+OTLP export groups shared packet metadata while preserving trace contents and existing size limits. Settings and Jaeger stay unchanged. [Export performance verification](docs/en/trace-export-performance.md).
