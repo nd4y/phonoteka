@@ -59,7 +59,13 @@ class SegmentDeadline:
         global _deadline_thread
         self.state, self.number = state, state['number']
         with _deadline_condition:
+            # The scheduler may still be sleeping until a cancelled head's
+            # earlier deadline. Keep that wake-up bound before pruning: moving
+            # the head later never needs a notification; inserting an earlier
+            # live deadline still does.
             earliest = _deadlines[0][0] if _deadlines else float('inf')
+            while _deadlines and _deadlines[0][2].state is None:
+                heapq.heappop(_deadlines)
             heapq.heappush(_deadlines, (state['started'] + SEGMENT_SECONDS,
                                      next(_deadline_sequence), self))
             if _deadline_thread is None:
@@ -72,8 +78,9 @@ class SegmentDeadline:
     def cancel(self):
         with _deadline_condition:
             self.state = None
-            if _deadlines and _deadlines[0][2] is self:
-                _deadline_condition.notify()
+            # Release the attempt immediately. Its cancelled timer cannot make
+            # a live deadline late; the next admission or scheduled wake prunes
+            # it without waking another Python thread on every file ending.
 
 
 def _run_deadlines():

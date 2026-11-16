@@ -12,6 +12,9 @@ remains available separately. [Scan modes](docs/en/incremental-scan.md).
 Trace export avoids redundant copies and attribute conversions while preserving
 HTTP/DNS coverage, Jaeger and existing bounds. [Performance](docs/en/trace-export-performance.md).
 
+Cancelled trace timers release attempt state without unnecessary scheduler wakes.
+Earlier live deadlines still wake the scheduler in time.
+
 Preparation also finds songs whose only remaining gap is a stale lyric search.
 It refreshes catalog data without new audio fingerprints; resulting lyrics stay
 on review. New lyric-only preparation queries LRCLIB without waiting for unrelated
