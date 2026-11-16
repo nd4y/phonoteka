@@ -59,7 +59,13 @@ class SegmentDeadline:
         global _deadline_thread
         self.state, self.number = state, state['number']
         with _deadline_condition:
+            # The scheduler may still be sleeping until a cancelled head's
+            # earlier deadline. Keep that wake-up bound before pruning: moving
+            # the head later never needs a notification; inserting an earlier
+            # live deadline still does.
             earliest = _deadlines[0][0] if _deadlines else float('inf')
+            while _deadlines and _deadlines[0][2].state is None:
+                heapq.heappop(_deadlines)
             heapq.heappush(_deadlines, (state['started'] + SEGMENT_SECONDS,
                                      next(_deadline_sequence), self))
             if _deadline_thread is None:
@@ -72,8 +78,9 @@ class SegmentDeadline:
     def cancel(self):
         with _deadline_condition:
             self.state = None
-            if _deadlines and _deadlines[0][2] is self:
-                _deadline_condition.notify()
+            # Release the attempt immediately. Its cancelled timer cannot make
+            # a live deadline late; the next admission or scheduled wake prunes
+            # it without waking another Python thread on every file ending.
 
 
 def _run_deadlines():
@@ -263,7 +270,7 @@ class BoundedProcessor(SpanProcessor):
             if self.stopping or len(self.queue) >= 2048 or self.bytes + 8192 > 8*1024*1024:
                 self.dropped += 1; return
             self.queue.append(span); self.bytes += 8192; self.accepted += 1
-            if len(self.queue) >= 128: self.lock.notify()
+            if len(self.queue) == 128: self.lock.notify()
 
     def _send(self, data, count):
         try:
@@ -294,8 +301,15 @@ class BoundedProcessor(SpanProcessor):
             try:
                 chunks = []; size = count = 0
                 try:
-                    encoded = encode_spans(batch)
-                    packets, rejected = _wire_batches(encoded)
+                    # Encoding holds Python's GIL even on a background thread.
+                    # Bound each turn, then yield before the next one, while
+                    # retaining one HTTP batch and the exact wire-size checks.
+                    packets = []; rejected = 0
+                    for offset in range(0, len(batch), 16):
+                        encoded = encode_spans(batch[offset:offset+16])
+                        part, oversized = _wire_batches(encoded)
+                        packets.extend(part); rejected += oversized
+                        if offset+16 < len(batch): time.sleep(0)
                 except Exception:
                     self.dropped += len(batch); continue
                 self.dropped += rejected

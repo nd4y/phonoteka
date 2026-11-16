@@ -3244,3 +3244,19 @@ or lyric changes. Distinguish absent images from unconfirmed editions. Retain
 receipts, exclusions and all application gates; disputed data stays unaccepted.
 Leave tracing and the PC2 environment unchanged. CI, deployment and installed
 UI acceptance require separate evidence; this entry does not establish them.
+
+16.11.2026. После повторных отказов main по лимиту p95 пользователь явно
+разрешил менять реализацию трейсинга. Устранить измеренную лишнюю работу,
+сохраняя Jaeger, покрытие HTTP/DNS, настройки, приватность и бюджет 5%.
+Проверить исходный механизм, исправление на build-01, обязательный CI,
+затем установить через защищённый процесс и продолжить заполнение через UI.
+Спорные данные, миксы и разговорные записи не применять; окружение PC2
+и прежние удержанные задачи сохраняются. Приёмка этапов остаётся раздельной.
+
+16 November 2026. After repeated main p95 gate failures, the owner explicitly
+authorized tracing implementation changes. Remove measured unnecessary work
+while preserving Jaeger, HTTP/DNS coverage, configuration, privacy and the 5%
+budget. Verify the original mechanism, candidate on build-01 and required CI,
+then install through the guarded release process and resume UI enrichment.
+Do not apply disputed data, mixes or speech; preserve PC2 and existing held
+jobs. Each acceptance stage still requires separate evidence.

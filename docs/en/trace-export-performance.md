@@ -1,5 +1,30 @@
 # Trace export performance
 
+## Cancelled timers
+
+Completing a short attempt releases its state reference without waking the
+scheduler for a cancelled timer. The next admission removes cancelled heap
+heads. Deadline comparison retains the previous wait boundary: moving the head
+later needs no wake, while an earlier live deadline still wakes the thread.
+Business operations, segment duration and continuation links stay unchanged.
+
+`tests/test_trace_deadline_admission.py` checks bounded admission while the
+consumer is busy and both cancelled/live deadline orders. The regression must
+fail on the original module and pass on the candidate. This demonstrates a
+specific bookkeeping cost. Shared-runner p95 variability is assessed separately;
+one negative overhead measurement or profiler result does not establish its
+resolution.
+
+## Wire format and bounds
+
+Serialization runs in turns of at most 16 spans, yielding the background thread
+between turns so a large batch cannot monopolize Python's GIL. Encoded packets
+still share one HTTP batch. An encoding failure discards that entire batch with
+explicit counters; no partly encoded batch is reported as exported. Admission
+wakes the exporter only when the queue first reaches its drain threshold.
+The real-SDK regression checks decoded equivalence across instrumentation
+scopes, failure accounting and recovery on the next batch.
+
 The exporter serializes spans sharing resource and instrumentation-scope metadata
 together. Identifiers, parents, links, timestamps, events, attributes and status
 remain intact. This changes OTLP packing and adds no settings. Jaeger and HTTP/DNS
