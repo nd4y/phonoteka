@@ -3226,3 +3226,21 @@ span copies while preparing metadata and unnecessary short-ASCII conversions.
 Preserve unknown protobuf fields, exact wire bounds, HTTP/DNS coverage, settings
 and the unchanged 5% budget. Verify equivalence, generated load and the real
 600-second outage without modifying the acceptance workload.
+
+15.11.2026. Пользователь согласовал выполнение плана дальнейшего заполнения:
+сначала доказательства тегов/обложек, отдельная музыкальная приемка таймкодов,
+затем публикация, каталогизация и доставка. Для распознанных записей добавить
+однократную подготовку ещё не полученных обложек по известному альбому, без
+новых аудиоотпечатков и изменения текста. Различать отсутствие изображения
+и неподтвержденное издание. Сохранять квитанции, исключения и все правила
+применения; спорное не принимать. Трейсинг и окружение PC2 не менять.
+Сборка, установка и приемка UI подтверждаются отдельно; эта запись их не заменяет.
+
+15 November 2026. The owner approved execution of the further-enrichment plan:
+metadata/artwork evidence first, separate musical timing acceptance, then
+publication, cataloguing and delivery. For identified recordings, add one-time
+preparation of unqueried artwork from a known album, without new fingerprints
+or lyric changes. Distinguish absent images from unconfirmed editions. Retain
+receipts, exclusions and all application gates; disputed data stays unaccepted.
+Leave tracing and the PC2 environment unchanged. CI, deployment and installed
+UI acceptance require separate evidence; this entry does not establish them.

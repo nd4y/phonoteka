@@ -26,6 +26,7 @@ MESSAGES = {
     'recording_incomplete': 'У совпадения по отпечатку неполные название или исполнитель. Автоматическая запись и подготовка заблокированы.',
     'album_unconfirmed': 'Для этой записи найдены разные альбомы или альбом не установлен.',
     'cover_edition_unconfirmed': 'Не подтверждена обложка подходящего издания.',
+    'cover_evidence_missing': 'В сохранённых результатах нет изображения обложки. Получите варианты для подходящего альбома или издания.',
     'candidate_unavailable': 'Подходящего доступного варианта для этого поля пока нет.',
     'provider_usage_denied': 'Источник ограничивает использование этих данных или срок хранения истёк.',
     'field_locked': 'Поле закреплено пользователем.',
@@ -228,9 +229,13 @@ def evaluate(settings, conn, row, active, *, busy=None, retired=None):
         if present: continue
         c = chosen[field]
         reason = blocked[0] if blocked else identity_error
-        if not reason and not c:
-            reason = 'cover_edition_unconfirmed' if field == 'cover' else 'album_unconfirmed' if field == 'album' else 'candidate_unavailable'
         if not reason and field in policy['locks']: reason = 'field_locked'
+        if not reason and not c:
+            if field == 'cover':
+                reason = ('cover_edition_unconfirmed' if any(candidate.get('cover') for candidate in candidates)
+                          else 'cover_evidence_missing')
+            else:
+                reason = 'album_unconfirmed' if field == 'album' else 'candidate_unavailable'
         if not reason and not permitted(conn, c): reason = 'provider_usage_denied'
         if not reason:
             value = c['cover'] if field == 'cover' else scalar(c.get('tags', {}), field)
