@@ -270,7 +270,7 @@ class BoundedProcessor(SpanProcessor):
             if self.stopping or len(self.queue) >= 2048 or self.bytes + 8192 > 8*1024*1024:
                 self.dropped += 1; return
             self.queue.append(span); self.bytes += 8192; self.accepted += 1
-            if len(self.queue) >= 128: self.lock.notify()
+            if len(self.queue) == 128: self.lock.notify()
 
     def _send(self, data, count):
         try:
@@ -301,8 +301,15 @@ class BoundedProcessor(SpanProcessor):
             try:
                 chunks = []; size = count = 0
                 try:
-                    encoded = encode_spans(batch)
-                    packets, rejected = _wire_batches(encoded)
+                    # Encoding holds Python's GIL even on a background thread.
+                    # Bound each turn, then yield before the next one, while
+                    # retaining one HTTP batch and the exact wire-size checks.
+                    packets = []; rejected = 0
+                    for offset in range(0, len(batch), 16):
+                        encoded = encode_spans(batch[offset:offset+16])
+                        part, oversized = _wire_batches(encoded)
+                        packets.extend(part); rejected += oversized
+                        if offset+16 < len(batch): time.sleep(0)
                 except Exception:
                     self.dropped += len(batch); continue
                 self.dropped += rejected

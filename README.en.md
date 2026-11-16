@@ -14,6 +14,8 @@ HTTP/DNS coverage, Jaeger and existing bounds. [Performance](docs/en/trace-expor
 
 Cancelled trace timers release attempt state without unnecessary scheduler wakes.
 Earlier live deadlines still wake the scheduler in time.
+Background serialization yields between bounded turns while retaining a single
+HTTP batch and unchanged span contents and limits.
 
 Preparation also finds songs whose only remaining gap is a stale lyric search.
 It refreshes catalog data without new audio fingerprints; resulting lyrics stay

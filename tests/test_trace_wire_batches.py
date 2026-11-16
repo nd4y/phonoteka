@@ -2,12 +2,81 @@
 from io import BytesIO
 import os
 import sys
+import threading
 from unittest.mock import patch
 
 import pytest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 from phonoteka import tracing
+
+
+def test_quantized_export_preserves_real_sdk_spans_and_atomic_encoding_failure():
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import Link, SpanContext, SpanKind, Status, StatusCode
+
+    collector = InMemorySpanExporter()
+    provider = TracerProvider(resource=Resource({'service.name':'generated-quantum'}), shutdown_on_exit=False)
+    provider.add_span_processor(SimpleSpanProcessor(collector))
+    try:
+        for index in range(128):
+            tracer = provider.get_tracer('generated-'+str(index % 2), '1')
+            with tracer.start_as_current_span('http.client', kind=SpanKind.CLIENT,
+                    links=[Link(SpanContext(1, 2, False))], attributes={'generated.index':index}) as current:
+                current.add_event('generated-event', {'generated.value':index})
+                current.set_status(Status(StatusCode.OK))
+        spans = collector.get_finished_spans()
+        expected = flattened([tracing.encode_spans(spans)])
+
+        class Response:
+            status_code = 200
+            def __init__(self): self.raw = BytesIO(b'')
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+
+        class Session:
+            def __init__(self): self.sent = []
+            def post(self, endpoint, *, data, **kwargs):
+                assert len(data) <= 480*1024
+                self.sent.append(ExportTraceServiceRequest.FromString(data))
+                return Response()
+
+        original = tracing.encode_spans
+        for broken in (False, True):
+            session = Session(); calls = []
+            def encode(batch):
+                calls.append((len(batch), threading.current_thread().name))
+                if broken and any(s.attributes['generated.index'] == 17 for s in batch):
+                    raise ValueError('generated-encoder-failure')
+                return original(batch)
+            with patch.object(tracing, 'encode_spans', side_effect=encode):
+                processor = tracing.BoundedProcessor('https://localhost/generated', session)
+                try:
+                    # Admit one whole batch before the consumer can drain it.
+                    with processor.lock:
+                        for current in spans: processor.on_end(current)
+                    assert processor.force_flush(2000)
+                    assert all(name == 'otlp-export' for _, name in calls)
+                    if broken:
+                        assert processor.accepted == processor.dropped == 128
+                        assert processor.exported == processor.failed == 0 and session.sent == []
+                        # A failed encoding does not kill export or poison the next batch.
+                        processor.on_end(spans[0]); assert processor.force_flush(2000)
+                        assert processor.exported == 1 and processor.dropped == 128
+                    else:
+                        assert processor.accepted == processor.exported == 128
+                        assert processor.dropped == processor.failed == 0
+                        # Different instrumentation scopes are grouped by the SDK.
+                        assert sorted(flattened(session.sent)) == sorted(expected)
+                        assert len(session.sent) == 1
+                finally:
+                    processor.shutdown(); processor.thread.join(2)
+                assert not processor.thread.is_alive()
+    finally:
+        provider.shutdown()
 
 
 def message(resources=1, scopes=1, spans=4, payload=0):

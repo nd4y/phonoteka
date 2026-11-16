@@ -17,6 +17,14 @@ resolution.
 
 ## Wire format and bounds
 
+Serialization runs in turns of at most 16 spans, yielding the background thread
+between turns so a large batch cannot monopolize Python's GIL. Encoded packets
+still share one HTTP batch. An encoding failure discards that entire batch with
+explicit counters; no partly encoded batch is reported as exported. Admission
+wakes the exporter only when the queue first reaches its drain threshold.
+The real-SDK regression checks decoded equivalence across instrumentation
+scopes, failure accounting and recovery on the next batch.
+
 The exporter serializes spans sharing resource and instrumentation-scope metadata
 together. Identifiers, parents, links, timestamps, events, attributes and status
 remain intact. This changes OTLP packing and adds no settings. Jaeger and HTTP/DNS

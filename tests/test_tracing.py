@@ -255,9 +255,11 @@ def test_export_failure_does_not_break_work_and_queue_is_bounded(spans):
 def test_serialization_runs_off_business_thread_once_with_wire_bounds(spans, monkeypatch):
     import io
     from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
-    requests=[];encoders=[];encode=tracing.encode_spans;caller=threading.get_ident()
+    requests=[];encoders=[];encoded_ids=[];encode=tracing.encode_spans;caller=threading.get_ident()
     def measured(values):
         encoders.append(threading.get_ident())
+        encoded_ids.extend((value.context.trace_id,value.context.span_id) for value in values)
+        assert len(values)<=16
         return encode(values)
     monkeypatch.setattr(tracing,'encode_spans',measured)
     class Response:
@@ -277,7 +279,9 @@ def test_serialization_runs_off_business_thread_once_with_wire_bounds(spans, mon
         assert not encoders
     assert processor.force_flush(2000)
     processor.shutdown()
-    assert len(encoders)==2 and caller not in encoders  # 128 + 13 spans
+    assert caller not in encoders
+    # Each admitted span is encoded once, even across bounded background turns.
+    assert sorted(encoded_ids)==sorted((value.context.trace_id,value.context.span_id) for value in values)
     assert processor.exported==140 and processor.dropped==1
     received=[]
     for payload in requests:
