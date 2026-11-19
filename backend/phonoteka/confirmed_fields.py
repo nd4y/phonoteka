@@ -436,10 +436,11 @@ def install(app, settings):
             busy = active_tracks(conn)
             retired = catalog_sources.completed_sources(conn)
             from . import metadata_preparation
+            connection = metadata_preparation.acoustid_connection(settings)
             items = []
             for row in rows[:limit]:
                 result = public(evaluate(settings, conn, row, active, busy=busy, retired=retired))
-                result['preparation'] = metadata_preparation.candidate(settings, conn, row, active, result)
+                result['preparation'] = metadata_preparation.candidate(settings, conn, row, active, result, connection)
                 items.append(result)
         return {'contract': CONTRACT, 'items': items, 'next_after': rows[limit - 1]['id'] if len(rows) > limit else None,
                 'scanned': len(items), 'total': total}

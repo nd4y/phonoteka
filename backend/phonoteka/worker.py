@@ -845,6 +845,9 @@ class Worker:
 
     async def analyze_item(self, job, item, *, lyrics_only=False):
         fingerprint = job.get('kind','analyze')=='recognize'
+        continuation = item.get('acoustid_continuation')
+        if continuation and not fingerprint:
+            raise media.MediaError('preparation_invalid', 'Проверка AcoustID требует задания распознавания')
         if not (self.settings.external_fingerprints if fingerprint else self.settings.external_metadata):
             raise media.MediaError('provider_disabled', 'Внешние метаданные отключены')
         row = await self.io(db.fetchone, self.settings.db_path, 'SELECT * FROM tracks WHERE id=? AND is_current=1', (item['track_id'],))
@@ -915,6 +918,26 @@ class Worker:
             previous=await self.io(db.fetchone,self.settings.db_path,'SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256']))
             if configured['configured'] and previous and not recording_review.possible_mix(meta,item['sha256']):
                 segment_result=recognition.pending_acoustid(json.loads(previous['payload']),item['sha256'],float(meta.get('duration',0)))
+            if continuation:
+                from . import enrichment_gaps, metadata_preparation
+                await self.io(metadata_preparation.authorize, self.settings, job)
+                if (not enrichment_gaps.individual_music(meta, item['sha256']) or not segment_result
+                        or configured['version'] != continuation.get('connection_version')
+                        or provider_policy.digest(segment_result) != continuation.get('proof')):
+                    raise media.MediaError('preparation_stale', 'Подключение AcoustID или исходная проверка изменились')
+                try:
+                    await self.io(provider_attempts.require_recognition_capacity, self.settings, audio_identity)
+                except provider_attempts.UsageError as exc:
+                    raise media.MediaError(exc.code, 'Лимит запросов для этой записи исчерпан') from exc
+
+            def authorize_acoustid():
+                authorized()
+                if continuation:
+                    metadata_preparation.authorize(self.settings, job)
+                    current = acoustid.public_connection(self.settings)
+                    if not current['configured'] or current['version'] != continuation['connection_version']:
+                        raise media.MediaError('connection_conflict', 'Подключение AcoustID изменилось; запрос не отправлен')
+
             await self.io(self.item_action,job,item,'fingerprint_sample')
             async def sample_audio(offset):
                 await self.io(self.item_action,job,item,'fingerprint_sample')
@@ -944,7 +967,7 @@ class Worker:
                     await self.io(media._expect,path,item['sha256'])
                     await self.io(self.item_action,job,item,'fingerprint_lookup')
                     with provider_attempts.recognition_scope(audio_identity,job['id']), provider_attempts.input_revision(item['sha256']):
-                        acoustid_candidates=await acoustid.identify(self.providers,signature,float(meta['duration']),authorized,
+                        acoustid_candidates=await acoustid.identify(self.providers,signature,float(meta['duration']),authorize_acoustid,
                             **({'cache_only':True} if cache_only_fallback else {}))
                     acoustid_cache_only_completed=cache_only_fallback
                     if len(acoustid_candidates)==1:identified=acoustid_candidates[0]

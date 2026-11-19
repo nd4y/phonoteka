@@ -87,6 +87,13 @@ describe("preparation selection", () => {
   });
 });
 describe("preparation priorities", () => {
+  it("offers the bounded AcoustID continuation before unrelated lookups", () => {
+    const pending = Array.from({ length: 51 }, (_, i) => item(i, "recognize", 1));
+    for (const entry of pending) entry.preparation.acoustid_continuation = {};
+    expect(preparationBatch([item(99, "analyze"), ...pending, item(199, "recognize", 0)])).toEqual(
+      pending.slice(0, 50),
+    );
+  });
   it("searches metadata before consuming recognition or checking exhausted caches", () => {
     const values = [item(1, "recognize", 0), item(2, "recognize", 2), item(3, "analyze")];
     expect(preparationBatch(values).map((i) => i.id)).toEqual([3]);
