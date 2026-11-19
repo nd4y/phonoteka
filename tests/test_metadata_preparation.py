@@ -114,6 +114,60 @@ def test_new_acoustid_connection_continues_only_the_unsent_provider(library, mon
         assert any(c.get('identification') == 'recording_id_lookup' for c in current['candidates'])
 
 
+@pytest.mark.parametrize('outcome', ['same_recording', 'different_duration', 'not_found'])
+def test_embedded_recording_check_without_another_fingerprint(library, monkeypatch, outcome):
+    from phonoteka import recognition
+    from phonoteka.providers import Providers
+
+    cfg, client, headers, tid, sha, path = library
+    reference = '5e03a300-8f90-4ed2-9dc1-4bc48581826f'
+    with db.transaction(cfg.db_path) as conn:
+        meta = json.loads(conn.execute('SELECT metadata FROM tracks WHERE id=?', (tid,)).fetchone()[0])
+        meta['duration'] = 240
+        meta['tags'].update(title=['Original'], artist=['Artist'], musicbrainz_trackid=[reference.upper()])
+        conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), tid))
+        stored = json.loads(conn.execute('SELECT payload FROM analyses WHERE track_id=?', (tid,)).fetchone()[0])
+        stored['candidates'] = [c for c in stored['candidates'] if c.get('provider') == 'coverartarchive']
+        conn.execute('UPDATE analyses SET payload=? WHERE track_id=?', (db.encode(stored), tid))
+    identity = meta['audit']['audio_identity']
+    with provider_attempts.recognition_scope(identity, 'previous'):
+        for _ in range(provider_attempts.RECOGNITION_CALL_LIMIT):
+            provider_attempts.reserve(cfg, 'shazam', 'fingerprint')
+    calls = []
+
+    async def fetch(self, source, url, params=None, **kwargs):
+        assert source == 'musicbrainz'
+        assert url.endswith('/ws/2/recording/' + reference)
+        calls.append(source)
+        if outcome == 'not_found':
+            return None
+        return {'id': reference, 'title': 'Original', 'length': 240000 if outcome == 'same_recording' else 305000,
+                'artist-credit': [{'name': 'Artist'}]}
+
+    async def no_fingerprint(*args, **kwargs):
+        pytest.fail('The catalogue check cannot submit fingerprints')
+
+    monkeypatch.setattr(Providers, 'get', fetch)
+    monkeypatch.setattr(recognition, 'identify_segments', no_fingerprint)
+    value = entry(client)
+    assert value['preparation']['kind'] == 'analyze'
+    assert value['preparation']['embedded_recording_check'] == reference
+    response = start(client, headers)
+    assert response.status_code == 202, response.text
+    drain(cfg)
+    prep.tick(cfg)
+    assert calls == ['musicbrainz']
+    analysis = client.get('/api/tracks/' + tid).json()['analysis']
+    assert analysis['query_source'] == 'embedded_recording_id'
+    found = [c for c in analysis['candidates'] if c['provider'] == 'musicbrainz']
+    assert bool(found) == (outcome != 'not_found')
+    if found:
+        assert found[0]['match']['state'] == ('matching_metadata' if outcome == 'same_recording' else 'needs_review')
+    assert any(c.get('provider') == 'coverartarchive' for c in analysis['candidates'])
+    assert not entry(client)['ready'] and not (entry(client)['preparation'] or {}).get('embedded_recording_check')
+    assert media.sha256_file(path) == sha
+
+
 @pytest.mark.parametrize('missing', ['title', 'artist', 'both'])
 def test_incomplete_fingerprint_identity_has_precise_reason_and_stays_blocked(library, missing):
     cfg, client, headers, tid, sha, path = library

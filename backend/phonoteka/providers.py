@@ -56,6 +56,20 @@ def scalar(tags, key):
     return str(value[0] if isinstance(value, list) and value else value or '')
 
 
+def embedded_recording_id(meta):
+    tags = meta.get('tags', {})
+    value = tags.get('musicbrainz_trackid')
+    ids = value if isinstance(value, list) else [value]
+    if len(ids) != 1 or not isinstance(ids[0], str):
+        return None
+    identity = ids[0].strip().lower()
+    duration = meta.get('duration')
+    if (RECORDING_ID.fullmatch(identity) and type(duration) in (int, float) and 3 <= duration <= 21600
+            and all(normalized(scalar(tags, field)) for field in ('title', 'artist'))):
+        return identity
+    return None
+
+
 def query_tags(meta, relative):
     tags = {k:scalar(meta.get('tags',{}), k) for k in ('title','artist','album')}
     provenance = 'embedded'
@@ -293,7 +307,7 @@ class Providers:
                 conn.execute('DELETE FROM provider_cache WHERE key IN (SELECT key FROM provider_cache ORDER BY expires LIMIT 100)')
             conn.execute('INSERT OR REPLACE INTO provider_cache VALUES(?,?,?,?)',(key,provider,payload,time.time()+min(usage['cache_ttl'],86400 if data is None else 7*86400)))
 
-    async def musicbrainz(self, query, duration, *, restrict_album=False, recording_id=None):
+    async def musicbrainz(self, query, duration, *, restrict_album=False, recording_id=None, exact_only=False):
         def escape(value): return re.sub(r'([+\-&|!(){}\[\]^"~*?:\\/])',r'\\\1',value[:180])
         url = 'https://' + self.settings.musicbrainz_host + '/ws/2/recording'
         if isinstance(recording_id, str) and RECORDING_ID.fullmatch(recording_id) and not restrict_album:
@@ -304,6 +318,8 @@ class Providers:
                     raise ProviderError('provider_error', 'musicbrainz', 'Каталог вернул другой идентификатор записи')
                 item = musicbrainz_candidate(data, query, duration, False)
                 return [{**item, 'identification': 'recording_id_lookup'}]
+        if exact_only:
+            return []
         q='recording:"'+escape(query['title'])+'"'
         if query['artist']: q+=' AND artist:"'+escape(query['artist'])+'"'
         if restrict_album: q+=' AND release:"'+escape(query['album'])+'"'
@@ -378,6 +394,26 @@ class Providers:
     async def analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None, lyrics_only=False):
         with provider_attempts.input_revision(meta.get('sha256')):
             return await self._analyze(meta,relative,identified,authorize,album_hint=album_hint,lyrics_only=lyrics_only)
+
+    async def check_embedded_recording(self, meta, relative, identity, authorize):
+        """Check the file's own recording reference, retaining candidates for manual review."""
+        if identity != embedded_recording_id(meta):
+            raise media.MediaError('preparation_stale', 'Идентификатор записи в файле изменился')
+        query, _ = query_tags(meta, relative)
+        with authorization(authorize), provider_attempts.input_revision(meta['sha256']):
+            authorize()
+            try:
+                candidates = await self.musicbrainz(query, meta['duration'], recording_id=identity, exact_only=True)
+                state = 'candidates' if candidates else 'no_match'
+                source = {'provider': 'musicbrainz', 'state': state, 'count': len(candidates)}
+            except ProviderError as exc:
+                if exc.code == 'provider_unavailable':
+                    await asyncio.to_thread(self.unavailable, 'musicbrainz')
+                candidates, state = [], 'incomplete'
+                source = {'provider': 'musicbrainz', 'state': exc.code, 'message': str(exc)}
+        return {'input_sha256': meta['sha256'], 'policy': POLICY_VERSION, 'query': query,
+                'query_source': 'embedded_recording_id', 'candidates': candidates, 'sources': [source],
+                'state': state, 'automatic_apply': False}
 
     async def _analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None, lyrics_only=False):
         if lyrics_only and album_hint:

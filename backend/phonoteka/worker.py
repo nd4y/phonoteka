@@ -861,6 +861,11 @@ class Worker:
         await self.io(media._expect, path, item['sha256'])
         meta = json.loads(row['metadata'])
         album_hint = item.get('album_hint')
+        embedded_check = item.get('embedded_recording_check')
+        if embedded_check:
+            from . import enrichment_gaps, metadata_preparation
+            if fingerprint or lyrics_only or album_hint or not enrichment_gaps.individual_music(meta, item['sha256']):
+                raise media.MediaError('preparation_stale', 'Запись больше не подходит для сверки с MusicBrainz')
         if lyrics_only and (fingerprint or album_hint):
             raise media.MediaError('preparation_invalid','Поиск текста не распознаёт аудио и не уточняет альбом')
         if album_hint and not can_search_album(row,meta):
@@ -976,7 +981,7 @@ class Worker:
                 except ProviderError as exc:
                     acoustid_source={'provider':'acoustid','state':exc.code}
                     if cache_only_fallback and exc.code!='recognition_attempt_budget_exhausted':acoustid_cache_only_error=exc
-        else:
+        elif not embedded_check:
             previous=await self.io(db.fetchone,self.settings.db_path,'SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',(item['track_id'],item['sha256']))
             if previous:
                 old_candidates=json.loads(previous['payload']).get('candidates',[])
@@ -988,6 +993,13 @@ class Worker:
             # Never use the first song of a compilation as a whole-file query.
             result={'input_sha256':item['sha256'],'query_source':'conflicting_audio_segments','candidates':[],
                     'sources':[],'automatic_apply':False,'state':'needs_review'}
+        elif embedded_check:
+            await self.io(self.item_action,job,item,'metadata_lookup')
+            def authorize_catalogue_check():
+                self.authorize_grant(job)
+                metadata_preparation.authorize(self.settings, job)
+            result = await self.providers.check_embedded_recording(meta, item['relative_path'], embedded_check,
+                                                                  authorize_catalogue_check)
         elif self.settings.external_metadata:
             await self.io(self.item_action,job,item,'metadata_lookup')
             options = {'album_hint':album_hint} if album_hint else {}
@@ -1013,7 +1025,7 @@ class Worker:
             result['candidates'][:0]=acoustid_candidates
             if acoustid_candidates:result['state']='candidates'
         # Album artwork already next to the track is a local candidate, never an arbitrary path.
-        if not meta.get('has_art'):
+        if not embedded_check and not meta.get('has_art'):
             local = await self.io(self.local_cover, path)
             if local:
                 result['candidates'].append(local)
@@ -1029,7 +1041,11 @@ class Worker:
                 old=json.loads(previous['payload'])
                 for key in ('asr','alignment'):
                     if key in old: result[key]=old[key]
-                if lyrics_only:
+                if embedded_check:
+                    new_ids = {c['id'] for c in result['candidates']}
+                    result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('id') not in new_ids)
+                    result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider')!='musicbrainz')
+                elif lyrics_only:
                     # Keep exact-revision metadata evidence and its original
                     # usage/expiry. A lyric query never refreshes other sources.
                     result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider')!='lrclib')
@@ -1062,8 +1078,8 @@ class Worker:
         if acoustid_cache_only_error:
             raise media.MediaError(acoustid_cache_only_error.code,str(acoustid_cache_only_error)) from acoustid_cache_only_error
         retry=[]
-        searched = {'lrclib'} if lyrics_only else {'shazam','acoustid'} if fingerprint else {'musicbrainz','coverartarchive'}
-        if not fingerprint and not album_hint: searched.add('lrclib')
+        searched = {'musicbrainz'} if embedded_check else {'lrclib'} if lyrics_only else {'shazam','acoustid'} if fingerprint else {'musicbrainz','coverartarchive'}
+        if not fingerprint and not album_hint and not embedded_check: searched.add('lrclib')
         for source in result['sources']:
             if source['provider'] not in searched:continue
             if source.get('state') in {'recognition_attempt_budget_exhausted','recognition_identity_required'}:

@@ -8,6 +8,8 @@ When an earlier search could not use AcoustID because it was unconfigured, a new
 
 In Needs review, check the collection, select the records offered for AcoustID, and start Prepare data. The plan offers up to 50 records at a time. It reuses the saved Shazam result without sending that fingerprint again. A strong unambiguous AcoustID result is checked against its MusicBrainz recording ID. Title, artist and duration still have to agree. Editions, artwork and synchronized lyrics require their own evidence.
 
+When fingerprint attempts are exhausted, the plan may offer to check an embedded recording ID against MusicBrainz. The check requires one recording ID, title and artist tags, a known duration and a current audio audit. MusicBrainz receives the recording ID. The result remains a candidate to review against the audio.
+
 ## UI setup
 
 1. Register an application in [Your Applications](https://acoustid.org/new-application) and obtain an Application API key. The User API key is for submitting fingerprints and is not used here.

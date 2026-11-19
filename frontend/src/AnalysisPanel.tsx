@@ -119,7 +119,9 @@ export function AnalysisPanel({
                 event.preventDefault();
                 const album = String(new FormData(event.currentTarget).get("album") || "").trim();
                 if (album && !busy && !changed && !track.input_error) {
-                  void onJob("analyze", { release_search: { album, revision: track.sha256 } });
+                  void onJob("analyze", {
+                    release_search: { album, revision: track.sha256 },
+                  });
                 }
               }}
             >
@@ -300,6 +302,12 @@ export function AnalysisPanel({
           )}
           {analysis.query_source === "album_hint" && (
             <p className="muted small">Поиск изданий выполнен по указанному альбому.</p>
+          )}
+          {analysis.query_source === "embedded_recording_id" && (
+            <p className="muted small">
+              Для сверки с MusicBrainz использован идентификатор из файла. Если найдена версия
+              записи, проверьте её по аудио.
+            </p>
           )}
           {!!analysis.candidates.length && (
             <SourceCandidatePicker

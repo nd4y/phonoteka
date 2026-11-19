@@ -5,6 +5,7 @@ export type EvidencePreparation = {
   fingerprint_requests_remaining?: number | null;
   album_hint?: string;
   acoustid_continuation?: object;
+  embedded_recording_check?: string;
 };
 
 export function preparationBatch<T extends { preparation?: EvidencePreparation | null }>(
@@ -13,6 +14,8 @@ export function preparationBatch<T extends { preparation?: EvidencePreparation |
   const eligible = items.filter((i) => i.preparation);
   const pendingAcoustid = eligible.filter((i) => i.preparation?.acoustid_continuation);
   if (pendingAcoustid.length) return pendingAcoustid.slice(0, 50);
+  const recordingReferences = eligible.filter((i) => i.preparation?.embedded_recording_check);
+  if (recordingReferences.length) return recordingReferences.slice(0, 50);
   const metadata = eligible.filter((i) => i.preparation!.kind === "analyze");
   if (metadata.length) return metadata.slice(0, 50);
   // A small capacity group must not indefinitely postpone existing cache work.
