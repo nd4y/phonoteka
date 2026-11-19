@@ -7,6 +7,7 @@ from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import artwork_preparation, confirmed_fields as fields, db, enrichment_gaps, field_policy, input_readiness, lyrics_review, media, provider_attempts, provider_policy, security, webhooks
+from .providers import LYRICS_QUERY_PROFILE, normalized, scalar
 
 KEY = 'metadata_preparation'
 CONTRACT = 'metadata-preparation-v1'
@@ -163,6 +164,39 @@ def lyric_refresh(conn, settings, row, metadata):
     return len(reasons) == 1 and reasons[0]['code'] in {'results_expired', 'search_stale'}
 
 
+def lyric_variant(conn, row, metadata, analysis):
+    """Offer a distinct query after a determinate, current legacy search."""
+    if not analysis or metadata.get('lrc') or 'lrc' in field_policy.load(conn, row['id'])['locks']:
+        return False
+    tags = metadata.get('tags', {})
+    query = analysis.get('query') or {}
+    if not all(normalized(scalar(tags, field)) and
+               normalized(scalar(tags, field)) == normalized(scalar(query, field))
+               for field in ('title', 'artist')):
+        return False
+    duration = metadata.get('duration')
+    if not fields.number(duration) or not 1 <= duration <= 3600:
+        return False
+    sources = [s for s in analysis.get('sources', []) if isinstance(s, dict) and s.get('provider') == 'lrclib']
+    if (len(sources) != 1 or sources[0].get('state') not in {'no_match', 'candidates'}
+            or sources[0].get('query_profile') == LYRICS_QUERY_PROFILE
+            or any(c.get('lrc') for c in analysis.get('candidates', []))):
+        return False
+    if enrichment_gaps.project(conn, [row['id']]).get(row['id'], {}).get('last_failed_search'):
+        return False
+    if lyrics_review.load(conn, row['id']).get('instrumental_confirmed'):
+        return False
+    rule = provider_policy.rule(conn, 'lrclib', 'lyrics')
+    if not all(rule.get('allow_' + operation) for operation in ('fetch', 'cache', 'embed')):
+        return False
+    proposal = conn.execute('SELECT input_sha256,payload FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1',
+                            (row['id'],)).fetchone()
+    if not proposal or proposal['input_sha256'] != row['sha256']:
+        return True
+    draft = json.loads(proposal['payload'])
+    return not (draft.get('lrc') or (draft.get('lyrics_document') or {}).get('lines'))
+
+
 def candidate(settings, conn, row, active, result):
     if result['ready'] or set(result['blocked']) - SAFE_BLOCKS:
         return None
@@ -171,7 +205,7 @@ def candidate(settings, conn, row, active, result):
         return None
     metadata = json.loads(row['metadata'])
     refresh_lyrics = not gaps and lyric_refresh(conn, settings, row, metadata)
-    if not gaps and not refresh_lyrics:
+    if not gaps and not refresh_lyrics and metadata.get('lrc'):
         return None
     saved = conn.execute('SELECT * FROM analyses WHERE track_id=?', (row['id'],)).fetchone()
     analysis = json.loads(saved['payload']) if saved and saved['input_sha256'] == row['sha256'] else {}
@@ -198,7 +232,11 @@ def candidate(settings, conn, row, active, result):
             projected = enrichment_gaps.project(conn, [row['id']]).get(row['id'], {})
             if not projected.get('last_failed_search'):
                 art_hint = artwork_preparation.album_hint(metadata, analysis, matches)
-    kind = 'analyze' if refresh_lyrics or art_hint or matches or fingerprints else 'recognize'
+    expanded_lyrics = (not art_hint and not refresh_lyrics and bool(fingerprints)
+                       and lyric_variant(conn, row, metadata, analysis))
+    if not gaps and not refresh_lyrics and not expanded_lyrics:
+        return None
+    kind = 'analyze' if refresh_lyrics or expanded_lyrics or art_hint or matches or fingerprints else 'recognize'
     if not settings.external_metadata or kind == 'recognize' and not settings.external_fingerprints:
         return None
     identity = (metadata.get('audit') or {}).get('audio_identity')
@@ -211,6 +249,8 @@ def candidate(settings, conn, row, active, result):
     dependency = [CONTRACT, row['id'], row['sha256'], kind, guards(conn, row)]
     if art_hint:
         dependency.append([ARTWORK_PROFILE, fields.digest(art_hint)])
+    if expanded_lyrics:
+        dependency.append(LYRICS_QUERY_PROFILE)
     if refresh_lyrics:
         # A new capability is not permission to replay a previous attempt.
         # Keep every old receipt, including failed, cancelled and unknown runs.
@@ -225,7 +265,7 @@ def candidate(settings, conn, row, active, result):
     receipt = conn.execute('SELECT value FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone()
     recovery_of = None
     if receipt:
-        if refresh_lyrics or art_hint:
+        if refresh_lyrics or expanded_lyrics or art_hint:
             return None
         recovered = unsearched_recovery(settings, conn, row, active, signature, receipt[0], kind, dependency[4])
         if not recovered:
@@ -235,10 +275,12 @@ def candidate(settings, conn, row, active, result):
     return {'token': fields.digest([signature, result['token'], remaining]), 'receipt': signature,
             'fingerprint_requests_remaining': remaining if kind == 'recognize' else None,
             'kind': kind, 'scan': bool(recovery_of) or not stable,
-            **({'lyric_search_only': True} if refresh_lyrics else {}),
+            **({'lyric_search_only': True} if refresh_lyrics or expanded_lyrics else {}),
+            **({'expanded_lyrics': True} if expanded_lyrics else {}),
             **({'album_hint': art_hint} if art_hint else {}),
             **({'recovery_of': recovery_of} if recovery_of else {}),
             'reason': 'Запросим обложки известного альбома. Аудиоотпечаток, текст и файлы не меняются; выбор издания останется на проверке.' if art_hint else
+                      'Поищем текст по названию и исполнителю другим запросом LRCLIB. Новые таймкоды останутся на проверке.' if expanded_lyrics else
                       'Обновим устаревший поиск текста. Распознавание по отпечатку не запускается; текст останется на проверке.' if refresh_lyrics else
                       'Предыдущая подготовка остановилась до поиска. Заново проверим файлы и доступные данные.' if recovery_of else
                       'Проверим сохранённые отпечатки. Новые запросы распознавания недоступны.' if kind == 'recognize' and remaining == 0 else
@@ -505,6 +547,7 @@ def install(app, settings):
                 chosen.append({'track_id': tid, 'sha256': row['sha256'], 'relative_path': row['relative_path'],
                                'scan': item['scan'], 'guards': guards(conn, row),
                                **({'lyric_search_only': True} if item.get('lyric_search_only') is True else {}),
+                               **({'expanded_lyrics': True} if item.get('expanded_lyrics') is True else {}),
                                **({'album_hint': item['album_hint']} if item.get('album_hint') else {}),
                                **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})
                 conn.execute('INSERT INTO settings VALUES(?,?)', ('metadata_prepared:' + item['receipt'],

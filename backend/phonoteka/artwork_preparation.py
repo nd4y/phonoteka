@@ -49,11 +49,11 @@ def album_hint(metadata, analysis, matched_recordings):
     for recording in matched_recordings:
         if (not isinstance(recording, dict) or recording.get('provider') != 'musicbrainz'
                 or recording.get('kind') != 'metadata'
-                or not isinstance(recording.get('releases_truncated', False), bool)
-                or recording.get('releases_truncated')):
+                or not isinstance(recording.get('releases_truncated', False), bool)):
             return None
         options = recording.get('releases')
-        if not isinstance(options, list) or not 1 <= len(options) < 15:
+        if (not isinstance(options, list) or not 1 <= len(options) <= 40
+                or not embedded and (recording.get('releases_truncated') or len(options) >= 15)):
             return None
         official = False
         for release in options:

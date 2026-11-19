@@ -4,6 +4,7 @@ export type EvidencePreparation = {
   reason: string;
   fingerprint_requests_remaining?: number | null;
   album_hint?: string;
+  lyric_search_only?: boolean;
 };
 
 export function preparationBatch<T extends { preparation?: EvidencePreparation | null }>(

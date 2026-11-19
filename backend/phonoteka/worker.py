@@ -858,7 +858,8 @@ class Worker:
         await self.io(media._expect, path, item['sha256'])
         meta = json.loads(row['metadata'])
         album_hint = item.get('album_hint')
-        if lyrics_only and (fingerprint or album_hint):
+        expanded_lyrics = item.get('expanded_lyrics') is True
+        if lyrics_only and (fingerprint or album_hint) or expanded_lyrics and not lyrics_only:
             raise media.MediaError('preparation_invalid','Поиск текста не распознаёт аудио и не уточняет альбом')
         if album_hint and not can_search_album(row,meta):
             raise media.MediaError('album_search_ineligible','Запись больше не подходит для уточнения альбома')
@@ -968,6 +969,8 @@ class Worker:
         elif self.settings.external_metadata:
             await self.io(self.item_action,job,item,'metadata_lookup')
             options = {'album_hint':album_hint} if album_hint else {}
+            if expanded_lyrics:
+                options['expanded_lyrics'] = True
             if lyrics_only: options['lyrics_only']=True
             result = await self.providers.analyze(meta, item['relative_path'],identified,authorized,**options)
         else:
@@ -990,7 +993,7 @@ class Worker:
             result['candidates'][:0]=acoustid_candidates
             if acoustid_candidates:result['state']='candidates'
         # Album artwork already next to the track is a local candidate, never an arbitrary path.
-        if not meta.get('has_art'):
+        if not meta.get('has_art') and not lyrics_only:
             local = await self.io(self.local_cover, path)
             if local:
                 result['candidates'].append(local)
@@ -1009,7 +1012,9 @@ class Worker:
                 if lyrics_only:
                     # Keep exact-revision metadata evidence and its original
                     # usage/expiry. A lyric query never refreshes other sources.
-                    result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider')!='lrclib')
+                    ids = {c['id'] for c in result['candidates']}
+                    result['candidates'].extend(c for c in old.get('candidates',[])
+                                                if c.get('provider') != 'lrclib' or expanded_lyrics and c['id'] not in ids)
                     result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider')!='lrclib')
                 elif album_hint:
                     replaced = {'musicbrainz','coverartarchive','local_cover'}

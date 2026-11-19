@@ -18,7 +18,12 @@ resets a spent recognition allowance. Existing preparation receipts, including
 stopped or failed attempts, prevent automatic replay. Refreshing results neither
 replaces a saved lyric draft nor writes tags, words or timings into audio.
 
-Mixes, spoken recordings, confirmed instrumentals, locked lyrics, existing plain
-lyrics and current lyric drafts remain outside this path. Fresh candidates and
-partial ASR results require their normal review. Finding all timestamped lines is
-not proof that their words or timing match the recording.
+Search checks whether lyrics have plausible timestamps before stopping on a
+result. It tries one additional LRCLIB query with the title and artist together
+when album and track search results lack usable timings. The plan can offer this
+query once for a fingerprint-confirmed recording whose earlier search completed
+without timed candidates. Existing plain-text candidates remain available.
+
+Mixes, spoken recordings, confirmed instrumentals, locked lyrics and current
+timed drafts stay outside this path. Compare each candidate's words and timing
+with the audio before applying it.

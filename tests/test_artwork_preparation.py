@@ -36,6 +36,14 @@ def test_known_album_can_narrow_multiple_official_albums_without_choosing_editio
     assert album_hint(metadata, analysis, matches) is None
 
 
+def test_incomplete_release_list_can_find_known_album_for_review_only():
+    metadata, analysis, matches = inputs()
+    matches[0]['releases_truncated'] = True
+    assert album_hint(metadata, analysis, matches) == 'Album'
+    metadata['tags']['album'] = ''
+    assert album_hint(metadata, analysis, matches) is None
+
+
 @pytest.mark.parametrize('album', ['Album (Deluxe Edition)', 'Album - Single', 'Other album'])
 def test_aliases_and_other_editions_are_not_silently_selected(album):
     assert album_hint(*inputs(album)) is None

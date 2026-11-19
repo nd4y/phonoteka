@@ -9,8 +9,15 @@ the recording's sources.
 Preparation requires an already confirmed recording match in MusicBrainz.
 The embedded album must exactly match a saved official release name. Without
 an embedded album, all complete matching release lists must agree on one
-album name. Single, Deluxe and Remaster suffixes are not stripped to make an
-automatic choice. Truncated or conflicting evidence is rejected.
+album name. With a known album, an official release in a shortened list can
+start a search. Conflicting evidence blocks preparation. Single, Deluxe and
+Remaster remain distinct editions.
+
+An album lookup can retrieve one page of official releases linked to a matching
+recording. It checks up to three editions in Cover Art Archive, prioritizing
+editions that MusicBrainz marks as having a front cover. The recording's source
+details show how many editions were checked. A shortened list still requires
+edition confirmation.
 
 The new lookup is restricted to that album's releases and artwork. Existing
 lyrics, ASR, fingerprints and their allowances are retained; the audio file is

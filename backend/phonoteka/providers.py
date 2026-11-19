@@ -25,6 +25,8 @@ HOSTS = {'www.youtube.com','beta.musicbrainz.org','musicbrainz.org','lrclib.net'
 INTERVAL = {'youtube':3.0,'musicbrainz':1.1,'lrclib':1.0,'coverartarchive':1.1,'acoustid':.4,'shazam':10.0,'theaudiodb':2.1,'discogs':1.1}
 GET_DEADLINE_SECONDS = 90
 REQUEST_AUTHORIZATION=ContextVar('provider_request_authorization',default=None)
+RELEASE_ID = re.compile(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}')
+LYRICS_QUERY_PROFILE = 'lrclib-free-text-v1'
 
 def retry_after_seconds(value, fallback=60):
     """Honor delta-seconds and HTTP-date without shortening a server's pause."""
@@ -99,6 +101,44 @@ def album_candidates(recordings, album):
             'match':{'state':'needs_review','reasons':['confirm_release']}})
     return choices
 
+
+def release_entry(row):
+    artwork = row.get('cover-art-archive')
+    return {'id': row['id'], 'title': row.get('title', ''), 'date': row.get('date', ''),
+            'country': row.get('country', ''), 'status': row.get('status', ''),
+            'front_available': isinstance(artwork, dict) and artwork.get('front') is True}
+
+
+def lyric_candidate(row, query, duration):
+    if not isinstance(row, dict) or type(row.get('id')) is not int:
+        return None
+    source_duration = row.get('duration')
+    if type(source_duration) not in (int, float) or not math.isfinite(source_duration) or source_duration <= 0:
+        source_duration = None
+    match = assess(query, row.get('trackName', ''), row.get('artistName', ''), duration, source_duration)
+    lrc = row.get('syncedLyrics')
+    if isinstance(lrc, str) and lrc.strip():
+        try:
+            doc = media.parse_lrc(lrc)
+            if not doc['complete'] or any(line['start_ms'] > duration * 1000 + 1000 for line in doc['lines']):
+                match['reasons'].append('lyrics_out_of_range')
+        except media.MediaError:
+            match['reasons'].append('invalid_lyrics')
+    else:
+        lrc = ''
+    if match['reasons']:
+        match['state'] = 'needs_review'
+    return {'id': 'lrclib:' + str(row['id']), 'provider': 'lrclib', 'kind': 'lyrics',
+            'title': row.get('trackName'), 'artist': row.get('artistName'), 'album': row.get('albumName'),
+            'duration': source_duration, 'lrc': lrc, 'plain_lyrics': row.get('plainLyrics') or '',
+            'instrumental_claim': bool(row.get('instrumental')), 'match': match,
+            'source_url': 'https://lrclib.net/api/get/' + str(row['id']),
+            'identification': 'text_search', 'timing_verified': False}
+
+
+def matching_timed_lyrics(candidate):
+    return (bool(candidate['lrc']) and not candidate['instrumental_claim']
+            and candidate['match']['state'] == 'matching_metadata')
 
 class ProviderError(Exception):
     def __init__(self, code, provider, message):
@@ -279,51 +319,77 @@ class Providers:
         q='recording:"'+escape(query['title'])+'"'
         if query['artist']: q+=' AND artist:"'+escape(query['artist'])+'"'
         if restrict_album: q+=' AND release:"'+escape(query['album'])+'"'
-        data=await self.get('musicbrainz','https://'+self.settings.musicbrainz_host+'/ws/2/recording',{'query':q,'fmt':'json','limit':8})
+        base = 'https://' + self.settings.musicbrainz_host + '/ws/2/'
+        data=await self.get('musicbrainz',base+'recording',{'query':q,'fmt':'json','limit':8})
         candidates=[]
+        browsed = False
         for row in (data or {}).get('recordings',[])[:8]:
             artist=''.join(x.get('name',x.get('artist',{}).get('name',''))+x.get('joinphrase','') for x in row.get('artist-credit',[]))
             match=assess(query,row.get('title',''),artist,duration,(row.get('length') or 0)/1000)
-            releases=[{'id':v['id'],'title':v.get('title',''),'date':v.get('date',''),'country':v.get('country',''),'status':v.get('status','')} for v in row.get('releases',[]) if v.get('id')]
+            releases = [release_entry(value) for value in row.get('releases', []) if value.get('id')]
+            truncated = len(releases) >= 15
+            incomplete = None
             if restrict_album:
-                releases=[release for release in releases if normalized(release['title'])==normalized(query['album'])]
-                if not releases: continue
-            releases=releases[:15]
-            candidates.append({'id':'mb:'+row['id'],'provider':'musicbrainz','kind':'metadata','recording_id':row['id'],'tags':{'title':row.get('title',''),'artist':artist,'musicbrainz_trackid':row['id']},'duration':(row.get('length') or 0)/1000,'match':match,'releases':releases,'source_url':'https://musicbrainz.org/recording/'+row['id'],'identification':'text_search'})
+                key = normalized(query['album'])
+                releases = [release for release in releases if normalized(release['title']) == key]
+                if (not browsed and (truncated or not releases) and match['state'] == 'matching_metadata'
+                        and RELEASE_ID.fullmatch(row['id'])):
+                    browsed = True
+                    try:
+                        linked = await self.get('musicbrainz', base + 'release',
+                                                {'recording': row['id'], 'fmt': 'json',
+                                                 'status': 'official', 'limit': 25})
+                    except ProviderError as exc:
+                        incomplete = exc.code
+                    else:
+                        linked = linked if isinstance(linked, dict) else {}
+                        by_id = {release['id']: release for release in releases}
+                        for value in linked.get('releases', [])[:25]:
+                            if (isinstance(value, dict) and RELEASE_ID.fullmatch(str(value.get('id', '')))
+                                    and value.get('status') == 'Official'
+                                    and normalized(value.get('title', '')) == key):
+                                by_id[value['id']] = release_entry(value)
+                        releases = list(by_id.values())
+                        # An expanded lookup is discovery; never turn a
+                        # previously incomplete list into proof of uniqueness.
+                        truncated = True
+                if not releases and not incomplete:
+                    continue
+            candidates.append({'id':'mb:'+row['id'],'provider':'musicbrainz','kind':'metadata','recording_id':row['id'],'tags':{'title':row.get('title',''),'artist':artist,'musicbrainz_trackid':row['id']},'duration':(row.get('length') or 0)/1000,'match':match,'releases':releases[:40 if restrict_album else 15],'releases_truncated':truncated,'source_url':'https://musicbrainz.org/recording/'+row['id'],'identification':'text_search',
+                               **({'search_incomplete': incomplete} if incomplete else {})})
         return candidates
 
-    async def lyrics(self, query, duration):
-        data=[]
-        fallback_error=None
-        if query.get('album') and query.get('artist') and 1 <= duration <= 3600:
-            exact=await self.get('lrclib','https://lrclib.net/api/get',{'track_name':query['title'],'artist_name':query['artist'],'album_name':query['album'],'duration':round(duration)})
-            if isinstance(exact,dict) and exact.get('id') is not None:data=[exact]
-        # An exact album match can contain only plain text (or a disputed
-        # instrumental claim). It must not hide timed variants of the recording.
-        if not data or not data[0].get('syncedLyrics'):
+    async def lyrics(self, query, duration, *, expanded_only=False):
+        base = 'https://lrclib.net/api/'
+        named = {'track_name': query['title'], 'artist_name': query['artist']}
+        attempts = []
+        if not expanded_only:
+            if query.get('album') and query.get('artist') and 1 <= duration <= 3600:
+                attempts.append(('get', {**named, 'album_name': query['album'], 'duration': round(duration)}))
+            attempts.append(('search', named))
+        if normalized(query['title']) and normalized(query['artist']) and 1 <= duration <= 3600:
+            phrase = ' '.join(normalized(query[field])[:180] for field in ('title', 'artist'))
+            attempts.append(('search', {'q': phrase}))
+        candidates = {}
+        for endpoint, params in attempts:
             try:
-                variants=await self.get('lrclib','https://lrclib.net/api/search',{'track_name':query['title'],'artist_name':query['artist']})
-                seen={row['id'] for row in data}
-                data.extend(row for row in (variants or []) if isinstance(row,dict) and row.get('id') not in seen)
+                response = await self.get('lrclib', base + endpoint, params)
             except ProviderError as exc:
-                if not data:raise
-                fallback_error=exc.code
-        candidates=[]
-        for row in (data or [])[:20]:
-            if not isinstance(row,dict): continue
-            match=assess(query,row.get('trackName',''),row.get('artistName',''),duration,row.get('duration'))
-            lrc=row.get('syncedLyrics') or ''
-            if lrc:
-                try:
-                    doc=media.parse_lrc(lrc)
-                    if not doc['complete'] or any(x['start_ms']>duration*1000+1000 for x in doc['lines']):
-                        match['state']='needs_review';match['reasons'].append('lyrics_out_of_range')
-                except media.MediaError:
-                    match['state']='needs_review';match['reasons'].append('invalid_lyrics')
-            candidates.append({'id':'lrclib:'+str(row['id']),'provider':'lrclib','kind':'lyrics','title':row.get('trackName'),'artist':row.get('artistName'),'album':row.get('albumName'),'duration':row.get('duration'),'lrc':lrc,'plain_lyrics':row.get('plainLyrics') or '', 'instrumental_claim':bool(row.get('instrumental')),'match':match,'source_url':'https://lrclib.net/api/get/'+str(row['id']),'identification':'text_search','timing_verified':False})
-        if fallback_error:
-            for candidate in candidates:candidate['search_incomplete']=fallback_error
-        return sorted(candidates,key=lambda x:(len(x['match']['reasons']),not bool(x['lrc']),x['match']['duration_delta'] or 0))[:8]
+                if not candidates:
+                    raise
+                for candidate in candidates.values():
+                    candidate['search_incomplete'] = exc.code
+                break
+            rows = response if isinstance(response, list) else [response]
+            for row in rows[:20]:
+                candidate = lyric_candidate(row, query, duration)
+                if candidate:
+                    candidates.setdefault(candidate['id'], candidate)
+            if any(matching_timed_lyrics(value) for value in candidates.values()):
+                break
+        return sorted(candidates.values(), key=lambda value: (
+            not matching_timed_lyrics(value), len(value['match']['reasons']), not bool(value['lrc']),
+            value['match']['duration_delta'] or 0))[:8]
 
     async def cover(self, release_id):
         if not re.fullmatch('[0-9a-fA-F-]{36}',release_id): raise ProviderError('invalid_release','coverartarchive','Неверный идентификатор релиза')
@@ -338,12 +404,15 @@ class Providers:
         mime,_,_=media._cover(base64.b64decode(raw))
         return {'id':'caa:'+release_id,'provider':'coverartarchive','kind':'cover','cover':'data:'+mime+';base64,'+raw,'release_id':release_id,'source_url':url,'match':{'state':'needs_review','reasons':['confirm_release']}}
 
-    async def analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None, lyrics_only=False):
+    async def analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None,
+                      lyrics_only=False, expanded_lyrics=False):
         with provider_attempts.input_revision(meta.get('sha256')):
-            return await self._analyze(meta,relative,identified,authorize,album_hint=album_hint,lyrics_only=lyrics_only)
+            return await self._analyze(meta,relative,identified,authorize,album_hint=album_hint,
+                                       lyrics_only=lyrics_only,expanded_lyrics=expanded_lyrics)
 
-    async def _analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None, lyrics_only=False):
-        if lyrics_only and album_hint:
+    async def _analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None,
+                       lyrics_only=False, expanded_lyrics=False):
+        if lyrics_only and album_hint or expanded_lyrics and not lyrics_only:
             raise media.MediaError('preparation_invalid','Поиск текста не уточняет издание альбома')
         query,provenance=query_tags(meta,relative)
         if album_hint:
@@ -362,7 +431,7 @@ class Providers:
         if not query['title']:
             result['sources']=[{'provider':p,'state':'insufficient_metadata'} for p in (('lrclib',) if lyrics_only else ('musicbrainz','lrclib'))]
             return result
-        searches=[('lrclib',self.lyrics,{})] if lyrics_only else [('musicbrainz',self.musicbrainz,{'restrict_album':True})] if album_hint else [
+        searches=[('lrclib',self.lyrics,{'expanded_only': True} if expanded_lyrics else {})] if lyrics_only else [('musicbrainz',self.musicbrainz,{'restrict_album':True})] if album_hint else [
             ('musicbrainz',self.musicbrainz,{}),('lrclib',self.lyrics,{})]
         for provider,call,options in searches:
             authorize()
@@ -375,6 +444,8 @@ class Providers:
                 if exc.code=='provider_unavailable':
                     await asyncio.to_thread(self.unavailable,provider)
                 result['sources'].append({'provider':provider,'state':exc.code,'message':str(exc)})
+            if provider == 'lrclib':
+                result['sources'][-1]['query_profile'] = LYRICS_QUERY_PROFILE
         if lyrics_only:
             result['state']='candidates' if result['candidates'] else 'no_match' if all(x['state']=='no_match' for x in result['sources']) else 'incomplete'
             return result
@@ -383,7 +454,11 @@ class Providers:
         result['candidates'].extend(albums)
         for source in result['sources']:
             if source['provider']=='musicbrainz':source['album_candidates']=len(albums)
-        releases=sorted({v['id'] for c in matching for v in c.get('releases',[]) if query['album'] and normalized(v['title'])==normalized(query['album'])})
+        release_options = {value['id']: value for c in matching for value in c.get('releases', [])
+                           if query['album'] and normalized(value['title']) == normalized(query['album'])}
+        releases = sorted(release_options, key=lambda identity: (
+            release_options[identity].get('front_available') is not True,
+            release_options[identity].get('status') != 'Official', identity))
         all_album_titles={normalized(v.get('title','')) for c in matching for v in c.get('releases',[]) if v.get('title')}
         if not query['album'] and len(all_album_titles)==1:
             releases=sorted({c['release_id'] for c in albums})

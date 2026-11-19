@@ -240,7 +240,13 @@ export type Analysis = {
   stale?: boolean;
   updated_at?: string;
   candidates: Candidate[];
-  sources: Array<{ provider: string; state: string; message?: string }>;
+  sources: Array<{
+    provider: string;
+    state: string;
+    message?: string;
+    attempted_releases?: number;
+    matching_releases?: number;
+  }>;
 };
 
 export type YouTubeSource = {

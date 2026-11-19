@@ -285,6 +285,9 @@ export function AnalysisPanel({
               {analysis.sources.map((s, i) => (
                 <span className="badge" key={s.provider + i}>
                   {s.provider}: {states[s.state] || s.state}
+                  {s.attempted_releases !== undefined &&
+                    s.matching_releases !== undefined &&
+                    ` · Проверено изданий: ${s.attempted_releases} из ${s.matching_releases}`}
                 </span>
               ))}
             </div>
