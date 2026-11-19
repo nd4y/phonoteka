@@ -174,36 +174,39 @@ def acoustid_connection(settings):
 
 
 def acoustid_continuation(settings, conn, row, metadata, analysis, result, connection):
+    """Return whether the legacy result is handled by this preparation path."""
     audit = metadata.get('audit') or {}
     identity = audit.get('audio_identity')
     if (not settings.external_fingerprints or not settings.external_metadata
             or audit.get('sha256') != row['sha256'] or audit.get('state') != 'passed'
             or audit.get('profile') != 'full_decode_all_audio_streams'
             or not fields.HASH.fullmatch(str(identity or ''))):
-        return None
+        return False, None
     duration = metadata.get('duration')
     if not fields.number(duration) or not 3 <= duration <= 21600:
-        return None
+        return False, None
     prior = recognition.pending_acoustid(analysis, row['sha256'], duration)
-    if not prior or not provider_policy.rule(conn, 'acoustid', 'metadata').get('allow_fetch'):
-        return None
+    if not prior:
+        return False, None
+    # Tag edits, settings churn and key rotation do not mint a second receipt.
+    signature = fields.digest([CONTRACT, row['id'], identity, ACOUSTID_PROFILE])
+    if conn.execute('SELECT 1 FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone():
+        return True, None
+    if not provider_policy.rule(conn, 'acoustid', 'metadata').get('allow_fetch'):
+        return False, None
     if connection is None:
         connection = acoustid_connection(settings)
     if not connection.get('configured'):
-        return None
+        return False, None
     usage = conn.execute('SELECT value FROM settings WHERE key=?',
                          (provider_attempts.RECOGNITION_PREFIX + identity,)).fetchone()
     remaining = provider_attempts.RECOGNITION_CALL_LIMIT - (json.loads(usage[0]).get('calls', 0) if usage else 0)
     if remaining <= 0:
-        return None
-    # Tag edits, settings churn and key rotation do not mint a second receipt.
-    signature = fields.digest([CONTRACT, row['id'], identity, ACOUSTID_PROFILE])
-    if conn.execute('SELECT 1 FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone():
-        return None
+        return False, None
     if enrichment_gaps.project(conn, [row['id']]).get(row['id'], {}).get('last_failed_search'):
-        return None
+        return True, None
     binding = {'connection_version': connection['version'], 'proof': fields.digest(prior)}
-    return {'token': fields.digest([signature, result['token'], remaining, binding]), 'receipt': signature,
+    return True, {'token': fields.digest([signature, result['token'], remaining, binding]), 'receipt': signature,
             'kind': 'recognize', 'fingerprint_requests_remaining': remaining,
             'scan': input_readiness.describe(metadata, grace_seconds=settings.input_grace_seconds)['state'] != 'ready',
             'acoustid_continuation': binding,
@@ -224,10 +227,10 @@ def candidate(settings, conn, row, active, result, connection=None):
     matches, fingerprints, error = fields.recording(conn, analysis, metadata)
     if error in {'recording_conflict', 'recording_incomplete'}:
         return None
-    continuation = (not fingerprints and
-                    acoustid_continuation(settings, conn, row, metadata, analysis, result, connection))
-    if continuation:
-        return continuation
+    if not fingerprints:
+        handled, continuation = acoustid_continuation(settings, conn, row, metadata, analysis, result, connection)
+        if handled:
+            return continuation
     refresh_lyrics = not gaps and lyric_refresh(conn, settings, row, metadata)
     if not gaps and not refresh_lyrics:
         return None

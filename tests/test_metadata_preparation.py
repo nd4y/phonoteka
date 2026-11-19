@@ -53,7 +53,7 @@ def test_new_acoustid_connection_continues_only_the_unsent_provider(library, mon
         meta = json.loads(row['metadata'])
         meta['duration'] = 240
         meta['tags'].update(album=['Verified album'])
-        meta['has_art'] = True
+        meta['has_art'] = not connection_changes
         conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), tid))
         data = historical_match_fallback(sha)
         data['candidates'] = []
@@ -63,7 +63,7 @@ def test_new_acoustid_connection_continues_only_the_unsent_provider(library, mon
         for _ in range(2):
             provider_attempts.reserve(cfg, 'shazam', 'fingerprint')
     route = '/api/integrations/acoustid'
-    assert entry(client)['preparation'] is None
+    assert not (entry(client)['preparation'] or {}).get('acoustid_continuation')
     version = client.get(route).json()['version']
     enabled = client.put(route, json={'version': version, 'enabled': True,
                                      'api_key': 'syntheticacoustidkey'}, headers=headers)
