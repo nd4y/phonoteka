@@ -304,6 +304,9 @@ def fallback_inventory(path, roots, error):
     path = _validate(path, roots)
     info = path.stat()
     result = {'sha256':sha256_file(path),'size':info.st_size,'mtime_ns':info.st_mtime_ns,'format':path.suffix.lower().lstrip('.') or 'unknown','tags':{},'has_art':False,'lyrics':'','lrc':'','write_supported':False,'write_block_reason':error.code}
+    if info.st_size < 2:
+        result['input_error'] = {'code': 'no_audio_payload', 'message': 'Файл пуст или содержит один байт. Для восстановления нужна копия со звуком.'}
+        return result
     try:
         result.update(probe_audio(path))
         result['warnings'] = [{'code':error.code,'message':'Метаданные прочитаны резервным декодером; нативная запись недоступна'}]

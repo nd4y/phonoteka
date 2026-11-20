@@ -1013,7 +1013,8 @@ class Worker:
             if expanded_lyrics:
                 options['expanded_lyrics'] = True
             if lyrics_only: options['lyrics_only']=True
-            result = await self.providers.analyze(meta, item['relative_path'],identified,authorized,**options)
+            # The expanded lyric query was admitted for the embedded artist and title.
+            result = await self.providers.analyze(meta, item['relative_path'],None if expanded_lyrics else identified,authorized,**options)
         else:
             result={'input_sha256':item['sha256'],'query_source':'audio_fingerprint','candidates':[],'sources':[],
                     'automatic_apply':False,'state':'incomplete'}

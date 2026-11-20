@@ -17,7 +17,23 @@ REASONS = {**fields.MESSAGES, 'file_revision_changed': 'Файл изменил�
            'publication_incomplete': 'Рабочая копия обработана. Публикацию нужно проверить.',
            'cue_requires_extraction': 'Для CUE нужен разбор на отдельные композиции.',
            'cue_album_image': 'Альбомный образ сохраняется целиком. Проверьте связанную CUE-разметку.',
-           'retained_source': 'Композиции уже извлечены. Исходник сохранён.'}
+           'retained_source': 'Композиции уже извлечены. Исходник сохранён.',
+           'lyrics_not_eligible': 'Дополнительный запрос текста для этой записи недоступен.',
+           'lyrics_no_timing': 'Уточнение не вернуло текста с таймкодами.',
+           'lyrics_provider_incomplete': 'Источник не вернул окончательный результат поиска.',
+           'lyrics_option_found': 'Найден вариант с таймкодами. Сверьте его с аудио.'}
+
+
+def lyric_outcome(conn, row):
+    saved = conn.execute('SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?', (row['id'], row['sha256'])).fetchone()
+    analysis = json.loads(saved[0]) if saved else {}
+    source = next((s for s in analysis.get('sources', []) if s.get('provider') == 'lrclib'), {})
+    if source.get('query_profile') != prep.LYRICS_QUERY_PROFILE or source.get('state') not in {'no_match', 'candidates'}:
+        return 'review', 'lyrics_provider_incomplete'
+    if any(c.get('provider') == 'lrclib' and c.get('lrc') and fields.permitted(conn, c)
+           for c in analysis.get('candidates', [])):
+        return 'found', 'lyrics_option_found'
+    return 'not_found', 'lyrics_no_timing'
 
 
 def authorize(settings, job):
@@ -85,6 +101,7 @@ def cancel(conn, run, reason):
 
 def advance(conn, settings, run):
     from .worker import root_identity
+    refine = bool(run.get('refines'))
     if root_identity(settings.work_root) != run['root'] or not settings.writable:
         cancel(conn, run, 'root_or_write_access_changed')
         return
@@ -152,8 +169,9 @@ def advance(conn, settings, run):
             cancel(conn, run, 'scan_manifest_missing')
             return
         run['page'] = [{'id': tid, 'sha': sha, 'tried': []} for tid, sha in json.loads(stored[0])]
-        conn.executemany('INSERT OR IGNORE INTO settings VALUES(?,?)', (
-            ('preparation_profile:' + entry['id'], run['profile']) for entry in run['page']))
+        if not refine:
+            conn.executemany('INSERT OR IGNORE INTO settings VALUES(?,?)', (
+                ('preparation_profile:' + entry['id'], run['profile']) for entry in run['page']))
     if prep.load(conn).get('state') == 'active' or not webhooks.can_accept(conn):
         run['reason'] = 'waiting_preparation'
         return
@@ -161,7 +179,7 @@ def advance(conn, settings, run):
     active = {'auth_epoch': run['epoch']}
     busy, retired = fields.active_tracks(conn), catalog_sources.completed_sources(conn)
     connection = prep.acoustid_connection(settings)
-    queue = review_queue.project(conn, settings, [entry['id'] for entry in run['page']])
+    queue = {} if refine else review_queue.project(conn, settings, [entry['id'] for entry in run['page']])
     selected = []
     reports = []
     for entry in run['page']:
@@ -181,11 +199,21 @@ def advance(conn, settings, run):
         if not enrichment_gaps.individual_music(meta, row['sha256']):
             reports.append((entry['id'], row['relative_path'], 'excluded', 'excluded_recording'))
             continue
+        if refine and (entry['tried'] or entry.get('issue')):
+            outcome = ('review', entry['issue']) if entry.get('issue') else lyric_outcome(conn, row)
+            reports.append((entry['id'], entry['path'], *outcome))
+            continue
         result = fields.evaluate(settings, conn, row, active, busy=busy, retired=retired)
         kind = None
         value = None
         attempt = None
-        if not entry.get('issue') and not result['blocked'] and result['ready']:
+        if refine:
+            ready = prep.candidate(settings, conn, row, active, result, connection)
+            if not ready or not ready.get('expanded_lyrics') or not ready.get('lyric_search_only') or ready['scan']:
+                reports.append((entry['id'], entry['path'], 'excluded', 'lyrics_not_eligible'))
+                continue
+            kind, value, attempt = 'analyze', ready['token'], ready['receipt']
+        elif not entry.get('issue') and not result['blocked'] and result['ready']:
             kind, value = 'apply', result['token']
             attempt = 'apply:' + ','.join(sorted(c['field'] for c in result['changes']))
         elif not entry.get('issue'):
@@ -247,32 +275,84 @@ def advance(conn, settings, run):
         run['counts'][status] = run['counts'].get(status, 0) + 1
         run['reasons'][reason] = run['reasons'].get(reason, 0) + 1
     conn.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
-                 (f"fill_report:{run['scan_id']}:{run['processed']}", db.encode(reports)))
+                 (f"fill_report:{run.get('report_id', run['scan_id'])}:{run['processed']}", db.encode(reports)))
     run['processed'] += len(run.pop('page'))
     run['participants'] = []
     run['action'] = None
 
 
+def scan_failures(conn, scan_id, limit=-1):
+    rows = conn.execute("""SELECT j.item_key,j.result,json_extract(t.metadata,'$.size') AS size
+                        FROM job_items j LEFT JOIN tracks t ON t.id=json_extract(j.result,'$.track_id')
+                          AND t.sha256=json_extract(j.result,'$.sha256')
+                        WHERE j.job_id=? AND j.state<>'succeeded' ORDER BY j.item_key LIMIT ?""", (scan_id, limit))
+    for row in rows:
+        issue = json.loads(row['result'])
+        error = issue.get('input_error') or {}
+        code = error.get('code') or issue.get('code') or 'scan_error'
+        message = 'Проверьте файл в журнале сканирования.'
+        if code == 'no_audio_payload' or error and row['size'] in (0, 1):
+            code = 'no_audio_payload'
+            message = 'Файл пуст или содержит один байт. Для восстановления нужна копия со звуком.'
+        elif code == 'invalid_audio':
+            message = 'Не удалось прочитать аудиопоток. Проверьте исходную копию.'
+        yield {'track_id':issue.get('track_id', ''), 'file':row['item_key'], 'message':message, 'code':code}
+
+
+def load_report(conn, run_id):
+    saved = conn.execute('SELECT value FROM settings WHERE key=?', ('preparation_request:' + run_id,)).fetchone()
+    run = json.loads(saved[0]) if saved else {}
+    if not run.get('autofill'):
+        raise security.error(404, 'preparation_missing', 'Отчёт этого запуска недоступен')
+    return run
+
+
 def install(app, settings):
+    @app.get('/api/preparation/{run_id}/scan-errors')
+    def scan_errors(run_id: str, request: Request):
+        security.require_session(request, settings, owner_only=True)
+        with db.connect(settings.db_path) as conn:
+            run = load_report(conn, run_id)
+            return {'items':list(scan_failures(conn, run.get('scan_id'), 20))}
+
+    @app.post('/api/preparation/{run_id}/refine-lyrics', status_code=202)
+    def refine_lyrics(run_id: str, request: Request):
+        from .worker import root_identity
+        active = security.require_session(request, settings, True, owner_only=True)
+        key = str(uuid.uuid5(uuid.NAMESPACE_URL, 'phonoteka:refine:' + prep.LYRICS_QUERY_PROFILE + ':' + run_id))
+        with db.transaction(settings.db_path) as conn:
+            current = preparation.load(conn)
+            if current.get('id') == key and current.get('refines') == run_id:
+                return preparation.public(current)
+            if (current.get('id') != run_id or current.get('state') != 'review' or not current.get('autofill')
+                    or current.get('refines') or not settings.writable or not settings.external_metadata
+                    or active['auth_epoch'] != current['epoch'] or root_identity(settings.work_root) != current['root']):
+                raise security.error(409, 'preparation_stale', 'Дождитесь завершения прохода и обновите мастер.')
+            recovery = conn.execute("SELECT value FROM settings WHERE key='recovery_required'").fetchone()
+            if recovery and recovery[0] == 'true':
+                raise security.error(409, 'recovery_required', 'Сначала завершите проверку восстановления.')
+            run = {k:current[k] for k in ('scan_id','scanned_files','scan_errors','root','epoch','profile','folder')}
+            run.update(id=key, report_id=key, refines=run_id, state='active', stage='autofill', autofill=True,
+                       job_id=None, processed=0, reasons={}, counts={}, started_at=db.utcnow())
+            conn.execute('INSERT INTO settings VALUES(?,?)', ('preparation_request:' + key, db.encode(run)))
+            preparation.save(conn, run)
+            return preparation.public(run)
+
     @app.get('/api/preparation/{run_id}/report')
     def report(run_id: str, request: Request):
         security.require_session(request, settings, owner_only=True)
         with db.connect(settings.db_path) as conn:
-            saved = conn.execute('SELECT value FROM settings WHERE key=?', ('preparation_request:' + run_id,)).fetchone()
-            run = json.loads(saved[0]) if saved else {}
-            if not run.get('autofill'):
-                raise security.error(404, 'preparation_missing', 'Отчёт этого запуска недоступен')
+            run = load_report(conn, run_id)
             out = io.StringIO()
             writer = csv.writer(out)
             writer.writerow(('ID', 'Файл', 'Результат', 'Причина', 'Код'))
-            labels = {'review': 'Нужно проверить', 'excluded': 'Пропущено', 'populated': 'Поля заполнены'}
+            labels = {'review': 'Нужно проверить', 'excluded': 'Пропущено', 'populated': 'Поля заполнены',
+                      'found': 'Найден текст с таймкодами', 'not_found': 'Нет новых таймкодов'}
             def safe_path(path):
                 return "'" + path if path.lstrip().startswith(('=', '+', '-', '@')) or path.startswith(('\t', '\r', '\n')) else path
-            for row in conn.execute("SELECT item_key,result FROM job_items WHERE job_id=? AND state<>'succeeded'", (run.get('scan_id'),)):
-                issue = json.loads(row['result'])
-                writer.writerow((issue.get('track_id', ''), safe_path(row['item_key']), 'Ошибка сканирования',
-                                 'Проверьте файл в журнале сканирования.', issue.get('code') or 'scan_error'))
-            for row in conn.execute('SELECT value FROM settings WHERE key GLOB ? ORDER BY key', ('fill_report:' + run.get('scan_id', '') + ':*',)):
+            for issue in scan_failures(conn, run.get('scan_id')):
+                writer.writerow((issue['track_id'], safe_path(issue['file']), 'Ошибка сканирования', issue['message'], issue['code']))
+            for row in conn.execute('SELECT value FROM settings WHERE key GLOB ? ORDER BY key', ('fill_report:' + (run.get('report_id') or run.get('scan_id', '')) + ':*',)):
                 for tid, path, status, reason in json.loads(row[0]):
                     writer.writerow((tid, safe_path(path), labels[status], REASONS.get(reason, 'Подробности в задаче обработки.'), reason))
             return Response('\ufeff' + out.getvalue(), media_type='text/csv; charset=utf-8',
