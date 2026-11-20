@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import artwork_preparation, confirmed_fields as fields, db, enrichment_gaps, field_policy, input_readiness, lyrics_review, media, provider_attempts, provider_policy, security, webhooks
+from . import acoustid, artwork_preparation, confirmed_fields as fields, db, enrichment_gaps, field_policy, input_readiness, lyrics_review, media, provider_attempts, provider_policy, providers, recognition, security, webhooks
 
 KEY = 'metadata_preparation'
 CONTRACT = 'metadata-preparation-v1'
@@ -18,6 +18,8 @@ CACHE_FALLBACK_PROFILE = 'exhausted-acoustid-cache-v1'
 UNSEARCHED_RECOVERY_PROFILE = 'unsearched-preparation-stale-v1'
 LYRICS_REFRESH_PROFILE = 'lyric-only-expired-search-v1'
 ARTWORK_PROFILE = 'unqueried-known-album-artwork-v1'
+ACOUSTID_PROFILE = 'previously-unconfigured-acoustid-v1'
+RECORDING_REFERENCE_PROFILE = 'embedded-recording-reference-v1'
 
 
 def load(conn, identity=None):
@@ -163,22 +165,111 @@ def lyric_refresh(conn, settings, row, metadata):
     return len(reasons) == 1 and reasons[0]['code'] in {'results_expired', 'search_stale'}
 
 
-def candidate(settings, conn, row, active, result):
+def acoustid_connection(settings):
+    if not settings.external_fingerprints:
+        return {}
+    try:
+        return acoustid.public_connection(settings)
+    except (OSError, ValueError, media.MediaError):
+        return {}
+
+
+def acoustid_continuation(settings, conn, row, metadata, analysis, result, connection):
+    """Return whether the legacy result is handled by this preparation path."""
+    audit = metadata.get('audit') or {}
+    identity = audit.get('audio_identity')
+    if (not settings.external_fingerprints or not settings.external_metadata
+            or audit.get('sha256') != row['sha256'] or audit.get('state') != 'passed'
+            or audit.get('profile') != 'full_decode_all_audio_streams'
+            or not fields.HASH.fullmatch(str(identity or ''))):
+        return False, None
+    duration = metadata.get('duration')
+    if not fields.number(duration) or not 3 <= duration <= 21600:
+        return False, None
+    prior = recognition.pending_acoustid(analysis, row['sha256'], duration)
+    if not prior:
+        return False, None
+    # Tag edits, settings churn and key rotation do not mint a second receipt.
+    signature = fields.digest([CONTRACT, row['id'], identity, ACOUSTID_PROFILE])
+    if conn.execute('SELECT 1 FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone():
+        return True, None
+    if not provider_policy.rule(conn, 'acoustid', 'metadata').get('allow_fetch'):
+        return False, None
+    if connection is None:
+        connection = acoustid_connection(settings)
+    if not connection.get('configured'):
+        return False, None
+    usage = conn.execute('SELECT value FROM settings WHERE key=?',
+                         (provider_attempts.RECOGNITION_PREFIX + identity,)).fetchone()
+    remaining = provider_attempts.RECOGNITION_CALL_LIMIT - (json.loads(usage[0]).get('calls', 0) if usage else 0)
+    if remaining <= 0:
+        return False, None
+    if enrichment_gaps.project(conn, [row['id']]).get(row['id'], {}).get('last_failed_search'):
+        return True, None
+    binding = {'connection_version': connection['version'], 'proof': fields.digest(prior)}
+    return True, {'token': fields.digest([signature, result['token'], remaining, binding]), 'receipt': signature,
+            'kind': 'recognize', 'fingerprint_requests_remaining': remaining,
+            'scan': input_readiness.describe(metadata, grace_seconds=settings.input_grace_seconds)['state'] != 'ready',
+            'acoustid_continuation': binding,
+            'reason': 'AcoustID теперь подключён. Продолжим сохранённую проверку одним запросом AcoustID, без повторной отправки в Shazam.'}
+
+
+def embedded_recording_check(settings, conn, row, metadata, analysis, result):
+    if not settings.external_metadata:
+        return False, None
+    reference = providers.embedded_recording_id(metadata)
+    audit = metadata.get('audit') or {}
+    identity = audit.get('audio_identity')
+    if (not reference or audit.get('sha256') != row['sha256'] or audit.get('state') != 'passed'
+            or audit.get('profile') != 'full_decode_all_audio_streams'
+            or not fields.HASH.fullmatch(str(identity or ''))):
+        return False, None
+    usage = conn.execute('SELECT value FROM settings WHERE key=?',
+                         (provider_attempts.RECOGNITION_PREFIX + identity,)).fetchone()
+    if not usage or json.loads(usage[0]).get('calls', 0) < provider_attempts.RECOGNITION_CALL_LIMIT:
+        return False, None
+    if any(c.get('provider') == 'musicbrainz' and c.get('recording_id') == reference
+           and fields.permitted(conn, c, ('cache', 'derived_analysis')) for c in analysis.get('candidates', [])):
+        return False, None
+    signature = fields.digest([CONTRACT, row['id'], identity, RECORDING_REFERENCE_PROFILE, reference])
+    previous = conn.execute('SELECT 1 FROM settings WHERE key=?', ('metadata_prepared:' + signature,)).fetchone()
+    if previous:
+        return True, None
+    rule = provider_policy.rule(conn, 'musicbrainz', 'metadata')
+    if (not all(rule.get('allow_' + operation) for operation in ('fetch', 'cache', 'derived_analysis'))
+            or enrichment_gaps.project(conn, [row['id']]).get(row['id'], {}).get('last_failed_search')):
+        return False, None
+    if any(s.get('provider') == 'musicbrainz' and s.get('state') == 'unknown_outcome' for s in analysis.get('sources', [])):
+        return True, None
+    return True, {'token': fields.digest([signature, result['token']]), 'receipt': signature, 'kind': 'analyze',
+                  'scan': input_readiness.describe(metadata, grace_seconds=settings.input_grace_seconds)['state'] != 'ready',
+                  'embedded_recording_check': reference,
+                  'reason': 'Сверим сохранённый идентификатор с MusicBrainz. Аудиоотпечаток не отправляется, результат останется на проверке.'}
+
+
+def candidate(settings, conn, row, active, result, connection=None):
     if result['ready'] or set(result['blocked']) - SAFE_BLOCKS:
         return None
     gaps = [g for g in result['remaining'] if g['field'] in fields.FIELDS]
     if any(g['code'] in {'recording_conflict', 'recording_incomplete', 'field_locked', 'pending_choice', 'field_lock_stale'} for g in gaps):
         return None
     metadata = json.loads(row['metadata'])
-    refresh_lyrics = not gaps and lyric_refresh(conn, settings, row, metadata)
-    if not gaps and not refresh_lyrics:
-        return None
     saved = conn.execute('SELECT * FROM analyses WHERE track_id=?', (row['id'],)).fetchone()
     analysis = json.loads(saved['payload']) if saved and saved['input_sha256'] == row['sha256'] else {}
     if analysis.get('possible_mix') or analysis.get('critical_conflicts') or analysis.get('unresolved_conflicts'):
         return None
     matches, fingerprints, error = fields.recording(conn, analysis, metadata)
     if error in {'recording_conflict', 'recording_incomplete'}:
+        return None
+    if not fingerprints:
+        handled, continuation = acoustid_continuation(settings, conn, row, metadata, analysis, result, connection)
+        if handled:
+            return continuation
+        handled, reference_check = embedded_recording_check(settings, conn, row, metadata, analysis, result)
+        if handled:
+            return reference_check
+    refresh_lyrics = not gaps and lyric_refresh(conn, settings, row, metadata)
+    if not gaps and not refresh_lyrics:
         return None
     art_hint = None
     if matches and any(g['field'] == 'cover' for g in gaps):
@@ -393,6 +484,17 @@ def _retry_identity(worker, job, item):
 
 async def search(worker, job, item):
     try:
+        if item.get('acoustid_continuation'):
+            payload = json.loads(job['payload'])
+            if (job['kind'] != 'recognize' or payload.get('trigger') != CONTRACT
+                    or not payload.get('metadata_preparation_id') or item not in payload.get('items', [])):
+                raise media.MediaError('preparation_invalid', 'AcoustID не соответствует сохранённой подготовке')
+        if item.get('embedded_recording_check'):
+            payload = json.loads(job['payload'])
+            if (job['kind'] != 'analyze' or payload.get('trigger') != CONTRACT
+                    or not payload.get('metadata_preparation_id') or item not in payload.get('items', [])):
+                raise media.MediaError('preparation_invalid', 'Ссылка MusicBrainz не соответствует сохранённой подготовке')
+            await worker.io(authorize, worker.settings, job)
         if item.get('lyric_search_only') is True:
             # Only a server-frozen preparation manifest can narrow the query.
             # Old unflagged runs keep their original provider scope.
@@ -495,16 +597,19 @@ def install(app, settings):
                 raise security.error(409, 'preparation_active', 'Подготовка уже запущена')
             chosen = []
             kind = None
+            connection = acoustid_connection(settings)
             for tid, token in body.tokens.items():
                 row = conn.execute('SELECT * FROM tracks WHERE id=? AND is_current=1', (tid,)).fetchone()
                 value = fields.evaluate(settings, conn, row, active) if row else None
-                item = candidate(settings, conn, row, active, value) if row else None
+                item = candidate(settings, conn, row, active, value, connection) if row else None
                 if not item or item['token'] != token or kind and kind != item['kind']:
                     raise security.error(409, 'preparation_stale', 'Обновите план: данные или доступные действия изменились')
                 kind = item['kind']
                 chosen.append({'track_id': tid, 'sha256': row['sha256'], 'relative_path': row['relative_path'],
                                'scan': item['scan'], 'guards': guards(conn, row),
                                **({'lyric_search_only': True} if item.get('lyric_search_only') is True else {}),
+                               **({'acoustid_continuation': item['acoustid_continuation']} if item.get('acoustid_continuation') else {}),
+                               **({'embedded_recording_check': item['embedded_recording_check']} if item.get('embedded_recording_check') else {}),
                                **({'album_hint': item['album_hint']} if item.get('album_hint') else {}),
                                **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})
                 conn.execute('INSERT INTO settings VALUES(?,?)', ('metadata_prepared:' + item['receipt'],

@@ -6,6 +6,10 @@ AcoustID supplements Shazam recognition. When there is no unambiguous match and 
 
 When an earlier search could not use AcoustID because it was unconfigured, a new Recognize job can continue with the remaining allowance. Conclusive fragment evidence must belong to the exact current file and extractor profile. Negative fragments or consistent historical recording IDs are retained without resending them to Shazam. Historical tags are never revived for a metadata query. Conflicting IDs, missing evidence and unknown request outcomes do not qualify. An exhausted allowance remains exhausted.
 
+In Needs review, check the collection, select the records offered for AcoustID, and start Prepare data. The plan offers up to 50 records at a time. It reuses the saved Shazam result without sending that fingerprint again. A strong unambiguous AcoustID result is checked against its MusicBrainz recording ID. Title, artist and duration still have to agree. Editions, artwork and synchronized lyrics require their own evidence.
+
+When fingerprint attempts are exhausted, the plan may offer to check an embedded recording ID against MusicBrainz. The check requires one recording ID, title and artist tags, a known duration and a current audio audit. MusicBrainz receives the recording ID. The result remains a candidate to review against the audio.
+
 ## UI setup
 
 1. Register an application in [Your Applications](https://acoustid.org/new-application) and obtain an Application API key. The User API key is for submitting fingerprints and is not used here.
