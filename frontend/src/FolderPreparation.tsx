@@ -13,6 +13,7 @@ type Run = {
   scanned_files?: number;
   warnings?: Record<string, number>;
   autofill?: boolean;
+  refines?: string;
   action?: string;
   processed?: number;
   applied?: number;
@@ -40,6 +41,49 @@ export function rememberedFolder() {
   } catch {
     return "";
   }
+}
+
+function ScanErrors({ id, count }: { id: string; count: number }) {
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<{ file: string; message: string }[] | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!open || items) return;
+    const controller = new AbortController();
+    setError("");
+    api<{ items: { file: string; message: string }[] }>(
+      "/preparation/" + encodeURIComponent(id) + "/scan-errors",
+      { signal: controller.signal },
+    )
+      .then((value) => {
+        if (!controller.signal.aborted) setItems(value.items);
+      })
+      .catch((e) => {
+        if (!controller.signal.aborted) setError(messageFor(e));
+      });
+    return () => controller.abort();
+  }, [id, open, items]);
+  return (
+    <details onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>Ошибки сканирования ({count})</summary>
+      {error ? (
+        <p role="alert">{error}</p>
+      ) : !items ? (
+        <p>Загрузка…</p>
+      ) : (
+        <>
+          <ul>
+            {items.map((item) => (
+              <li key={item.file}>
+                <strong>{item.file}</strong> - {item.message}
+              </li>
+            ))}
+          </ul>
+          {count > items.length && <p>Полный список доступен в отчёте по файлам.</p>}
+        </>
+      )}
+    </details>
+  );
 }
 
 export function FolderPreparation({
@@ -149,13 +193,15 @@ export function FolderPreparation({
       setAfter("");
     }
   }
-  async function stop() {
+  async function changeRun(operation: "stop" | "refine-lyrics") {
     if (action.current || !run.id) return;
     action.current = true;
     setBusy(true);
     try {
       setRun(
-        await api<Run>("/preparation/" + encodeURIComponent(run.id) + "/stop", { method: "POST" }),
+        await api<Run>("/preparation/" + encodeURIComponent(run.id) + "/" + operation, {
+          method: "POST",
+        }),
       );
       setGeneration((n) => n + 1);
     } catch (e) {
@@ -264,23 +310,35 @@ export function FolderPreparation({
                   : "Подготовка остановлена"}
             </strong>
             <p>
-              {run.folder || "Вся музыкальная папка"} · {stages[run.stage || ""] || run.stage}
+              {run.folder || "Вся музыкальная папка"} ·{" "}
+              {run.refines ? "Уточнение поиска текстов" : stages[run.stage || ""] || run.stage}
             </p>
             {run.state === "review" && run.scanned_files === 0 && (
               <p>В этой папке не найдено поддерживаемых файлов. Выберите другую папку.</p>
             )}
             {run.autofill && run.processed !== undefined && (
               <div aria-live="polite">
-                <p>
-                  Проверено {run.processed} из {run.scanned_files}. Изменены файлы:{" "}
-                  {run.applied || 0}. Опубликованы в Ready: {run.published || 0}. Задач выравнивания
-                  завершено: {run.aligned || 0}.
-                </p>
-                <p>
-                  Все поля заполнены: {run.counts?.populated || 0}. Требуют проверки:{" "}
-                  {run.counts?.review || 0}. Пропущены: {run.counts?.excluded || 0}. Ошибки
-                  сканирования: {run.scan_errors || 0}.
-                </p>
+                {run.refines ? (
+                  <p>
+                    Проверено {run.processed} из {run.scanned_files}. Найдены варианты с таймкодами:{" "}
+                    {run.counts?.found || 0}. Без новых таймкодов: {run.counts?.not_found || 0}.
+                    Пропущены: {run.counts?.excluded || 0}. Требуют проверки:{" "}
+                    {run.counts?.review || 0}.
+                  </p>
+                ) : (
+                  <>
+                    <p>
+                      Проверено {run.processed} из {run.scanned_files}. Изменены файлы:{" "}
+                      {run.applied || 0}. Опубликованы в Ready: {run.published || 0}. Задач
+                      выравнивания завершено: {run.aligned || 0}.
+                    </p>
+                    <p>
+                      Все поля заполнены: {run.counts?.populated || 0}. Требуют проверки:{" "}
+                      {run.counts?.review || 0}. Пропущены: {run.counts?.excluded || 0}. Ошибки
+                      сканирования: {run.scan_errors || 0}.
+                    </p>
+                  </>
+                )}
                 {run.state === "active" && run.action && <p>{stages[run.action] || run.action}</p>}
                 {!!run.issues?.length && (
                   <details>
@@ -294,6 +352,9 @@ export function FolderPreparation({
                     </ul>
                   </details>
                 )}
+                {!!run.scan_errors && run.id && (
+                  <ScanErrors key={run.id} id={run.id} count={run.scan_errors} />
+                )}
                 {(run.processed > 0 || !!run.scan_errors) && (
                   <a
                     href={"/api/preparation/" + encodeURIComponent(run.id || "") + "/report"}
@@ -305,9 +366,27 @@ export function FolderPreparation({
               </div>
             )}
             {run.autofill && run.state === "active" && (
-              <button className="button subtle" disabled={busy} onClick={() => void stop()}>
+              <button
+                className="button subtle"
+                disabled={busy}
+                onClick={() => void changeRun("stop")}
+              >
                 Остановить заполнение
               </button>
+            )}
+            {run.autofill && run.state === "review" && !run.refines && !!run.scanned_files && (
+              <button
+                className="button secondary"
+                disabled={busy}
+                onClick={() => void changeRun("refine-lyrics")}
+              >
+                Уточнить поиск текстов
+              </button>
+            )}
+            {run.refines && (
+              <a href={"/api/preparation/" + encodeURIComponent(run.refines) + "/report"} download>
+                Отчёт исходного прохода (CSV)
+              </a>
             )}
             {!!Object.keys(run.skipped || {}).length && (
               <small>

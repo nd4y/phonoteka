@@ -445,10 +445,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if run.get('autofill'):
                 filters[filter] = """t.id IN (
                     SELECT json_extract(row.value,'$[0]') FROM settings page, json_each(page.value) row
-                    WHERE page.key GLOB ? AND json_extract(row.value,'$[2]')='review'
+                    WHERE page.key GLOB ? AND json_extract(row.value,'$[2]') IN ('review','found')
                     UNION ALL SELECT json_extract(result,'$.track_id') FROM job_items
                     WHERE job_id=? AND state='failed')"""
-                args.extend(['fill_report:' + run.get('scan_id', '') + ':*', run.get('scan_id')])
+                args.extend(['fill_report:' + (run.get('report_id') or run.get('scan_id', '')) + ':*', run.get('scan_id')])
         if filter in enrichment_gaps.MUSIC_GAP_FILTERS:
             conn.create_function('phonoteka_music_gap', 3, enrichment_gaps.matches_music_gap, deterministic=True)
             filters[filter] = 'phonoteka_music_gap(t.metadata,t.sha256,?)=1'

@@ -1,5 +1,7 @@
 # phonoteka
 
+After a folder pass finishes, choose **Refine lyrics search** in the wizard to look up eligible tracks by their embedded metadata and review new timed lyric options.
+
 When a recording is already identified but artwork has not been requested,
 preparation can look up its known album without another audio fingerprint.
 Results remain review candidates; neither an edition nor an image is selected

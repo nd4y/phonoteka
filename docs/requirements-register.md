@@ -3262,3 +3262,5 @@ Do not apply disputed data, mixes or speech; preserve PC2 and existing held
 jobs. Each acceptance stage still requires separate evidence.
 
 20 November 2026. From the folder wizard a single explicit action starts a persistent pass over the working copy. Use incremental observations, existing source allowances, locks and revision checks. Search covers and timed text, prepare eligible alignment, write only confirmed fields and publish only under the existing acceptance policy. Preserve disputed versions, mixes and speech for review or exclusion. Expose counts, stop and a per-file report. Owner authorized merge after green CI, main image deployment on st1 and one pass from the UI.
+
+20 November 2026. Diagnose failed scan items down to the audio payload, preserve historical reports and add a bounded lyrics-only follow-up after the folder pass. A previous conclusive lookup with matching embedded artist/title and valid duration may be refined without fingerprint evidence. New options require review.

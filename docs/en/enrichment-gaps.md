@@ -87,3 +87,5 @@ After an internal search or recognition failure with unstarted files, **Continue
 
 The worker retries the same local per-file checkpoint up to three times on SQLite contention. No provider request is repeated by this retry. The progress summary groups review cases and errors under **require attention**. File details show the individual reason.
 Processing lists jobs that can continue directly after active jobs, even if many newer history entries were created after the failure.
+
+After a folder pass, the wizard can refine an earlier conclusive lyrics lookup. The embedded artist and title must match the prior query, and the track must have a known duration. The server uses the existing scan manifest and queries LRCLIB for eligible files. The original and follow-up reports remain available separately. Timed options await review. Empty or single-byte files require a replacement containing audio.

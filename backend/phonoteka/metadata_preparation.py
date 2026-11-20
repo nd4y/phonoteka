@@ -298,12 +298,13 @@ def candidate(settings, conn, row, active, result, connection=None):
     matches, fingerprints, error = fields.recording(conn, analysis, metadata)
     if error in {'recording_conflict', 'recording_incomplete'}:
         return None
+    legacy_lyrics = not refresh_lyrics and lyric_variant(conn, row, metadata, analysis)
     if not fingerprints:
         handled, continuation = acoustid_continuation(settings, conn, row, metadata, analysis, result, connection)
-        if handled:
+        if handled and (continuation or not legacy_lyrics):
             return continuation
         handled, reference_check = embedded_recording_check(settings, conn, row, metadata, analysis, result)
-        if handled:
+        if handled and (reference_check or not legacy_lyrics):
             return reference_check
     art_hint = None
     if matches and any(g['field'] == 'cover' for g in gaps):
@@ -323,8 +324,7 @@ def candidate(settings, conn, row, active, result, connection=None):
             projected = enrichment_gaps.project(conn, [row['id']]).get(row['id'], {})
             if not projected.get('last_failed_search'):
                 art_hint = artwork_preparation.album_hint(metadata, analysis, matches)
-    expanded_lyrics = (not art_hint and not refresh_lyrics and bool(fingerprints)
-                       and lyric_variant(conn, row, metadata, analysis))
+    expanded_lyrics = not art_hint and legacy_lyrics
     if not gaps and not refresh_lyrics and not expanded_lyrics:
         return None
     kind = 'analyze' if refresh_lyrics or expanded_lyrics or art_hint or matches or fingerprints else 'recognize'

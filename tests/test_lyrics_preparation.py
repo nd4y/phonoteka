@@ -84,7 +84,8 @@ def test_refresh_keeps_expended_allowance_and_audio_and_new_words_need_review(li
     assert media.sha256_file(path) == sha
 
 
-def test_completed_legacy_lyric_search_offers_one_distinct_query(library, monkeypatch):
+@pytest.mark.parametrize('keep_fingerprint', [False, True])
+def test_completed_legacy_lyric_search_offers_one_distinct_query(library, monkeypatch, keep_fingerprint):
     cfg, client, headers, tid, _, path = library
     assert enqueue(client, headers, plan(client)).status_code == 202
     drain(cfg)
@@ -98,6 +99,8 @@ def test_completed_legacy_lyric_search_offers_one_distinct_query(library, monkey
         retained = json.loads(conn.execute('SELECT payload FROM analyses WHERE track_id=?', (tid,)).fetchone()[0])
         retained['query'] = {'title': 'Original', 'artist': 'Artist'}
         retained['sources'] = [{'provider': 'lrclib', 'state': 'no_match'}]
+        if not keep_fingerprint:
+            retained['candidates'] = [c for c in retained['candidates'] if c.get('identification') != 'audio_fingerprint']
         conn.execute('UPDATE analyses SET input_sha256=?,payload=? WHERE track_id=?',
                      (row['sha256'], db.encode(retained), tid))
         duration = meta['duration']
@@ -125,7 +128,7 @@ def test_completed_legacy_lyric_search_offers_one_distinct_query(library, monkey
     analysis = json.loads(db.fetchone(cfg.db_path, 'SELECT payload FROM analyses WHERE track_id=?', (tid,))['payload'])
     candidate = next(candidate for candidate in analysis['candidates'] if candidate['id'] == 'lrclib:89')
     assert not candidate['timing_verified'] and candidate['lrc']
-    assert any(candidate.get('provider') == 'acoustid' for candidate in analysis['candidates'])
+    assert any(candidate.get('provider') == 'acoustid' for candidate in analysis['candidates']) is keep_fingerprint
 
 
 @pytest.mark.parametrize('previous_kind', ['analyze', 'recognize', 'exhausted-cache', 'lyrics-refresh'])
@@ -189,3 +192,45 @@ def test_restricted_known_or_unaccepted_data_is_not_refreshed(library, restricti
             conn.execute('UPDATE tracks SET metadata=? WHERE id=?', (db.encode(meta), tid))
     assert entry(client)['preparation'] is None
     assert media.sha256_file(path) == sha
+
+def test_refine_after_completed_scan_issues_only_lyric_request_preserves_files_and_parent(library, monkeypatch):
+    from phonoteka import preparation
+    from phonoteka.worker import root_identity
+    cfg, client, headers, tid, sha, path = lyric_only(library)
+    parent = str(uuid.uuid4())
+    scan = str(uuid.uuid4())
+    with db.transaction(cfg.db_path) as conn:
+        row = conn.execute('SELECT metadata FROM tracks WHERE id=?', (tid,)).fetchone()
+        duration = json.loads(row[0])['duration']
+        conn.execute('UPDATE analyses SET input_sha256=?,payload=? WHERE track_id=?',
+                     (sha,db.encode({'query':{'title':'Original','artist':'Artist'},'candidates':[],
+                                     'sources':[{'provider':'lrclib','state':'no_match'}]}),tid))
+        run = {'id':parent,'root':root_identity(cfg.work_root),'state':'review','stage':'review','autofill':True,
+               'scan_id':scan,'epoch':int(conn.execute("SELECT value FROM settings WHERE key='auth_epoch'").fetchone()[0]),
+               'profile':'lyrics_required','folder':'','scanned_files':1,'scan_errors':0}
+        conn.execute('INSERT INTO settings VALUES(?,?)',('preparation_request:'+parent,db.encode(run)))
+        preparation.save(conn,run)
+        conn.execute('INSERT INTO settings VALUES(?,?)',('fill_page:'+scan+':0',db.encode([[tid,sha]])))
+        conn.execute('INSERT INTO settings VALUES(?,?)',('fill_report:'+scan+':0',db.encode([[tid,path.name,'review','lyrics_review_required']])))
+    query=[]
+    async def lookup(self, provider, url, params=None):
+        query.append((provider,url,params))
+        return [{'id':89,'trackName':'Original','artistName':'Artist','duration':duration,'syncedLyrics':'[00:00.100]Synthetic'}]
+    monkeypatch.setattr(Providers,'get',lookup)
+    original=client.get('/api/preparation/'+parent+'/report').text
+    endpoint='/api/preparation/'+parent+'/refine-lyrics'
+    response=client.post(endpoint,headers=headers)
+    assert response.status_code==202, response.text
+    identity=response.json()['id']
+    assert client.post(endpoint,headers=headers).json()['id']==identity
+    for _ in range(12):
+        preparation.tick(cfg)
+        drain(cfg)
+        prep.tick(cfg)
+        state=client.get('/api/preparation').json()
+        if state['state']!='active':break
+    assert state['state']=='review' and state['counts']=={'found':1},state
+    assert query==[('lrclib','https://lrclib.net/api/search',{'q':'original artist'})]
+    assert client.get('/api/preparation/'+parent+'/report').text==original
+    assert 'lyrics_option_found' in client.get('/api/preparation/'+identity+'/report').text
+    assert media.sha256_file(path)==sha and not client.get('/api/tracks/'+tid).json()['lrc']

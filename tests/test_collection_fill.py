@@ -54,3 +54,15 @@ def test_stop_and_idempotency_before_first_write(library):
     preparation.tick(cfg)
     assert start(client, headers, run['id'])['state'] == 'stopped'
     assert media.sha256_file(path) == sha
+
+
+def test_single_byte_files_show_actionable_scan_error(library):
+    cfg,client,headers,_,_,_=library
+    path=cfg.work_root/'broken.webm'
+    path.write_bytes(b'\x00')
+    run=start(client,headers,'payload-test')
+    drain(cfg);preparation.tick(cfg)
+    report=client.get('/api/preparation/'+run['id']+'/report').text
+    assert 'no_audio_payload' in report and 'копия со звуком' in report
+    assert client.get('/api/preparation/'+run['id']+'/scan-errors').json()['items'][0]['code']=='no_audio_payload'
+    assert path.read_bytes()==b'\x00'
