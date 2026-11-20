@@ -42,6 +42,7 @@ def test_one_start_applies_only_confirmed_fields_without_browser(library, accept
     assert run['reasons'] and db.fetchone(cfg.db_path, "SELECT count(*) AS n FROM history WHERE kind='apply'")['n'] == 1
     report = client.get('/api/preparation/' + run['id'] + '/report')
     assert report.status_code == 200 and path.name in report.text
+    assert [row['id'] for row in client.get('/api/tracks', params={'filter': 'preparation'}).json()['items']] == [tid]
 
 
 def test_stop_and_idempotency_before_first_write(library):
@@ -53,4 +54,3 @@ def test_stop_and_idempotency_before_first_write(library):
     preparation.tick(cfg)
     assert start(client, headers, run['id'])['state'] == 'stopped'
     assert media.sha256_file(path) == sha
-

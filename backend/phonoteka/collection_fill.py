@@ -289,4 +289,3 @@ def install(app, settings):
                 cancel(conn, run, 'cancelled')
                 preparation.save(conn, run)
             return preparation.public(run)
-
