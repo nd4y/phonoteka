@@ -414,6 +414,8 @@ def publication_followup(settings, conn, current, metadata, item, result, job):
                     'publication_target': publication.freeze_target(new_row)}
     parent = json.loads(job['payload'])
     payload = {'items': [publish_item], 'params': {}, 'confirmed_fields_parent': job['id']}
+    if parent.get('collection_fill_id'):
+        payload['collection_fill_id'] = parent['collection_fill_id']
     for key in ('auth_token_id', 'auth_scopes', 'auth_limited', '_trace'):
         if key in parent: payload[key] = parent[key]
     stamp = db.utcnow()

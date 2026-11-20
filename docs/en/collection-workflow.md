@@ -91,3 +91,11 @@ If LRCLIB places a single empty end marker up to one second past the audio, the 
 Detailed fields and usage terms expand on demand. Embed/export restrictions remain visible and server provenance and permission checks remain enforced. `POST /api/tracks/{id}/analysis/preview` accepts the same `candidate_ids` and `If-Match` as selection. The UI submits its returned `preview_revision` when saving. Existing API clients can still create proposals directly. App Back first closes the comparison and returns to the retained choices.
 
 Clear a checkbox in the comparison to keep that field as it is. For example, accept the title and artist while retaining the existing Recording ID. The checkboxes apply to the current comparison and leave field locks alone. On save, the server validates `excluded_fields` against the current `preview_revision` and requires at least one field to remain selected.
+
+## Automatic folder processing
+
+Select a folder in the wizard, enable automatic filling of the working copy and choose **Organize selected folder**. The server uses an incremental inventory and processes matching files in batches. Closing the browser does not interrupt the run.
+
+The wizard fills corroborated metadata, searches for missing artwork and lyrics and submits eligible drafts for alignment. An existing acceptance may carry forward when both audio and lyrics are verified unchanged. Those files can be published to Ready. New timings require review. Mixes and spoken recordings are skipped.
+
+The result shows files checked, confirmed writes, publications and reasons for skipped records. The CSV lists individual paths. Stopping keeps completed writes and their history.

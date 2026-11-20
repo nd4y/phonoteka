@@ -402,6 +402,11 @@ def public(run, conn):
 
 def validate(conn, settings, run, job=None):
     from .worker import root_identity
+    if run.get('collection_fill_id'):
+        from . import preparation
+        parent = preparation.load(conn)
+        if parent.get('id') != run['collection_fill_id'] or parent.get('state') != 'active' or parent.get('batch_id') != run['id']:
+            raise media.MediaError('preparation_stopped', 'Заполнение папки остановлено')
     if run.get('state') != 'active':
         raise media.MediaError('preparation_stopped', 'Подготовка остановлена')
     epoch = int(conn.execute("SELECT value FROM settings WHERE key='auth_epoch'").fetchone()[0])
@@ -605,6 +610,40 @@ async def scan(worker, job):
     worker.finish(job['id'], 'succeeded' if complete else 'cancelled_partial' if worker.cancelled(job['id']) else 'completed_with_errors')
 
 
+def start_batch(conn, settings, active, key, tokens):
+    from .worker import root_identity
+    chosen = []
+    kind = None
+    connection = acoustid_connection(settings)
+    for tid, token in tokens.items():
+        row = conn.execute('SELECT * FROM tracks WHERE id=? AND is_current=1', (tid,)).fetchone()
+        value = fields.evaluate(settings, conn, row, active) if row else None
+        item = candidate(settings, conn, row, active, value, connection) if row else None
+        if not item or item['token'] != token or kind and kind != item['kind']:
+            raise security.error(409, 'preparation_stale', 'Обновите план: данные или доступные действия изменились')
+        kind = item['kind']
+        chosen.append({'track_id': tid, 'sha256': row['sha256'], 'relative_path': row['relative_path'],
+                       'scan': item['scan'], 'guards': guards(conn, row),
+                       **({'lyric_search_only': True} if item.get('lyric_search_only') is True else {}),
+                       **({'expanded_lyrics': True} if item.get('expanded_lyrics') is True else {}),
+                       **({'acoustid_continuation': item['acoustid_continuation']} if item.get('acoustid_continuation') else {}),
+                       **({'embedded_recording_check': item['embedded_recording_check']} if item.get('embedded_recording_check') else {}),
+                       **({'album_hint': item['album_hint']} if item.get('album_hint') else {}),
+                       **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})
+        conn.execute('INSERT INTO settings VALUES(?,?)', ('metadata_prepared:' + item['receipt'],
+                     db.encode({'run_id': key, **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})))
+    run = {'id': key, 'state': 'active', 'items': chosen, 'tokens': tokens, 'epoch': active['auth_epoch'],
+           'root': root_identity(settings.work_root), 'kind': kind, 'total': len(chosen), 'completed_stages': [],
+           'job_id': None, 'stage': STAGES[0], 'reason': None, 'started_at': db.utcnow()}
+    try:
+        validate(conn, settings, run)
+    except media.MediaError as exc:
+        raise security.error(409, exc.code, exc.message) from exc
+    advance(conn, settings, run)
+    save(conn, run)
+    return public(run, conn)
+
+
 def install(app, settings):
     @app.get('/api/metadata-preparation')
     def current(request: Request):
@@ -628,7 +667,6 @@ def install(app, settings):
                 raise ValueError('noncanonical request ID')
         except ValueError:
             raise security.error(428, 'idempotency_key_required', 'Повторите запуск из интерфейса')
-        from .worker import root_identity
         with db.transaction(settings.db_path) as conn:
             previous = load(conn, key)
             if previous:
@@ -637,36 +675,7 @@ def install(app, settings):
                 return public(previous, conn)
             if load(conn).get('state') == 'active':
                 raise security.error(409, 'preparation_active', 'Подготовка уже запущена')
-            chosen = []
-            kind = None
-            connection = acoustid_connection(settings)
-            for tid, token in body.tokens.items():
-                row = conn.execute('SELECT * FROM tracks WHERE id=? AND is_current=1', (tid,)).fetchone()
-                value = fields.evaluate(settings, conn, row, active) if row else None
-                item = candidate(settings, conn, row, active, value, connection) if row else None
-                if not item or item['token'] != token or kind and kind != item['kind']:
-                    raise security.error(409, 'preparation_stale', 'Обновите план: данные или доступные действия изменились')
-                kind = item['kind']
-                chosen.append({'track_id': tid, 'sha256': row['sha256'], 'relative_path': row['relative_path'],
-                               'scan': item['scan'], 'guards': guards(conn, row),
-                               **({'lyric_search_only': True} if item.get('lyric_search_only') is True else {}),
-                               **({'expanded_lyrics': True} if item.get('expanded_lyrics') is True else {}),
-                               **({'acoustid_continuation': item['acoustid_continuation']} if item.get('acoustid_continuation') else {}),
-                               **({'embedded_recording_check': item['embedded_recording_check']} if item.get('embedded_recording_check') else {}),
-                               **({'album_hint': item['album_hint']} if item.get('album_hint') else {}),
-                               **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})
-                conn.execute('INSERT INTO settings VALUES(?,?)', ('metadata_prepared:' + item['receipt'],
-                             db.encode({'run_id': key, **({'recovery_of': item['recovery_of']} if item.get('recovery_of') else {})})))
-            run = {'id': key, 'state': 'active', 'items': chosen, 'tokens': body.tokens, 'epoch': active['auth_epoch'],
-                   'root': root_identity(settings.work_root), 'kind': kind, 'total': len(chosen), 'completed_stages': [],
-                   'job_id': None, 'stage': STAGES[0], 'reason': None, 'started_at': db.utcnow()}
-            try:
-                validate(conn, settings, run)
-            except media.MediaError as exc:
-                raise security.error(409, exc.code, exc.message) from exc
-            advance(conn, settings, run)
-            save(conn, run)
-            return public(run, conn)
+            return start_batch(conn, settings, active, key, body.tokens)
 
     @app.post('/api/metadata-preparation/cancel')
     def cancel(request: Request, body: Stop):

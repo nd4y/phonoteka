@@ -218,3 +218,5 @@ The Sources tab is restored after a reload in the current window. Back closes it
 When recording data or settings change, or a file is busy, both processing and preparation explain the stop and ask you to refresh the fill plan. Completed results remain available; the plan recalculates actions from current evidence.
 
 OTLP export groups shared packet metadata while preserving trace contents and existing size limits. Settings and Jaeger stay unchanged. [Export performance verification](docs/en/trace-export-performance.md).
+
+Select a music folder in the wizard and choose **Organize selected folder**. The wizard shows confirmed writes, Ready publications and reasons for skipped files. [Folder workflow](docs/en/collection-workflow.md).

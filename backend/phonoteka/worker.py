@@ -220,6 +220,9 @@ class Worker:
     def authorize_grant(self, job):
         from . import metadata_preparation
         metadata_preparation.authorize(self.settings, job)
+        if '"collection_fill_id"' in job['payload']:
+            from . import collection_fill
+            collection_fill.authorize(self.settings, job)
         parent = json.loads(job['payload']).get('confirmed_fields_parent')
         if parent:
             previous = db.fetchone(self.settings.db_path, 'SELECT cancel_requested,state FROM jobs WHERE id=?', (parent,))
@@ -531,6 +534,9 @@ class Worker:
         await self.io(self.link_cue_sheets, prefix)
         db.set_setting(self.settings.db_path, "last_folder_scan" if folder else "last_scan", db.encode({"id": job["id"], "state": "complete" if complete else "partial", "errors": errors[:50], "coverage_complete": not errors and not self.cancelled(job["id"]) and final_identity == identity, "at": db.utcnow()}))
         state = "cancelled_partial" if self.cancelled(job["id"]) and stats["completed"] else "cancelled" if self.cancelled(job["id"]) else "succeeded" if complete else "completed_with_errors"
+        if json.loads(job["payload"]).get("collect_observations") and state in {"succeeded", "completed_with_errors"}:
+            from . import collection_fill
+            await self.io(collection_fill.capture, self.settings, job, skipped)
         self.finish(job["id"], state, "partial_scan" if not complete else None)
 
     @staticmethod

@@ -460,14 +460,14 @@ export function ConfirmedFieldsPanel({
                     : chosenPreparation.every((i) => i.preparation?.embedded_recording_check)
                       ? "Сверим идентификаторы из файлов с MusicBrainz. Найденные версии останутся в списке на проверку."
                       : chosenPreparation.every((i) => i.preparation?.album_hint)
-                    ? "Запросим издания и обложки известных альбомов. Аудиоотпечатки не отправляются; текст и аудиофайлы не меняются."
-                    : chosenPreparation.every((i) => i.preparation?.lyric_search_only)
-                      ? "Поищем текст в LRCLIB. Слова и таймкоды можно проверить в карточке записи."
-                      : chosenPreparation[0].preparation?.kind === "analyze"
-                        ? "Уточним теги, обложки и тексты по известным данным записи. Новые аудиоотпечатки не отправляются."
-                        : chosenPreparation[0].preparation?.fingerprint_requests_remaining === 0
-                          ? "Новые запросы распознавания недоступны. Проверим пригодный к повторному использованию кэш; лимит не сбрасывается."
-                          : "Проверим аудио в пределах оставшегося бюджета распознавания."}
+                        ? "Запросим издания и обложки известных альбомов. Аудиоотпечатки не отправляются; текст и аудиофайлы не меняются."
+                        : chosenPreparation.every((i) => i.preparation?.lyric_search_only)
+                          ? "Поищем текст в LRCLIB. Слова и таймкоды можно проверить в карточке записи."
+                          : chosenPreparation[0].preparation?.kind === "analyze"
+                            ? "Уточним теги, обложки и тексты по известным данным записи. Новые аудиоотпечатки не отправляются."
+                            : chosenPreparation[0].preparation?.fingerprint_requests_remaining === 0
+                              ? "Новые запросы распознавания недоступны. Проверим пригодный к повторному использованию кэш; лимит не сбрасывается."
+                              : "Проверим аудио в пределах оставшегося бюджета распознавания."}
               </p>
               {chosenPreparation.some((i) => i.preparation?.fingerprint_requests_remaining === 0) &&
                 chosenPreparation.some(
