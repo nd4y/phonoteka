@@ -455,7 +455,11 @@ export function ConfirmedFieldsPanel({
               <p className="muted small">
                 {!chosenPreparation.length
                   ? "Ничего не выбрано. Отметьте записи для подготовки в списке ниже."
-                  : chosenPreparation.every((i) => i.preparation?.album_hint)
+                  : chosenPreparation.every((i) => i.preparation?.acoustid_continuation)
+                    ? "Продолжим распознавание выбранных записей через AcoustID. Повторных запросов в Shazam в этой партии нет."
+                    : chosenPreparation.every((i) => i.preparation?.embedded_recording_check)
+                      ? "Сверим идентификаторы из файлов с MusicBrainz. Найденные версии останутся в списке на проверку."
+                      : chosenPreparation.every((i) => i.preparation?.album_hint)
                     ? "Запросим издания и обложки известных альбомов. Аудиоотпечатки не отправляются; текст и аудиофайлы не меняются."
                     : chosenPreparation.every((i) => i.preparation?.lyric_search_only)
                       ? "Поищем текст в LRCLIB. Слова и таймкоды можно проверить в карточке записи."

@@ -19,6 +19,14 @@ const item = (id: number, kind: "analyze" | "recognize", remaining?: number | nu
 });
 
 describe("preparation selection", () => {
+  it("offers embedded recording checks separately from other metadata jobs", () => {
+    const reference = item(1, "analyze");
+    reference.preparation.embedded_recording_check = "existing-recording-id";
+    expect(preparationBatch([item(2, "analyze"), reference, item(3, "recognize", 0)])).toEqual([
+      reference,
+    ]);
+  });
+
   it("defaults to the original bounded cohort and its exact tokens", () => {
     const cached = item(1, "recognize", 0);
     const capacity = item(2, "recognize", 1);
@@ -78,7 +86,10 @@ describe("preparation selection", () => {
   it("never submits a replacement revision under a previously selected token", () => {
     const plan = [item(1, "analyze")];
     const oldChoice = preparationSelection(plan);
-    plan[0] = { ...plan[0], preparation: { ...plan[0].preparation, token: "new-revision" } };
+    plan[0] = {
+      ...plan[0],
+      preparation: { ...plan[0].preparation, token: "new-revision" },
+    };
     expect(selectedPreparationBatch(plan, oldChoice)).toEqual([]);
     const refreshed = [...plan];
     expect(selectedPreparationBatch(refreshed, oldChoice)[0].preparation.token).toBe(
@@ -87,6 +98,13 @@ describe("preparation selection", () => {
   });
 });
 describe("preparation priorities", () => {
+  it("offers the bounded AcoustID continuation before unrelated lookups", () => {
+    const pending = Array.from({ length: 51 }, (_, i) => item(i, "recognize", 1));
+    for (const entry of pending) entry.preparation.acoustid_continuation = {};
+    expect(preparationBatch([item(99, "analyze"), ...pending, item(199, "recognize", 0)])).toEqual(
+      pending.slice(0, 50),
+    );
+  });
   it("searches metadata before consuming recognition or checking exhausted caches", () => {
     const values = [item(1, "recognize", 0), item(2, "recognize", 2), item(3, "analyze")];
     expect(preparationBatch(values).map((i) => i.id)).toEqual([3]);

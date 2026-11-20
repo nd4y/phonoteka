@@ -27,6 +27,7 @@ GET_DEADLINE_SECONDS = 90
 REQUEST_AUTHORIZATION=ContextVar('provider_request_authorization',default=None)
 RELEASE_ID = re.compile(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}')
 LYRICS_QUERY_PROFILE = 'lrclib-free-text-v1'
+RECORDING_ID = re.compile(r'[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}')
 
 def retry_after_seconds(value, fallback=60):
     """Honor delta-seconds and HTTP-date without shortening a server's pause."""
@@ -55,6 +56,20 @@ def normalized(value):
 def scalar(tags, key):
     value = tags.get(key, '')
     return str(value[0] if isinstance(value, list) and value else value or '')
+
+
+def embedded_recording_id(meta):
+    tags = meta.get('tags', {})
+    value = tags.get('musicbrainz_trackid')
+    ids = value if isinstance(value, list) else [value]
+    if len(ids) != 1 or not isinstance(ids[0], str):
+        return None
+    identity = ids[0].strip().lower()
+    duration = meta.get('duration')
+    if (RECORDING_ID.fullmatch(identity) and type(duration) in (int, float) and 3 <= duration <= 21600
+            and all(normalized(scalar(tags, field)) for field in ('title', 'artist'))):
+        return identity
+    return None
 
 
 def query_tags(meta, relative):
@@ -139,6 +154,26 @@ def lyric_candidate(row, query, duration):
 def matching_timed_lyrics(candidate):
     return (bool(candidate['lrc']) and not candidate['instrumental_claim']
             and candidate['match']['state'] == 'matching_metadata')
+
+
+
+def musicbrainz_candidate(row, query, duration, restrict_album):
+    identity = row['id']
+    artist = ''.join(x.get('name', x.get('artist', {}).get('name', '')) + x.get('joinphrase', '')
+                     for x in row.get('artist-credit', []))
+    seconds = (row.get('length') or 0) / 1000
+    releases = [{key: value.get(key, '') for key in ('id', 'title', 'date', 'country', 'status')}
+                for value in row.get('releases', []) if value.get('id')]
+    if restrict_album:
+        releases = [release for release in releases if normalized(release['title']) == normalized(query['album'])]
+        if not releases:
+            return None
+    return {'id': 'mb:' + identity, 'provider': 'musicbrainz', 'kind': 'metadata', 'recording_id': identity,
+            'tags': {'title': row.get('title', ''), 'artist': artist, 'musicbrainz_trackid': identity},
+            'duration': seconds, 'match': assess(query, row.get('title', ''), artist, duration, seconds),
+            'releases': releases[:15], 'source_url': 'https://musicbrainz.org/recording/' + identity,
+            'identification': 'text_search'}
+
 
 class ProviderError(Exception):
     def __init__(self, code, provider, message):
@@ -314,8 +349,19 @@ class Providers:
                 conn.execute('DELETE FROM provider_cache WHERE key IN (SELECT key FROM provider_cache ORDER BY expires LIMIT 100)')
             conn.execute('INSERT OR REPLACE INTO provider_cache VALUES(?,?,?,?)',(key,provider,payload,time.time()+min(usage['cache_ttl'],86400 if data is None else 7*86400)))
 
-    async def musicbrainz(self, query, duration, *, restrict_album=False):
+    async def musicbrainz(self, query, duration, *, restrict_album=False, recording_id=None, exact_only=False):
         def escape(value): return re.sub(r'([+\-&|!(){}\[\]^"~*?:\\/])',r'\\\1',value[:180])
+        url = 'https://' + self.settings.musicbrainz_host + '/ws/2/recording'
+        if isinstance(recording_id, str) and RECORDING_ID.fullmatch(recording_id) and not restrict_album:
+            data = await self.get('musicbrainz', url + '/' + recording_id,
+                                  {'fmt': 'json', 'inc': 'artist-credits+releases'})
+            if data is not None:
+                if not isinstance(data, dict) or data.get('id') != recording_id:
+                    raise ProviderError('provider_error', 'musicbrainz', 'Каталог вернул другой идентификатор записи')
+                item = musicbrainz_candidate(data, query, duration, False)
+                return [{**item, 'identification': 'recording_id_lookup'}]
+        if exact_only:
+            return []
         q='recording:"'+escape(query['title'])+'"'
         if query['artist']: q+=' AND artist:"'+escape(query['artist'])+'"'
         if restrict_album: q+=' AND release:"'+escape(query['album'])+'"'
@@ -358,6 +404,24 @@ class Providers:
             candidates.append({'id':'mb:'+row['id'],'provider':'musicbrainz','kind':'metadata','recording_id':row['id'],'tags':{'title':row.get('title',''),'artist':artist,'musicbrainz_trackid':row['id']},'duration':(row.get('length') or 0)/1000,'match':match,'releases':releases[:40 if restrict_album else 15],'releases_truncated':truncated,'source_url':'https://musicbrainz.org/recording/'+row['id'],'identification':'text_search',
                                **({'search_incomplete': incomplete} if incomplete else {})})
         return candidates
+
+    def acoustid_recording_id(self, candidate):
+        if (not candidate or candidate.get('provider') != 'acoustid'
+                or candidate.get('identification') != 'audio_fingerprint'
+                or (candidate.get('match') or {}).get('state') != 'fingerprint_match'):
+            return None
+        score, identity = candidate.get('score'), candidate.get('recording_id')
+        if type(score) not in (int, float) or not .98 <= score <= 1 or not RECORDING_ID.fullmatch(str(identity)):
+            return None
+        with db.connect(self.settings.db_path) as conn:
+            usage = candidate.get('usage')
+            if usage is not None:
+                if not isinstance(usage, dict) or usage.get('provider') != 'acoustid' or not all(
+                        provider_policy._allowed(conn, usage, operation) for operation in ('cache', 'derived_analysis')):
+                    return None
+            elif not provider_policy.rule(conn, 'acoustid', 'metadata').get('allow_derived_analysis'):
+                return None
+        return identity
 
     async def lyrics(self, query, duration, *, expanded_only=False):
         base = 'https://lrclib.net/api/'
@@ -410,6 +474,26 @@ class Providers:
             return await self._analyze(meta,relative,identified,authorize,album_hint=album_hint,
                                        lyrics_only=lyrics_only,expanded_lyrics=expanded_lyrics)
 
+    async def check_embedded_recording(self, meta, relative, identity, authorize):
+        """Check the file's own recording reference, retaining candidates for manual review."""
+        if identity != embedded_recording_id(meta):
+            raise media.MediaError('preparation_stale', 'Идентификатор записи в файле изменился')
+        query, _ = query_tags(meta, relative)
+        with authorization(authorize), provider_attempts.input_revision(meta['sha256']):
+            authorize()
+            try:
+                candidates = await self.musicbrainz(query, meta['duration'], recording_id=identity, exact_only=True)
+                state = 'candidates' if candidates else 'no_match'
+                source = {'provider': 'musicbrainz', 'state': state, 'count': len(candidates)}
+            except ProviderError as exc:
+                if exc.code == 'provider_unavailable':
+                    await asyncio.to_thread(self.unavailable, 'musicbrainz')
+                candidates, state = [], 'incomplete'
+                source = {'provider': 'musicbrainz', 'state': exc.code, 'message': str(exc)}
+        return {'input_sha256': meta['sha256'], 'policy': POLICY_VERSION, 'query': query,
+                'query_source': 'embedded_recording_id', 'candidates': candidates, 'sources': [source],
+                'state': state, 'automatic_apply': False}
+
     async def _analyze(self, meta, relative, identified=None, authorize=lambda:None, *, album_hint=None,
                        lyrics_only=False, expanded_lyrics=False):
         if lyrics_only and album_hint or expanded_lyrics and not lyrics_only:
@@ -433,6 +517,10 @@ class Providers:
             return result
         searches=[('lrclib',self.lyrics,{'expanded_only': True} if expanded_lyrics else {})] if lyrics_only else [('musicbrainz',self.musicbrainz,{'restrict_album':True})] if album_hint else [
             ('musicbrainz',self.musicbrainz,{}),('lrclib',self.lyrics,{})]
+        if not lyrics_only and not album_hint and identified:
+            recording_id = await asyncio.to_thread(self.acoustid_recording_id, identified)
+            if recording_id:
+                searches[0][2]['recording_id'] = recording_id
         for provider,call,options in searches:
             authorize()
             try:
