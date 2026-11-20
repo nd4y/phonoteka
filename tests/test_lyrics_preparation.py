@@ -7,6 +7,7 @@ import pytest
 
 from phonoteka import db, field_policy, media, metadata_preparation as prep, provider_policy
 from phonoteka.worker import Worker
+from phonoteka.providers import Providers
 from test_backend import drain, job
 from test_confirmed_fields import library, plan, enqueue
 from test_metadata_preparation import settings, entry
@@ -81,6 +82,50 @@ def test_refresh_keeps_expended_allowance_and_audio_and_new_words_need_review(li
     assert db.fetchone(cfg.db_path, "SELECT count(*) AS n FROM jobs WHERE kind IN ('apply','publish')")['n'] == writes
     assert not client.get('/api/tracks/' + tid).json()['lrc']
     assert media.sha256_file(path) == sha
+
+
+def test_completed_legacy_lyric_search_offers_one_distinct_query(library, monkeypatch):
+    cfg, client, headers, tid, _, path = library
+    assert enqueue(client, headers, plan(client)).status_code == 202
+    drain(cfg)
+    for _ in range(2):
+        job(client, headers, 'scan')
+        drain(cfg)
+    with db.transaction(cfg.db_path) as conn:
+        grant(conn)
+        row = conn.execute('SELECT * FROM tracks WHERE id=?', (tid,)).fetchone()
+        meta = json.loads(row['metadata'])
+        retained = json.loads(conn.execute('SELECT payload FROM analyses WHERE track_id=?', (tid,)).fetchone()[0])
+        retained['query'] = {'title': 'Original', 'artist': 'Artist'}
+        retained['sources'] = [{'provider': 'lrclib', 'state': 'no_match'}]
+        conn.execute('UPDATE analyses SET input_sha256=?,payload=? WHERE track_id=?',
+                     (row['sha256'], db.encode(retained), tid))
+        duration = meta['duration']
+    revision = media.sha256_file(path)
+    requests = []
+
+    async def lookup(self, source, url, params=None):
+        requests.append((source, url, params))
+        return [{'id': 89, 'trackName': 'Original', 'artistName': 'Artist',
+                 'duration': duration, 'syncedLyrics': '[00:00.100]Synthetic'}]
+
+    monkeypatch.setattr(Providers, 'get', lookup)
+    value = entry(client)['preparation']
+    assert value['expanded_lyrics'] and value['lyric_search_only']
+    response = client.post('/api/metadata-preparation',
+                           json={'tokens': {tid: value['token']}},
+                           headers={**headers, 'Idempotency-Key': str(uuid.uuid4())})
+    assert response.status_code == 202, response.text
+    drain(cfg)
+    prep.tick(cfg)
+    assert requests == [('lrclib', 'https://lrclib.net/api/search', {'q': 'original artist'})]
+    assert entry(client)['preparation'] is None
+    live = client.get('/api/tracks/' + tid).json()
+    assert not live['lrc'] and media.sha256_file(path) == revision
+    analysis = json.loads(db.fetchone(cfg.db_path, 'SELECT payload FROM analyses WHERE track_id=?', (tid,))['payload'])
+    candidate = next(candidate for candidate in analysis['candidates'] if candidate['id'] == 'lrclib:89')
+    assert not candidate['timing_verified'] and candidate['lrc']
+    assert any(candidate.get('provider') == 'acoustid' for candidate in analysis['candidates'])
 
 
 @pytest.mark.parametrize('previous_kind', ['analyze', 'recognize', 'exhausted-cache', 'lyrics-refresh'])

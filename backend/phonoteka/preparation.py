@@ -3,7 +3,7 @@ import json
 import uuid
 from typing import Literal
 
-from fastapi import Query, Request
+from fastapi import HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import catalog_sources, db, media, provider_policy, security, webhooks, work_folders
@@ -15,6 +15,7 @@ DONE = {"candidates", "candidate", "no_match", "fingerprint_match"}
 
 class Start(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    autofill: bool = False
     folder: str = Field(default="", max_length=2048)
     profile: Literal["lyrics_required", "instrumental", "relaxed"] = "lyrics_required"
 
@@ -28,6 +29,16 @@ def save(conn, run):
     conn.execute("INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                  (KEY, db.encode(run)))
     conn.execute("UPDATE settings SET value=? WHERE key=?", (db.encode(run),"preparation_request:"+run["id"]))
+
+
+def public(run):
+    if not run.get('autofill'):
+        return run
+    from .collection_fill import REASONS
+    view = {key: value for key, value in run.items() if key not in {'page', 'publications', 'participants', 'root'}}
+    view['issues'] = [{'code': key, 'message': REASONS.get(key, key), 'count': count}
+                      for key, count in sorted(run.get('reasons', {}).items(), key=lambda x: -x[1]) if key != 'fields_present']
+    return view
 
 
 def pending(conn, scan, kind, cursor):
@@ -59,11 +70,15 @@ def advance(conn, settings, run):
     if epoch != run["epoch"]:
         run.update(state="stopped", reason="authorization_changed")
         return
+    if run.get("autofill") and run.get("stage") == "autofill":
+        from . import collection_fill
+        collection_fill.advance(conn, settings, run)
+        return
     if run.get("job_id"):
         job = conn.execute("SELECT state,kind,error,failed,completed FROM jobs WHERE id=?", (run["job_id"],)).fetchone()
         if job and job["state"] in {"queued","running","paused","waiting_authorization","waiting","deferred","waiting_provider","waiting_storage"}:
             return
-        partial = job and job["state"] == "completed_with_errors" and job["completed"] > 0
+        partial = job and job["state"] == "completed_with_errors" and (job["completed"] > 0 or run.get("autofill") and job["kind"] == "scan")
         if partial and job["kind"] == "scan":
             summary = conn.execute("SELECT value FROM settings WHERE key=?", ("last_folder_scan" if run["folder"] else "last_scan",)).fetchone()
             summary = json.loads(summary[0]) if summary else {}
@@ -75,6 +90,10 @@ def advance(conn, settings, run):
             return
         if job["kind"] == "scan":
             run["scanned_files"] = job["completed"]
+            if run.get("autofill"):
+                from . import collection_fill
+                collection_fill.after_scan(conn, settings, run)
+                return
             conn.execute("""INSERT INTO settings(key,value)
                 SELECT 'preparation_profile:' || json_extract(result,'$.track_id'), ? FROM job_items
                 WHERE job_id=? AND state='succeeded' AND json_extract(result,'$.track_id') IS NOT NULL
@@ -99,6 +118,9 @@ def advance(conn, settings, run):
         identity, stamp = str(uuid.uuid4()), db.utcnow()
         payload = {"items": items, "params": {"folder": run["folder"]} if kind == "scan" else {},
                    "trigger": "preparation", "preparation_id": run["id"]}
+        if run.get("autofill") and kind == "scan":
+            payload["params"]["scan_mode"] = "incremental"
+            payload["collect_observations"] = True
         conn.execute("""INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch)
             VALUES(?,?,'queued','pending',?,?,?,?,?)""", (identity, kind, db.encode(payload), len(items), stamp, stamp, epoch))
         db.event(conn, "job_created", {"job_id": identity, "kind": kind, "trigger": "preparation"})
@@ -116,7 +138,19 @@ def tick(settings):
         run = load(conn)
         if run.get("state") == "active":
             previous = db.encode(run)
-            advance(conn, settings, run)
+            if run.get("autofill"):
+                conn.execute("SAVEPOINT autofill_step")
+                try:
+                    advance(conn, settings, run)
+                except (HTTPException, media.MediaError, OSError) as exc:
+                    conn.execute("ROLLBACK TO autofill_step")
+                    run = json.loads(previous)
+                    from . import collection_fill
+                    collection_fill.cancel(conn, run, getattr(exc, "code", None) or "preparation_stale")
+                finally:
+                    conn.execute("RELEASE autofill_step")
+            else:
+                advance(conn, settings, run)
             if previous != db.encode(run):
                 save(conn, run)
 
@@ -134,7 +168,7 @@ def install(app, settings):
     def current(request: Request):
         security.require_session(request, settings, owner_only=True)
         with db.connect(settings.db_path) as conn:
-            return load(conn)
+            return public(load(conn))
 
     @app.post("/api/preparation", status_code=202)
     def start(request: Request, body: Start):
@@ -149,15 +183,15 @@ def install(app, settings):
         with db.transaction(settings.db_path) as conn:
             run = load(conn)
             if run.get("id") == key:
-                if run["folder"] != body.folder or run["profile"] != body.profile:
+                if run["folder"] != body.folder or run["profile"] != body.profile or bool(run.get("autofill")) != body.autofill:
                     raise security.error(409, "idempotency_conflict", "Запрос с этим ключом уже принят")
-                return run
+                return public(run)
             previous = conn.execute("SELECT value FROM settings WHERE key=?", ("preparation_request:" + key,)).fetchone()
             if previous:
                 original = json.loads(previous[0])
-                if original["folder"] != body.folder or original["profile"] != body.profile:
+                if original["folder"] != body.folder or original["profile"] != body.profile or bool(original.get("autofill")) != body.autofill:
                     raise security.error(409, "idempotency_conflict", "Ключ принадлежит другому запуску")
-                return original
+                return public(original)
             if run.get("state") == "active":
                 raise security.error(409, "preparation_active", "Подготовка уже запущена. Откройте её ход")
             recovery = conn.execute("SELECT value FROM settings WHERE key='recovery_required'").fetchone()
@@ -166,7 +200,12 @@ def install(app, settings):
             run = {"id": key, "state": "active", "folder": body.folder, "profile": body.profile,
                    "epoch": active["auth_epoch"], "completed": [], "skipped": {}, "cursor": "",
                    "stage": "scan", "job_id": None, "started_at": db.utcnow()}
+            if body.autofill:
+                from .worker import root_identity
+                if not settings.writable:
+                    raise security.error(409, 'read_only', 'Для заполнения включите запись в рабочую копию')
+                run.update(autofill=True, root=root_identity(settings.work_root))
             advance(conn, settings, run)
             save(conn, run)
             conn.execute("INSERT INTO settings VALUES(?,?)", ("preparation_request:" + key, db.encode(run)))
-            return run
+            return public(run)

@@ -12,6 +12,15 @@ type Run = {
   job_id?: string;
   scanned_files?: number;
   warnings?: Record<string, number>;
+  autofill?: boolean;
+  action?: string;
+  processed?: number;
+  applied?: number;
+  published?: number;
+  aligned?: number;
+  scan_errors?: number;
+  counts?: Record<string, number>;
+  issues?: { code: string; message: string; count: number }[];
   skipped?: Record<string, string>;
 };
 type Listing = { folder: string; directories: string[]; next: string | null };
@@ -20,6 +29,10 @@ const stages: Record<string, string> = {
   recognize: "Распознавание музыки",
   analyze: "Поиск метаданных",
   review: "Проверка записей",
+  autofill: "Заполнение коллекции",
+  align: "Выравнивание текста по аудио",
+  apply: "Запись подтверждённых полей",
+  publish: "Публикация подтверждённых файлов",
 };
 export function rememberedFolder() {
   try {
@@ -47,6 +60,8 @@ export function FolderPreparation({
   const [run, setRun] = useState<Run>({}),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const [automatic, setAutomatic] = useState(true);
+  const autofill = automatic && summary?.read_only === false;
   const [generation, setGeneration] = useState(0),
     [after, setAfter] = useState("");
   const action = useRef(false),
@@ -94,7 +109,7 @@ export function FolderPreparation({
     action.current = true;
     setBusy(true);
     setError("");
-    const body = JSON.stringify({ folder, profile });
+    const body = JSON.stringify({ folder, profile, autofill });
     if (intent.current?.body !== body) intent.current = { body, key: requestId() };
     try {
       const state = await api<Run>("/preparation", {
@@ -132,6 +147,22 @@ export function FolderPreparation({
       setError(messageFor(e));
     } finally {
       setAfter("");
+    }
+  }
+  async function stop() {
+    if (action.current || !run.id) return;
+    action.current = true;
+    setBusy(true);
+    try {
+      setRun(
+        await api<Run>("/preparation/" + encodeURIComponent(run.id) + "/stop", { method: "POST" }),
+      );
+      setGeneration((n) => n + 1);
+    } catch (e) {
+      setError(messageFor(e));
+    } finally {
+      action.current = false;
+      setBusy(false);
     }
   }
   return (
@@ -200,11 +231,28 @@ export function FolderPreparation({
             : "Для каждого трека потребуется указать причину исключения."}{" "}
         Профиль можно изменить при проверке записи.
       </p>
-      <p>
-        Сканирование{summary?.capabilities.recognition ? " → поиск по аудиоотпечатку" : ""}
-        {summary?.capabilities.metadata_search ? " → поиск метаданных" : ""} → ручная проверка.
-        Поиск использует включённые подключения.
-      </p>
+      {summary && !summary.read_only && (
+        <label>
+          <input
+            type="checkbox"
+            checked={automatic}
+            onChange={(e) => setAutomatic(e.target.checked)}
+          />
+          Автоматически заполнить рабочую копию
+        </label>
+      )}
+      {autofill ? (
+        <p>
+          Фонотека сама проверит файлы папки, запросит недостающие данные и запишет подтверждённые
+          изменения. Спорные версии останутся в разделе «Нужно проверить». Вкладку можно закрыть.
+        </p>
+      ) : (
+        <p>
+          Сканирование{summary?.capabilities.recognition ? " → поиск по аудиоотпечатку" : ""}
+          {summary?.capabilities.metadata_search ? " → поиск метаданных" : ""} → ручная проверка.
+          Поиск использует включённые подключения.
+        </p>
+      )}
       {run.id && (
         <div className="notice info">
           <div>
@@ -220,6 +268,46 @@ export function FolderPreparation({
             </p>
             {run.state === "review" && run.scanned_files === 0 && (
               <p>В этой папке не найдено поддерживаемых файлов. Выберите другую папку.</p>
+            )}
+            {run.autofill && run.processed !== undefined && (
+              <div aria-live="polite">
+                <p>
+                  Проверено {run.processed} из {run.scanned_files}. Изменены файлы:{" "}
+                  {run.applied || 0}. Опубликованы в Ready: {run.published || 0}. Задач выравнивания
+                  завершено: {run.aligned || 0}.
+                </p>
+                <p>
+                  Все поля заполнены: {run.counts?.populated || 0}. Требуют проверки:{" "}
+                  {run.counts?.review || 0}. Пропущены: {run.counts?.excluded || 0}. Ошибки
+                  сканирования: {run.scan_errors || 0}.
+                </p>
+                {run.state === "active" && run.action && <p>{stages[run.action] || run.action}</p>}
+                {!!run.issues?.length && (
+                  <details>
+                    <summary>Причины пропусков</summary>
+                    <ul>
+                      {run.issues.map((i) => (
+                        <li key={i.code}>
+                          {i.message} · {i.count}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+                {(run.processed > 0 || !!run.scan_errors) && (
+                  <a
+                    href={"/api/preparation/" + encodeURIComponent(run.id || "") + "/report"}
+                    download
+                  >
+                    Скачать результат по файлам (CSV)
+                  </a>
+                )}
+              </div>
+            )}
+            {run.autofill && run.state === "active" && (
+              <button className="button subtle" disabled={busy} onClick={() => void stop()}>
+                Остановить заполнение
+              </button>
             )}
             {!!Object.keys(run.skipped || {}).length && (
               <small>
@@ -272,7 +360,11 @@ export function FolderPreparation({
         disabled={busy || !listing || !summary || run.state === "active"}
         onClick={() => void start()}
       >
-        {busy ? "Запускаем…" : "Подготовить выбранную папку"}
+        {busy
+          ? "Подождите…"
+          : autofill
+            ? "Организовать выбранную папку"
+            : "Подготовить выбранную папку"}
       </button>
     </section>
   );

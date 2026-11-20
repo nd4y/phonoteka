@@ -197,6 +197,8 @@ Confirmed-field batches show per-record gap reasons and the fields actually writ
 
 Confirmed-field filling can prepare missing evidence in a bounded batch of stability checks and source searches without writing audio files. Refresh the plan afterwards; disputed candidates remain pending. [Workflow and limits](docs/en/confirmed-fields.md#preparing-missing-evidence).
 
+Known albums can be looked up when the saved edition list is shortened. A lyric search tries another LRCLIB query when the initial results lack usable timings. [Artwork preparation](docs/en/artwork-preparation.md) and [lyric search](docs/en/lyric-search-preparation.md) describe the review steps.
+
 When AcoustID becomes available, the plan can continue recordings with conclusive Shazam evidence and remaining fingerprint allowance. Strong AcoustID matches are checked using the MusicBrainz recording ID. When the allowance is exhausted, the plan may offer to check a recording ID already stored in the file. [Resume identification](docs/en/acoustid.md).
 
 Preparation prioritizes metadata searches before remaining recognition capacity. Exhausted inputs can check reusable cached fingerprints without resetting limits; missing confirmation remains visible in results.
@@ -216,3 +218,5 @@ The Sources tab is restored after a reload in the current window. Back closes it
 When recording data or settings change, or a file is busy, both processing and preparation explain the stop and ask you to refresh the fill plan. Completed results remain available; the plan recalculates actions from current evidence.
 
 OTLP export groups shared packet metadata while preserving trace contents and existing size limits. Settings and Jaeger stay unchanged. [Export performance verification](docs/en/trace-export-performance.md).
+
+Select a music folder in the wizard and choose **Organize selected folder**. The wizard shows confirmed writes, Ready publications and reasons for skipped files. [Folder workflow](docs/en/collection-workflow.md).

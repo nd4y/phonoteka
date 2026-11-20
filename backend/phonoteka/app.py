@@ -263,6 +263,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     preparation.install(app,settings)
     from . import metadata_preparation
     metadata_preparation.install(app,settings)
+    from . import collection_fill
+    collection_fill.install(app, settings)
     exports.install(app,settings)
     comparison.install(app,settings)
     provider_policy.install(app,settings)
@@ -438,6 +440,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
         filters.update({name: f"phonoteka_audit_filter(t.metadata,t.sha256,t.status,'{name}')=1"
                         for name in audit_status.FILTERS})
+        if filter == 'preparation':
+            run = preparation.load(conn)
+            if run.get('autofill'):
+                filters[filter] = """t.id IN (
+                    SELECT json_extract(row.value,'$[0]') FROM settings page, json_each(page.value) row
+                    WHERE page.key GLOB ? AND json_extract(row.value,'$[2]')='review'
+                    UNION ALL SELECT json_extract(result,'$.track_id') FROM job_items
+                    WHERE job_id=? AND state='failed')"""
+                args.extend(['fill_report:' + run.get('scan_id', '') + ':*', run.get('scan_id')])
         if filter in enrichment_gaps.MUSIC_GAP_FILTERS:
             conn.create_function('phonoteka_music_gap', 3, enrichment_gaps.matches_music_gap, deterministic=True)
             filters[filter] = 'phonoteka_music_gap(t.metadata,t.sha256,?)=1'
@@ -970,27 +981,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         item.update(publication.rollback_selection(conn, track, body.params['history_id'], body.params['expected_ready_sha256']))
                     except media.MediaError as exc:
                         raise security.error(409, exc.code, exc.message) from exc
-                if body.kind in {'transcribe','align'} and 'generation' not in body.params:
-                    last=conn.execute("SELECT j.payload,j.state,i.value AS item,ji.state AS item_state FROM jobs j,json_each(j.payload,'$.items') i LEFT JOIN job_items ji ON ji.job_id=j.id AND ji.item_key=? WHERE j.kind=? AND json_extract(i.value,'$.track_id')=? AND json_extract(i.value,'$.sha256')=? ORDER BY j.created_at DESC,j.rowid DESC LIMIT 1",(track_id,body.kind,track_id,track['sha256'])).fetchone()
-                    generation=0
-                    if last:
-                        generation=json.loads(last['item']).get('generation',json.loads(last['payload']).get('params',{}).get('generation',0))
-                        if last['item_state'] in {'failed','needs_review','interrupted'} or last['state'] in {'failed','cancelled','cancelled_partial','interrupted'}:generation+=1
-                    if generation>1000000:raise security.error(409,'generation_limit','Достигнут предел повторов ASR')
-                    item['generation']=generation
-                if body.kind=='align':
-                    proposal=conn.execute('SELECT payload FROM proposals WHERE track_id=? AND input_sha256=? ORDER BY created_at DESC,rowid DESC LIMIT 1',(track_id,track['sha256'])).fetchone()
-                    text=(json.loads(proposal['payload']).get('lrc') if proposal else '') or meta.get('lrc') or meta.get('lyrics')
-                    if not text or len(text)>100000: raise security.error(422,'lyrics_required','Нужен текст длиной до 100000 символов')
-                    item['reference_text']=text
-                    document=lyrics_document.effective(conn,dict(track))
-                    item['reference_text'],item['lyrics_reference']=lyrics_document.alignment_reference(document,text)
-                    reference_proposal=json.loads(proposal['payload']) if proposal and json.loads(proposal['payload']).get('lrc') else None
-                    reference_payload=provider_policy.alignment_payload(conn,track,text,reference_proposal)
-                    reference_payload=provider_policy.api_payload(conn,track,reference_payload,'derived_analysis')
-                    item['reference_sources']=reference_payload.get('field_sources',{})
-                    if review_tokens:
-                        item['language_hint'] = review_queue.language_hint(item['reference_text'])
+                if body.kind in {'transcribe','align'}:
+                    review_queue.freeze_inference(conn, track, item, body.kind, body.params, bool(review_tokens))
                 if body.kind == "apply":
                     if body.params.get('acceptance_mode') == 'confirmed_fields':
                         try:

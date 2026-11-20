@@ -39,6 +39,88 @@ def test_failed_fallback_preserves_plain_result_and_retry_reason(tmp_path):
     asyncio.run(run())
 
 
+def test_invalid_exact_lyrics_do_not_hide_valid_structured_variant(tmp_path):
+    calls = []
+    base = {'trackName': 'Song', 'artistName': 'Singer', 'albumName': 'Album', 'duration': 100}
+
+    def respond(request):
+        calls.append(request.url.path)
+        if request.url.path == '/api/get':
+            return httpx.Response(200, json={**base, 'id': 1, 'syncedLyrics': '[02:00]Wrong'})
+        return httpx.Response(200, json=[{**base, 'id': 2, 'syncedLyrics': '[00:01]Line'}])
+
+    async def run():
+        provider = Providers(settings(tmp_path), httpx.MockTransport(respond))
+        try:
+            values = await provider.lyrics({'title': 'Song', 'artist': 'Singer', 'album': 'Album'}, 100)
+            assert calls == ['/api/get', '/api/search']
+            assert [value['id'] for value in values] == ['lrclib:2', 'lrclib:1']
+            assert not values[0]['timing_verified']
+        finally:
+            await provider.close()
+
+    asyncio.run(run())
+
+
+def test_alternate_lyrics_query_does_not_repeat_legacy_query(tmp_path):
+    base = {'trackName': 'Song', 'artistName': 'Singer & Guest', 'albumName': 'Album', 'duration': 100}
+
+    def respond(request):
+        assert request.url.path == '/api/search'
+        assert dict(request.url.params) == {'q': 'song singer guest'}
+        return httpx.Response(200, json=[{**base, 'id': 2, 'syncedLyrics': '[00:01]Line'}])
+
+    async def run():
+        provider = Providers(settings(tmp_path), httpx.MockTransport(respond))
+        try:
+            values = await provider.lyrics({'title': 'Song', 'artist': 'Singer · Guest', 'album': 'Album'},
+                                           100, expanded_only=True)
+            assert [value['id'] for value in values] == ['lrclib:2']
+            assert values[0]['match']['state'] == 'matching_metadata'
+            assert values[0]['timing_verified'] is False
+        finally:
+            await provider.close()
+
+    asyncio.run(run())
+
+
+def test_album_search_ranks_front_art_from_linked_official_editions(tmp_path):
+    recording = '33333333-3333-4333-8333-333333333333'
+    releases = [{'id': f'00000000-0000-0000-0000-{i:012d}', 'title': 'Album', 'status': 'Official'}
+                for i in range(16)]
+    linked = {**releases[-1], 'cover-art-archive': {'front': True}}
+    used = []
+
+    async def run():
+        provider = Providers(settings(tmp_path))
+
+        async def get(source, url, params=None):
+            if url.endswith('/recording'):
+                return {'recordings': [{'id': recording, 'title': 'Song', 'length': 100000,
+                                        'artist-credit': [{'name': 'Singer'}], 'releases': releases[:-1]}]}
+            assert params == {'recording': recording, 'fmt': 'json', 'status': 'official', 'limit': 25}
+            return {'release-count': 16, 'releases': [*releases[:-1], linked]}
+
+        async def cover(identity):
+            used.append(identity)
+            return {'id': 'caa:' + identity, 'kind': 'cover', 'provider': 'coverartarchive',
+                    'match': {'state': 'needs_review'}} if identity == linked['id'] else None
+
+        provider.get = get
+        provider.cover = cover
+        try:
+            result = await provider.analyze({'sha256': 'a' * 64, 'duration': 100,
+                'tags': {'title': 'Song', 'artist': 'Singer', 'album': 'Album'}}, 'song.mp3', album_hint='Album')
+            assert used[0] == linked['id']
+            assert len(used) == 3
+            assert [c['id'] for c in result['candidates'] if c['kind'] == 'cover'] == ['caa:' + linked['id']]
+            assert result['automatic_apply'] is False
+        finally:
+            await provider.close()
+
+    asyncio.run(run())
+
+
 def test_alternative_editions_have_bounded_reviewable_cover_search(tmp_path):
     async def run():
         provider=Providers(settings(tmp_path));calls=[]

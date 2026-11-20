@@ -100,7 +100,7 @@ def test_targeted_album_search_checks_exact_release_and_duration(tmp_path):
 def test_exact_lyrics_before_broad_search_and_404_fallback(tmp_path):
     calls=[]
     def response(request):
-        calls.append(request.url.path)
+        calls.append((request.url.path, dict(request.url.params)))
         if request.url.path=='/api/get':
             if request.url.params['album_name']=='Absent':return httpx.Response(404)
             return httpx.Response(200,json={'id':1,'trackName':'Song','artistName':'Singer','duration':100,'syncedLyrics':'[00:01]Line'})
@@ -108,9 +108,15 @@ def test_exact_lyrics_before_broad_search_and_404_fallback(tmp_path):
     async def run():
         p=Providers(settings(tmp_path),httpx.MockTransport(response))
         first=await p.lyrics({'title':'Song','artist':'Singer','album':'Album'},100)
-        assert len(first)==1 and calls==['/api/get']
+        assert len(first) == 1 and calls == [('/api/get', {
+            'track_name': 'Song', 'artist_name': 'Singer', 'album_name': 'Album', 'duration': '100',
+        })]
         second=await p.lyrics({'title':'Song','artist':'Singer','album':'Absent'},100)
-        assert second==[] and calls==['/api/get','/api/get','/api/search']
+        assert second == [] and calls[1:] == [
+            ('/api/get', {'track_name': 'Song', 'artist_name': 'Singer', 'album_name': 'Absent', 'duration': '100'}),
+            ('/api/search', {'track_name': 'Song', 'artist_name': 'Singer'}),
+            ('/api/search', {'q': 'song singer'}),
+        ]
         await p.close()
     asyncio.run(run())
 
@@ -129,7 +135,10 @@ def test_rate_limit_cooldown_and_incomplete_not_no_match(tmp_path):
         second=await p.analyze(meta,'song.flac')
         assert second['state']=='incomplete' and second['sources'][0]['state']=='provider_cooldown'
         assert sum('musicbrainz.org' in url for url in calls)==1
-        assert sum('lrclib.net' in url for url in calls)==2  # unknown content is transient, not cached
+        # LRCLIB responses without a cache grant stay transient. Each analysis
+        # uses both distinct bounded queries, independent of MusicBrainz's cooldown.
+        lrclib_queries = [dict(url.params) for url in map(httpx.URL, calls) if url.host == 'lrclib.net']
+        assert lrclib_queries == [{'track_name': 'Song', 'artist_name': 'Singer'}, {'q': 'song singer'}] * 2
         await p.close()
     asyncio.run(run())
 
