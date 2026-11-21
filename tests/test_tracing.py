@@ -156,6 +156,15 @@ def test_small_otlp_batch_preserves_entire_request(spans):
     assert packets == [(encoded.SerializeToString(), 2)]
 
 
+def test_service_resource_groups_like_an_equivalent_sdk_resource():
+    attrs = {'service.name': 'phonoteka-generated', 'host.name': 'generated-host'}
+    regular = Resource(attrs)
+    fixed = tracing.ServiceResource(dict(reversed(list(attrs.items()))))
+    assert regular == fixed and hash(regular) == hash(fixed)
+    assert {regular: 'scope'}[fixed] == 'scope'
+    assert tracing.ServiceResource({'service.name': 'elsewhere'}) != fixed
+
+
 def test_deadline_exports_open_intervals_without_waiting_for_business_work(spans, monkeypatch):
     monkeypatch.setattr(tracing, 'SEGMENT_SECONDS', .05)
     with tracing.file_attempt(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())):

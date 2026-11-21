@@ -53,6 +53,18 @@ _deadline_sequence = itertools.count()
 _deadline_thread = None
 
 
+class ServiceResource(Resource):
+    """The service's resource attributes and schema are fixed at startup."""
+    def __init__(self, attributes):
+        super().__init__(attributes)
+        # The pinned SDK groups each span by resource, computing its hash by
+        # serializing its attributes as JSON. Preserve its equality/hash contract.
+        self._service_hash = super().__hash__()
+
+    def __hash__(self):
+        return self._service_hash
+
+
 class SegmentDeadline:
     """One scheduler per process; cancelled entries release attempt state."""
     def __init__(self, state):
@@ -368,7 +380,7 @@ def configure(service):
         _processor = BoundedProcessor(endpoint, session)
         from . import __version__
         _provider = TracerProvider(sampler=ALWAYS_ON,
-            resource=Resource({'service.namespace': 'phonoteka', 'service.name': 'phonoteka-'+service,
+            resource=ServiceResource({'service.namespace': 'phonoteka', 'service.name': 'phonoteka-'+service,
                 'service.version': __version__, 'deployment.environment.name': 'homelab',
                 'host.name': os.environ.get('OTEL_HOST_NAME', 'st1'), 'service.instance.id': str(uuid.uuid4())}),
             span_limits=SpanLimits(max_attributes=32, max_events=8, max_links=8, max_attribute_length=256),
@@ -484,12 +496,16 @@ def _start_in_segment(state, name, values, parent, kind, links):
 @contextmanager
 def span(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
     current = start(name, values, parent, kind, links)
-    with trace.use_span(current, end_on_exit=True, record_exception=False, set_status_on_exception=False):
-        try: yield current
-        except BaseException as exc:
-            current.set_attribute('error.type', type(exc).__name__)
-            if type(exc).__name__ != 'CancelledError': current.set_status(Status(StatusCode.ERROR))
-            raise
+    token = otcontext.attach(trace.set_span_in_context(current))
+    try:
+        yield current
+    except BaseException as exc:
+        current.set_attribute('error.type', type(exc).__name__)
+        if type(exc).__name__ != 'CancelledError': current.set_status(Status(StatusCode.ERROR))
+        raise
+    finally:
+        otcontext.detach(token)
+        current.end()
 
 
 @contextmanager
