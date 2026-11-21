@@ -478,7 +478,13 @@ def start(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
     state = SEGMENT.get()
     if state:
         with state['lock']:
-            return _start_in_segment(state, name, values, parent, kind, links)
+            if not state['finished']:
+                return _start_in_segment(state, name, values, parent, kind, links)
+            # A copied asyncio context can outlive the file. Keep its lineage,
+            # without allocating a fresh segment or retaining the finished root.
+            closed_parent = state.get('closed_parent')
+        if closed_parent and trace.get_current_span(parent).get_span_context().trace_id != closed_parent.trace_id:
+            parent = trace.set_span_in_context(trace.NonRecordingSpan(closed_parent), parent)
     return _sdk_start(name, values, parent, kind, links)
 
 
@@ -534,10 +540,11 @@ def span(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
 @contextmanager
 def file_attempt(job_id, item_id, attempt_id, number=None, previous=None):
     links = []
-    prior = trace.get_current_span(extracted(previous or {})).get_span_context()
-    if prior.is_valid: links = [Link(prior)]
+    if previous:
+        prior = trace.get_current_span(extracted(previous)).get_span_context()
+        if prior.is_valid: links = [Link(prior)]
     values = attributes(job_id=job_id, item_id=item_id, attempt_id=attempt_id, attempt_number=number)
-    token = SEGMENT.set({'count': 1, 'started': time.monotonic(), 'values': values, 'number': 1,
+    token = SEGMENT.set({'count': 1, 'started': time.monotonic(), 'number': 1,
                          'lock': threading.RLock(), 'active': [], 'finished': False})
     try:
         with span('file.attempt', values, parent=otcontext.Context(), links=links) as root:
@@ -548,6 +555,9 @@ def file_attempt(job_id, item_id, attempt_id, number=None, previous=None):
             state['finished'] = True
             if state.get('timer'): state['timer'].cancel()
             for current in list(reversed(state['active'])): current.end()
+            root = state.pop('root', None)
+            if root is not None:
+                state['closed_parent'] = root.get_span_context()
         SEGMENT.reset(token)
 
 
@@ -628,14 +638,17 @@ def install_network():
         async def aclose(self):
             try: await self.stream.aclose()
             finally: self.finish()
+    propagation_headers = frozenset(('traceparent', 'tracestate', 'baggage'))
+    private_headers = propagation_headers | {'x-phonoteka-job-id', 'x-phonoteka-item-id'}
+
     def internal_headers(request):
         internal = urlsplit(os.environ.get('INFERENCE_URL', ''))
         trusted = internal.hostname and (request.url.scheme, request.url.host, request.url.port) == (internal.scheme, internal.hostname, internal.port)
-        for key in ('traceparent','tracestate','baggage'):
-            request.headers.pop(key, None)
-        if trusted: request.headers.update(carrier())
-        else:
-            for key in ('x-phonoteka-job-id','x-phonoteka-item-id'): request.headers.pop(key,None)
+        blocked = propagation_headers if trusted else private_headers
+        for key in blocked.intersection(request.headers.keys()):
+            del request.headers[key]
+        if trusted:
+            request.headers.update(carrier())
     def request_values(request):
         return {'http.request.method': request.method if request.method in {'GET','POST','PUT','PATCH','HEAD','DELETE','OPTIONS'} else 'OTHER',
                 'server.address': host(request.url.host), 'server.port': request.url.port or (443 if request.url.scheme == 'https' else 80),

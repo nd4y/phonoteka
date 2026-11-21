@@ -61,3 +61,5 @@ by itself prove acceleration. Native tests, CI, the installed revision and trace
 readback are verified separately.
 
 The exporter reuses the encoded resource header within one batch of up to 128 spans. This applies to groups sharing a single service resource and an instrumentation scope without attributes. The pinned SDK serializes each span, including its events and links. A regression test compares packet bytes across resource and scope changes.
+
+A completed file attempt releases its root span. Work resumed in a copied context can still use the original parent identity in Jaeger. An ordinary file completion no longer needs cyclic garbage collection to release the root.

@@ -372,3 +372,59 @@ def test_internal_rpc_uses_client_span_parent_external_rpc_cannot_receive_it(spa
     headers={k.lower():v for k,v in server.headers_seen[0].items()}
     parent=trace.get_current_span(tracing.extracted(headers)).get_span_context()
     assert parent.trace_id==client_span.context.trace_id and parent.span_id==client_span.context.span_id
+
+
+def test_completed_file_releases_root_without_gc_and_keeps_copied_parent(spans):
+    import contextvars
+    import gc
+    import weakref
+
+    def capture():
+        with tracing.file_attempt(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())) as root:
+            return weakref.ref(root), root.get_span_context(), contextvars.copy_context()
+
+    ref, parent, copied = capture()
+    # An explicitly retained context may still contain the root facade.
+    def late():
+        with tracing.span('dns.lookup') as child:
+            return child.get_span_context()
+    assert copied.run(late).trace_id == parent.trace_id
+    child = next(s for s in spans.get_finished_spans() if s.name == 'dns.lookup')
+    assert child.parent.span_id == parent.span_id
+    del copied
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        with tracing.file_attempt(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())) as transient:
+            transient_ref = weakref.ref(transient)
+        del transient
+        assert transient_ref() is None
+        assert ref() is None
+    finally:
+        if was_enabled:
+            gc.enable()
+
+@pytest.mark.parametrize('trusted', [False, True])
+def test_forwarded_headers_are_filtered_case_insensitively(spans, monkeypatch, trusted):
+    target = 'http://localhost:8061'
+    monkeypatch.setenv('INFERENCE_URL', target if trusted else 'http://localhost:8062')
+    received = []
+
+    def respond(request):
+        received.append(request.headers)
+        return httpx.Response(200, content=b'ok')
+
+    headers = [('TraceParent', 'obsolete'), ('BAGGAGE', 'first'), ('baggage', 'second'),
+               ('TraceState', 'obsolete'), ('X-Phonoteka-Job-ID', 'job'),
+               ('x-Phonoteka-Item-ID', 'item'), ('x-phonoteka-job-id-extra', 'keep')]
+    with tracing.file_attempt(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())):
+        with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+            http.get(target, headers=headers)
+    delivered, = received
+    assert 'tracestate' not in delivered and 'baggage' not in delivered
+    assert delivered['x-phonoteka-job-id-extra'] == 'keep'
+    if trusted:
+        assert delivered['traceparent'].startswith('00-') and 'obsolete' not in delivered['traceparent']
+        assert delivered['x-phonoteka-job-id'] == 'job' and delivered['x-phonoteka-item-id'] == 'item'
+    else:
+        assert {'traceparent', 'x-phonoteka-job-id', 'x-phonoteka-item-id'}.isdisjoint(delivered.keys())
