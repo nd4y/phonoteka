@@ -134,6 +134,28 @@ def test_long_segment_rolls_on_next_operation(spans):
     assert operation.parent.span_id==continuation.context.span_id
 
 
+def test_closed_parent_from_previous_segment_uses_current_root(spans):
+    with tracing.file_attempt(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())):
+        with tracing.span('previous') as previous:
+            stale = trace.set_span_in_context(previous)
+        tracing.SEGMENT.get()['count'] = 128
+        with tracing.span('after.rollover', parent=stale): pass
+    result = spans.get_finished_spans()
+    root = next(s for s in result if s.name == 'file.attempt' and s.links)
+    child = next(s for s in result if s.name == 'after.rollover')
+    assert child.context.trace_id == root.context.trace_id
+    assert child.parent.span_id == root.context.span_id
+
+
+def test_small_otlp_batch_preserves_entire_request(spans):
+    for name in ('dns.lookup', 'http.client'):
+        with tracing.span(name, {'server.address': 'localhost'}): pass
+    encoded = tracing.encode_spans(spans.get_finished_spans())
+    packets, dropped = tracing._wire_batches(encoded)
+    assert dropped == 0
+    assert packets == [(encoded.SerializeToString(), 2)]
+
+
 def test_deadline_exports_open_intervals_without_waiting_for_business_work(spans, monkeypatch):
     monkeypatch.setattr(tracing, 'SEGMENT_SECONDS', .05)
     with tracing.file_attempt(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())):
