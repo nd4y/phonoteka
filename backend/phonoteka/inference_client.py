@@ -17,6 +17,10 @@ async def process(worker, job, item):
     if not row or row['sha256']!=item['sha256']: raise media.MediaError('conflict','File revision changed')
     meta=json.loads(row['metadata'])
     if meta.get('input_error'): raise media.MediaError('invalid_audio','Cannot transcribe invalid input')
+    if 'audio_check_token' in item:
+        from . import audio_check
+        with db.connect(settings.db_path) as conn:
+            audio_check.recheck(conn, row, item)
     if job['kind']=='align':
         with db.connect(settings.db_path) as conn:
             reference=item.get('lyrics_reference')

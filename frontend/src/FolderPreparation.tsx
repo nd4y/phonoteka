@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, messageFor, requestId } from "./api";
+import { AudioCheckPanel } from "./AudioCheckPanel";
 import type { Summary } from "./types";
 
 type Run = {
@@ -131,7 +132,9 @@ export function FolderPreparation({
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
       try {
-        const state = await api<Run>("/preparation", { signal: controller.signal });
+        const state = await api<Run>("/preparation", {
+          signal: controller.signal,
+        });
         if (controller.signal.aborted) return;
         setRun(state);
         if (state.state === "active") timer = setTimeout(poll, 3000);
@@ -184,7 +187,10 @@ export function FolderPreparation({
       );
       setListing((old) =>
         old?.folder === value.folder && old.next === cursor
-          ? { ...value, directories: [...old.directories, ...value.directories] }
+          ? {
+              ...value,
+              directories: [...old.directories, ...value.directories],
+            }
           : old,
       );
     } catch (e) {
@@ -258,7 +264,8 @@ export function FolderPreparation({
       </div>
       {listing && (
         <p className="muted small">
-          Папка доступна для чтения.{!listing.directories.length && " Вложенных папок нет."}
+          Папка доступна для чтения.
+          {!listing.directories.length && " Вложенных папок нет."}
         </p>
       )}
       <label>
@@ -294,7 +301,8 @@ export function FolderPreparation({
         </p>
       ) : (
         <p>
-          Сканирование{summary?.capabilities.recognition ? " → поиск по аудиоотпечатку" : ""}
+          Сканирование
+          {summary?.capabilities.recognition ? " → поиск по аудиоотпечатку" : ""}
           {summary?.capabilities.metadata_search ? " → поиск метаданных" : ""} → ручная проверка.
           Поиск использует включённые подключения.
         </p>
@@ -387,6 +395,9 @@ export function FolderPreparation({
               <a href={"/api/preparation/" + encodeURIComponent(run.refines) + "/report"} download>
                 Отчёт исходного прохода (CSV)
               </a>
+            )}
+            {run.id && run.refines && run.state === "review" && !!run.counts?.found && (
+              <AudioCheckPanel key={run.id} id={run.id} onJobs={onJobs} />
             )}
             {!!Object.keys(run.skipped || {}).length && (
               <small>
