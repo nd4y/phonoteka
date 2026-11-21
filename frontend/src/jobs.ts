@@ -78,6 +78,7 @@ export type JobActivity = {
 export const jobNames: Record<string, string> = {
   publish_sidecars: "Публикация LRC и обложек",
   release_audit: "Сверка релиза",
+  collection_evidence: "Проверка недостающих данных",
   rollback_ready: "Откат опубликованной версии",
   youtube: "Связи с YouTube",
   normalize_audio: "Подготовка редактируемой копии",

@@ -266,6 +266,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from . import audio_check, collection_fill
     collection_fill.install(app, settings)
     audio_check.install(app, settings)
+    from . import collection_evidence
+    collection_evidence.install(app, settings)
     exports.install(app,settings)
     comparison.install(app,settings)
     provider_policy.install(app,settings)

@@ -1,5 +1,7 @@
 # phonoteka
 
+In a completed folder report, the missing-data check compares lyric timing line by line, checks instrumental performances and finds front covers for the exact release.
+
 After a folder pass finishes, choose **Refine lyrics search** in the wizard to look up eligible tracks by their embedded metadata and review new timed lyric options.
 
 When a recording is already identified but artwork has not been requested,

@@ -10,9 +10,11 @@ def align_lines(text, words, duration, *, unscored_words=False):
     if re.search(r'\[\d+:\d+',text):
         original=parse_lrc(text)['lines']
     else: original=[{'text':x,'start_ms':None} for x in text.splitlines() if x.strip()]
-    tokens=[];owners=[]
-    for index,line in enumerate(original):
-        for token in normalized(line['text']).split(): tokens.append(token);owners.append(index)
+    tokens=[];line_ranges=[]
+    for line in original:
+        begin=len(tokens)
+        tokens.extend(normalized(line['text']).split())
+        line_ranges.append(range(begin,len(tokens)))
     spoken=[];positions=[]
     for word in words:
         # Unscored independent recognition is only a lexical anchor. The final
@@ -28,7 +30,7 @@ def align_lines(text, words, duration, *, unscored_words=False):
         for offset in range(block.size): mapped[block.a+offset]=positions[block.b+offset]
     result=[];previous=-1
     for index,line in enumerate(original):
-        indexes=[i for i,owner in enumerate(owners) if owner==index]
+        indexes=line_ranges[index]
         found=[i for i in indexes if i in mapped]
         state='unaligned';stamp=None;end_stamp=None
         if indexes and len(found)==len(indexes):
