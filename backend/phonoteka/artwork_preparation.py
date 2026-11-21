@@ -17,6 +17,28 @@ def _tag(tags, key):
     return value.strip()
 
 
+def named_album_lookup(metadata, analysis):
+    """A missing cover can justify a release-scoped search even without a confirmed fingerprint."""
+    if metadata.get('has_art') or analysis.get('query_source') == 'album_hint' or any(
+            analysis.get(k) for k in ('possible_mix', 'multiple_recordings', 'unresolved_conflicts', 'critical_conflicts')):
+        return None
+    sources = analysis.get('sources', [])
+    if (not sources or any(not isinstance(s, dict) or s.get('provider') == 'coverartarchive' for s in sources)
+            or [s.get('state') for s in sources if s.get('provider') == 'musicbrainz'] not in (['no_match'], ['candidates'])
+            or any(c.get('cover') or c.get('kind') == 'cover' for c in analysis.get('candidates', []))):
+        return None
+    tags = metadata.get('tags') or {}
+    query = analysis.get('query') or {}
+    try:
+        if any(not normalized(_tag(tags, k)) or normalized(_tag(tags, k)) != normalized(_tag(query, k))
+               for k in ('title', 'artist')):
+            return None
+        album = _tag(tags, 'album')
+    except ValueError:
+        return None
+    return album if 0 < len(album) <= 1024 else None
+
+
 def album_hint(metadata, analysis, matched_recordings):
     """Only current, independently matched recordings may inform this lookup.
 

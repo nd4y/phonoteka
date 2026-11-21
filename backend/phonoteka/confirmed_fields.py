@@ -12,7 +12,7 @@ import re
 from fastapi import Query, Request
 
 from . import catalog_sources, db, enrichment_gaps, field_policy, input_readiness, lyrics_document, media, provider_policy, recognition, security
-from .providers import normalized, scalar
+from .providers import embedded_recording_id, normalized, scalar
 
 CONTRACT = 'confirmed-metadata-fields-v1'
 MODE = 'confirmed_fields'
@@ -123,6 +123,26 @@ def recording(conn, analysis, metadata):
     return matches, fingerprints, None
 
 
+def tagged_artwork_recordings(conn, metadata, analysis):
+    ref = embedded_recording_id(metadata)
+    if not ref or any(analysis.get(k) for k in ('possible_mix', 'multiple_recordings', 'critical_conflicts', 'unresolved_conflicts')):
+        return []
+    tags = metadata['tags']
+    def agrees(candidate):
+        return all(normalized(scalar(candidate.get('tags', {}), k)) == normalized(scalar(tags, k))
+                   for k in ('title', 'artist'))
+    candidates = analysis.get('candidates', [])
+    # A conflicting saved fingerprint is a veto even when it no longer grants write authority.
+    for c in candidates:
+        if c.get('identification') == 'audio_fingerprint' and c.get('match', {}).get('state') == 'fingerprint_match':
+            if not agrees(c) or (c.get('provider') == 'acoustid' and c.get('recording_id') != ref):
+                return []
+    return [c for c in candidates if c.get('provider') == 'musicbrainz' and c.get('kind') == 'metadata'
+            and c.get('recording_id') == ref and agrees(c) and number(c.get('duration'))
+            and c['duration'] > 0 and abs(c['duration'] - metadata['duration']) <= 2
+            and not c.get('search_incomplete') and permitted(conn, c, ('cache', 'derived_analysis'))]
+
+
 def album_and_cover(conn, metadata, candidates, recordings):
     releases = {}
     selected_id = scalar(metadata.get('tags', {}), 'musicbrainz_albumid')
@@ -218,6 +238,13 @@ def evaluate(settings, conn, row, active, *, busy=None, retired=None):
     matches, fingerprints, identity_error = recording(conn, analysis, metadata) if not blocked else ([], [], blocked[0])
     album, cover = album_and_cover(conn, metadata, candidates, matches) if matches else (None, None)
     tags = metadata.get('tags', {})
+    art_references = []
+    if (not blocked and not matches and identity_error == 'recording_unconfirmed' and not metadata.get('has_art')
+            and all(not isinstance(tags.get(k), list) or len(tags[k]) == 1 for k in
+                    ('musicbrainz_albumid', 'album', 'artist', 'title'))
+            and UUID.fullmatch(scalar(tags, 'musicbrainz_albumid')) and scalar(tags, 'album').strip()):
+        art_references = tagged_artwork_recordings(conn, metadata, analysis)
+        _, cover = album_and_cover(conn, metadata, candidates, art_references)
     chosen = {field: matches[0] if matches else None for field in ('title', 'artist')}
     chosen.update(album=album, cover=cover)
     payload = {'tags': {}, 'field_sources': {}, 'sources': [], 'source_priority_version': field_policy.sources(conn)['version']}
@@ -229,6 +256,8 @@ def evaluate(settings, conn, row, active, *, busy=None, retired=None):
         if present: continue
         c = chosen[field]
         reason = blocked[0] if blocked else identity_error
+        if field == 'cover' and art_references and cover:
+            reason = None
         if not reason and field in policy['locks']: reason = 'field_locked'
         if not reason and not c:
             if field == 'cover':
@@ -277,7 +306,7 @@ def evaluate(settings, conn, row, active, *, busy=None, retired=None):
                         'after': True if field == 'cover' else value, 'source': c['provider']})
     if not metadata.get('lrc'):
         remaining.append({'field': 'synced_lyrics', 'code': 'lyrics_review_required', 'message': MESSAGES['lyrics_review_required']})
-    usages = [c.get('usage') for c in fingerprints + matches + [c for c in (album, cover) if c]]
+    usages = [c.get('usage') for c in fingerprints + matches + art_references + [c for c in (album, cover) if c]]
     rules = {(u['provider'], u['data_type']) for u in usages if isinstance(u, dict) and u.get('provider') and u.get('data_type')}
     document = conn.execute('SELECT value FROM settings WHERE key=?', (lyrics_document.key(row['id']),)).fetchone()
     review = lyrics_review.load(conn, row['id'])

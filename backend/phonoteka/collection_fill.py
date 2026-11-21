@@ -6,7 +6,7 @@ import uuid
 
 from fastapi import Request
 from fastapi.responses import Response
-from . import (album_gain_policy, catalog_sources, confirmed_fields as fields, db,
+from . import (album_gain_policy, audio_check, catalog_sources, confirmed_fields as fields, db,
                enrichment_gaps, field_policy, media, metadata_preparation as prep, preparation,
                provider_policy, review_queue, security, webhooks)
 
@@ -18,6 +18,11 @@ REASONS = {**fields.MESSAGES, 'file_revision_changed': 'Файл изменил�
            'cue_requires_extraction': 'Для CUE нужен разбор на отдельные композиции.',
            'cue_album_image': 'Альбомный образ сохраняется целиком. Проверьте связанную CUE-разметку.',
            'retained_source': 'Композиции уже извлечены. Исходник сохранён.',
+           'audio_partial': 'Аудио подтверждает только часть строк. Таймкоды требуют проверки.',
+           'audio_matched': 'Все строки сопоставлены. Проверьте точность таймкодов и версию записи.',
+           'audio_checked_empty': 'В независимой расшифровке нет слов с таймкодами.',
+           'audio_blocked': 'Вариант текста не удалось сопоставить с аудио.',
+           'audio_previously_attempted': 'Ранее была попытка ASR для этой версии. Проверьте её результат.',
            'lyrics_not_eligible': 'Дополнительный запрос текста для этой записи недоступен.',
            'lyrics_no_timing': 'Уточнение не вернуло текста с таймкодами.',
            'lyrics_provider_incomplete': 'Источник не вернул окончательный результат поиска.',
@@ -141,6 +146,8 @@ def advance(conn, settings, run):
                 followup = (result.get('publication_followup') or {}).get('job_id')
                 if followup:
                     run.setdefault('publications', {})[followup] = entry['id']
+            elif job['kind'] == 'transcribe':
+                run['transcribed'] = run.get('transcribed', 0) + 1
             elif job['kind'] == 'align':
                 run['aligned'] += 1
         run['job_id'] = None
@@ -169,7 +176,7 @@ def advance(conn, settings, run):
             cancel(conn, run, 'scan_manifest_missing')
             return
         run['page'] = [{'id': tid, 'sha': sha, 'tried': []} for tid, sha in json.loads(stored[0])]
-        if not refine:
+        if not refine and not run.get('supplements'):
             conn.executemany('INSERT OR IGNORE INTO settings VALUES(?,?)', (
                 ('preparation_profile:' + entry['id'], run['profile']) for entry in run['page']))
     if prep.load(conn).get('state') == 'active' or not webhooks.can_accept(conn):
@@ -218,9 +225,16 @@ def advance(conn, settings, run):
             attempt = 'apply:' + ','.join(sorted(c['field'] for c in result['changes']))
         elif not entry.get('issue'):
             ready = prep.candidate(settings, conn, row, active, result, connection)
-            if ready:
+            if ready and (not run.get('supplements') or ready.get('album_hint') or ready.get('expanded_lyrics')):
                 kind, value = ready['kind'], ready['token']
                 attempt = ready['receipt']
+            if ((not kind or attempt in entry['tried']) and settings.inference_url and not meta.get('lrc')
+                    and not set(result['blocked']) - {'audio_audit_required'} and row['id'] not in busy):
+                check = audio_check.folder_check(conn, row, retired)
+                if check and 'audio_check_token' in check:
+                    kind, value, attempt = 'transcribe', check, 'transcribe:' + check['audio_check_token']
+                elif check:
+                    entry['audio_result'] = check['result']
             action = (queue.get(row['id']) or {}).get('action') or {}
             if (not kind or attempt in entry['tried']) and action.get('kind') == 'align' and row['id'] not in busy and not set(result['blocked']) - prep.SAFE_BLOCKS:
                 kind, value = 'align', action['token']
@@ -233,7 +247,7 @@ def advance(conn, settings, run):
         else:
             missing = enrichment_gaps.missing_fields(meta)
             blockers = result['blocked'] if missing else [b for b in result['blocked'] if b not in {'analysis_missing', 'analysis_stale'}]
-            reason = entry.get('issue') or next(iter(blockers), None)
+            reason = entry.get('issue') or next(iter(blockers), None) or entry.get('audio_result')
             if missing and not reason:
                 reason = next((g['code'] for g in result['remaining'] if g['field'] in missing), 'missing_evidence')
             reports.append((entry['id'], row['relative_path'], 'review' if reason else 'populated', reason or 'fields_present'))
@@ -259,6 +273,12 @@ def advance(conn, settings, run):
                     item['proposal'] = provider_policy.api_payload(conn, row, item['proposal'], 'embed')
                     field_policy.require_writable_fields(item['proposal'])
                     album_gain_policy.payload(settings, conn, row, item['proposal'])
+                elif kind == 'transcribe':
+                    item.update(token)
+                    audio_check.recheck(conn, row, item)
+                    review_queue.freeze_inference(conn, row, item, kind, {}, False)
+                    conn.execute('INSERT INTO settings VALUES(?,?)',
+                                 (review_queue.receipt_key('audio-check', item['audio_check_token']), db.encode({'job_id': key})))
                 else:
                     review_queue.freeze_inference(conn, row, item, kind, {}, True)
                     item['review_preparation'] = {'token': token, 'classification': json.loads(row['metadata']).get('recording_classification')}
@@ -317,22 +337,32 @@ def install(app, settings):
 
     @app.post('/api/preparation/{run_id}/refine-lyrics', status_code=202)
     def refine_lyrics(run_id: str, request: Request):
-        from .worker import root_identity
         active = security.require_session(request, settings, True, owner_only=True)
-        key = str(uuid.uuid5(uuid.NAMESPACE_URL, 'phonoteka:refine:' + prep.LYRICS_QUERY_PROFILE + ':' + run_id))
+        return continue_scan(run_id, active, 'refines', prep.LYRICS_QUERY_PROFILE)
+
+    @app.post('/api/preparation/{run_id}/supplement', status_code=202)
+    def supplement(run_id: str, request: Request):
+        active = security.require_session(request, settings, True, owner_only=True)
+        return continue_scan(run_id, active, 'supplements', 'folder-artwork-audio-v1')
+
+    def continue_scan(run_id, active, mode, profile):
+        from .worker import root_identity
+        key = str(uuid.uuid5(uuid.NAMESPACE_URL, 'phonoteka:refine:' + profile + ':' + run_id))
         with db.transaction(settings.db_path) as conn:
             current = preparation.load(conn)
-            if current.get('id') == key and current.get('refines') == run_id:
+            if current.get('id') == key and current.get(mode) == run_id:
                 return preparation.public(current)
             if (current.get('id') != run_id or current.get('state') != 'review' or not current.get('autofill')
-                    or current.get('refines') or not settings.writable or not settings.external_metadata
+                    or current.get('supplements') or (mode == 'refines' and current.get('refines')) or not settings.writable
+                    or (mode == 'refines' and not settings.external_metadata)
                     or active['auth_epoch'] != current['epoch'] or root_identity(settings.work_root) != current['root']):
                 raise security.error(409, 'preparation_stale', 'Дождитесь завершения прохода и обновите мастер.')
             recovery = conn.execute("SELECT value FROM settings WHERE key='recovery_required'").fetchone()
             if recovery and recovery[0] == 'true':
                 raise security.error(409, 'recovery_required', 'Сначала завершите проверку восстановления.')
             run = {k:current[k] for k in ('scan_id','scanned_files','scan_errors','root','epoch','profile','folder')}
-            run.update(id=key, report_id=key, refines=run_id, state='active', stage='autofill', autofill=True,
+            run[mode] = run_id
+            run.update(id=key, report_id=key, state='active', stage='autofill', autofill=True, applied=0, aligned=0,
                        job_id=None, processed=0, reasons={}, counts={}, started_at=db.utcnow())
             conn.execute('INSERT INTO settings VALUES(?,?)', ('preparation_request:' + key, db.encode(run)))
             preparation.save(conn, run)

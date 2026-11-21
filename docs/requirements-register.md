@@ -3268,3 +3268,5 @@ jobs. Each acceptance stage still requires separate evidence.
 21 November 2026. Check timed lyrics options against independent, revision-bound audio evidence from the completed folder refinement in the ordinary UI. Batch missing ASR, select the configured GigaAM engine for Russian text, reuse existing word times, report per-file line coverage and timing differences, and preserve disputed fields and original media.
 
 21 November 2026. Permit an explicit audio comparison of timed sources differing only in duration after exact matches are exhausted. Keep track revisions, permissions, source eligibility, independent ASR evidence, language routing, skip rules and separate acceptance of timing.
+
+- 2026-11-21. Проверять обложки и варианты таймкодов для всех отдельных песен сохранённого прохода. Сверка продолжается на сервере. Сомнительные издания, несовпавшие строки, миксы и речь исключены из автоматической записи.
