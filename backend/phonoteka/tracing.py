@@ -53,6 +53,18 @@ _deadline_sequence = itertools.count()
 _deadline_thread = None
 
 
+class ServiceResource(Resource):
+    """The service's resource attributes and schema are fixed at startup."""
+    def __init__(self, attributes):
+        super().__init__(attributes)
+        # The pinned SDK groups each span by resource, computing its hash by
+        # serializing its attributes as JSON. Preserve its equality/hash contract.
+        self._service_hash = super().__hash__()
+
+    def __hash__(self):
+        return self._service_hash
+
+
 class SegmentDeadline:
     """One scheduler per process; cancelled entries release attempt state."""
     def __init__(self, state):
@@ -203,6 +215,11 @@ def _wire_batches(encoded):
     Larger groups use the previous exact single-envelope check. Metadata,
     including unknown protobuf fields, is copied unchanged.
     """
+    # The SDK already produced a complete OTLP request. For ordinary short
+    # spans it fits as-is, including every resource and instrumentation scope.
+    if encoded.ByteSize() <= 8192:
+        count = sum(len(scope.spans) for resource in encoded.resource_spans for scope in resource.scope_spans)
+        return ([(encoded.SerializeToString(), count)] if count else []), 0
     packets = []; dropped = 0
     for resource in encoded.resource_spans:
         resource_meta = type(resource)(); resource_meta.CopyFrom(resource)
@@ -306,8 +323,7 @@ class BoundedProcessor(SpanProcessor):
                     # retaining one HTTP batch and the exact wire-size checks.
                     packets = []; rejected = 0
                     for offset in range(0, len(batch), 16):
-                        encoded = encode_spans(batch[offset:offset+16])
-                        part, oversized = _wire_batches(encoded)
+                        part, oversized = _wire_batches(encode_spans(batch[offset:offset+16]))
                         packets.extend(part); rejected += oversized
                         if offset+16 < len(batch): time.sleep(0)
                 except Exception:
@@ -364,7 +380,7 @@ def configure(service):
         _processor = BoundedProcessor(endpoint, session)
         from . import __version__
         _provider = TracerProvider(sampler=ALWAYS_ON,
-            resource=Resource({'service.namespace': 'phonoteka', 'service.name': 'phonoteka-'+service,
+            resource=ServiceResource({'service.namespace': 'phonoteka', 'service.name': 'phonoteka-'+service,
                 'service.version': __version__, 'deployment.environment.name': 'homelab',
                 'host.name': os.environ.get('OTEL_HOST_NAME', 'st1'), 'service.instance.id': str(uuid.uuid4())}),
             span_limits=SpanLimits(max_attributes=32, max_events=8, max_links=8, max_attribute_length=256),
@@ -435,53 +451,61 @@ def sdk_tracer():
 
 
 def start(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
+    if _provider is None: return trace.NonRecordingSpan(trace.INVALID_SPAN_CONTEXT)
     state = SEGMENT.get()
     if state:
         with state['lock']:
-            return _start(name, values, parent, kind, links)
-    return _start(name, values, parent, kind, links)
+            return _start_in_segment(state, name, values, parent, kind, links)
+    return _sdk_start(name, values, parent, kind, links)
 
 
-def _start(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
-    if _provider is None: return trace.NonRecordingSpan(trace.INVALID_SPAN_CONTEXT)
-    state = SEGMENT.get()
-    if state and name != 'file.attempt' and len(state['active']) >= 128:
-        if _processor is not None: _processor.dropped += 1
-        return trace.NonRecordingSpan(state['root'].get_span_context())
-    if name != 'file.attempt':
-        segment = segment_context()
-        if segment:
-            candidate = parent if parent is not None else otcontext.get_current()
-            current = trace.get_current_span(candidate).get_span_context()
-            replacement = trace.get_current_span(segment).get_span_context()
-            # Preserve nesting inside the new segment, but never attach newly
-            # created spans to a parent belonging to the previous segment.
-            if current.trace_id != replacement.trace_id: parent = segment
-    inner = sdk_tracer().start_span(name, context=parent,
+def _sdk_start(name, values, parent, kind, links):
+    return sdk_tracer().start_span(name, context=parent,
         kind=kind, attributes=safe(values or {}), links=links,
         record_exception=False, set_status_on_exception=False)
-    state = SEGMENT.get()
-    if not state: return inner
-    with state['lock']:
-        current = SegmentSpan(inner, state)
-        state['active'].append(current)
-        if name == 'file.attempt':
-            state['root'] = current
-            state['started'] = time.monotonic()
-            state['deadline_ns'] = inner.start_time + int(SEGMENT_SECONDS * 1_000_000_000)
-            state['timer'] = SegmentDeadline(state)
-        return current
+
+
+def _start_in_segment(state, name, values, parent, kind, links):
+    # Called under the attempt lock. Rotation advances every open facade
+    # together, so it already points to the current trace in the common case.
+    if name != 'file.attempt':
+        root = state['root']
+        if len(state['active']) >= 128:
+            if _processor is not None: _processor.dropped += 1
+            return trace.NonRecordingSpan(root.inner.get_span_context())
+        if time.monotonic()-state['started'] >= SEGMENT_SECONDS:
+            rotate_segment(state, deadline=True)
+        elif state['count'] >= 128:
+            rotate_segment(state)
+        state['count'] += 1
+        candidate = trace.get_current_span(parent)
+        if not (isinstance(candidate, SegmentSpan) and candidate.state is state and not candidate.closed):
+            if candidate.get_span_context().trace_id != root.inner.get_span_context().trace_id:
+                parent = trace.set_span_in_context(root)
+    inner = _sdk_start(name, values, parent, kind, links)
+    current = SegmentSpan(inner, state)
+    state['active'].append(current)
+    if name == 'file.attempt':
+        state['root'] = current
+        state['started'] = time.monotonic()
+        state['deadline_ns'] = inner.start_time + int(SEGMENT_SECONDS * 1_000_000_000)
+        state['timer'] = SegmentDeadline(state)
+    return current
 
 
 @contextmanager
 def span(name, values=None, parent=None, kind=SpanKind.INTERNAL, links=()):
     current = start(name, values, parent, kind, links)
-    with trace.use_span(current, end_on_exit=True, record_exception=False, set_status_on_exception=False):
-        try: yield current
-        except BaseException as exc:
-            current.set_attribute('error.type', type(exc).__name__)
-            if type(exc).__name__ != 'CancelledError': current.set_status(Status(StatusCode.ERROR))
-            raise
+    token = otcontext.attach(trace.set_span_in_context(current))
+    try:
+        yield current
+    except BaseException as exc:
+        current.set_attribute('error.type', type(exc).__name__)
+        if type(exc).__name__ != 'CancelledError': current.set_status(Status(StatusCode.ERROR))
+        raise
+    finally:
+        otcontext.detach(token)
+        current.end()
 
 
 @contextmanager
@@ -502,23 +526,6 @@ def file_attempt(job_id, item_id, attempt_id, number=None, previous=None):
             if state.get('timer'): state['timer'].cancel()
             for current in list(reversed(state['active'])): current.end()
         SEGMENT.reset(token)
-
-
-def segment_context():
-    """Conservative 1 MiB span budget with linked continuation intervals.
-
-    Every exported span is capped at 8 KiB, hence 128 spans bound payload bytes.
-    A deadline closes and continues every active span, preserving nesting.
-    """
-    state = SEGMENT.get()
-    if not state: return None
-    with state['lock']:
-        if time.monotonic()-state['started'] >= SEGMENT_SECONDS:
-            rotate_segment(state, deadline=True)
-        elif state['count'] >= 128:
-            rotate_segment(state)
-        state['count'] += 1
-        return trace.set_span_in_context(state['root'])
 
 
 def host(value):
