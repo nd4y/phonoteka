@@ -185,6 +185,8 @@ def main():
     if outage_probe is not None:result['outage_probe']=outage_probe
     result['passed']=result['p95_overhead']<=.05 and result['throughput_loss']<=.05 and result['additional_rss_bytes']<=32*1024*1024
     args.output.write_text(json.dumps(result,indent=2)+'\n')
+    timing_fields = ('enabled', 'files', 'p95_seconds', 'wall_seconds', 'cpu_self_seconds', 'cpu_media_seconds')
+    print(json.dumps({'timing_samples': [{key: sample[key] for key in timing_fields} for sample in samples]}))
     print(json.dumps({k:v for k,v in result.items() if k!='samples'}))
     if not result['passed']:raise SystemExit(1)
 
