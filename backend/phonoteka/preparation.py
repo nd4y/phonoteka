@@ -36,6 +36,9 @@ def public(run):
         return run
     from .collection_fill import REASONS
     view = {key: value for key, value in run.items() if key not in {'page', 'publications', 'participants', 'root'}}
+    from .providers import CREDIT_QUERY_PROFILE
+    view['can_refine_lyrics'] = bool(run.get('scanned_files') and run.get('state') == 'review' and not run.get('refines')
+                                    and (not run.get('supplements') or run.get('lyrics_lookup_revision') != CREDIT_QUERY_PROFILE))
     view['issues'] = [{'code': key, 'message': REASONS.get(key, key), 'count': count}
                       for key, count in sorted(run.get('reasons', {}).items(), key=lambda x: -x[1]) if key != 'fields_present']
     return view

@@ -27,6 +27,7 @@ GET_DEADLINE_SECONDS = 90
 REQUEST_AUTHORIZATION=ContextVar('provider_request_authorization',default=None)
 RELEASE_ID = re.compile(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}')
 LYRICS_QUERY_PROFILE = 'lrclib-free-text-v1'
+CREDIT_QUERY_PROFILE = 'lrclib-featured-credit-v1'
 RECORDING_ID = re.compile(r'[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}')
 
 def retry_after_seconds(value, fallback=60):
@@ -124,6 +125,44 @@ def release_entry(row):
             'front_available': isinstance(artwork, dict) and artwork.get('front') is True}
 
 
+_FEATURED = r'(?:feat(?:uring)?|ft)\.?\s+'
+_FEATURED_SUFFIX = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    r'(.+?)\s*\(\s*' + _FEATURED + r'([^()\[\]]+)\s*\)',
+    r'(.+?)\s*\[\s*' + _FEATURED + r'([^()\[\]]+)\s*\]',
+    r'(.+?)\s+' + _FEATURED + r'([^()\[\]]+)',
+))
+
+
+def featured_credit(query):
+    """Keep the main artist, guest credit and version text distinct."""
+    parts = []
+    for field in ('title', 'artist'):
+        value = query.get(field)
+        if isinstance(value, list) and len(value) == 1:
+            value = value[0]
+        if not isinstance(value, str) or not 0 < len(value.strip()) <= 512:
+            return None
+        parts.append(value.strip())
+    guest = None
+    for i, part in enumerate(parts):
+        for pattern in _FEATURED_SUFFIX:
+            match = pattern.fullmatch(part)
+            if match:
+                if guest is not None:
+                    return None
+                parts[i], guest = (value.strip() for value in match.groups())
+                break
+    if not guest or any(re.search(r'(?<!\w)' + _FEATURED, v, re.I) for v in (*parts, guest)):
+        return None
+    if not all(normalized(v) for v in (*parts, guest)):
+        return None
+    return (*parts, guest)
+
+
+def lyric_search_profile(query):
+    return CREDIT_QUERY_PROFILE if featured_credit(query) else LYRICS_QUERY_PROFILE
+
+
 def lyric_candidate(row, query, duration):
     if not isinstance(row, dict) or type(row.get('id')) is not int:
         return None
@@ -131,6 +170,13 @@ def lyric_candidate(row, query, duration):
     if type(source_duration) not in (int, float) or not math.isfinite(source_duration) or source_duration <= 0:
         source_duration = None
     match = assess(query, row.get('trackName', ''), row.get('artistName', ''), duration, source_duration)
+    requested = featured_credit(query)
+    if requested and (actual := featured_credit({'title': row.get('trackName'), 'artist': row.get('artistName')})):
+        # Normalize the role marker and its placement, never drop a performer or edition qualifier.
+        def credit_key(parts):
+            return tuple(' '.join(unicodedata.normalize('NFKC', part).casefold().split()) for part in parts)
+        if credit_key(requested) == credit_key(actual):
+            match = assess({'title': requested[0], 'artist': requested[1]}, actual[0], actual[1], duration, source_duration)
     lrc = row.get('syncedLyrics')
     if isinstance(lrc, str) and lrc.strip():
         try:
@@ -433,7 +479,11 @@ class Providers:
             attempts.append(('search', named))
         if normalized(query['title']) and normalized(query['artist']) and 1 <= duration <= 3600:
             phrase = ' '.join(normalized(query[field])[:180] for field in ('title', 'artist'))
-            attempts.append(('search', {'q': phrase}))
+            credit = featured_credit(query)
+            if not expanded_only or not credit:
+                attempts.append(('search', {'q': phrase}))
+            if credit:
+                attempts.append(('search', {'track_name': credit[0], 'artist_name': credit[1]}))
         candidates = {}
         for endpoint, params in attempts:
             try:
@@ -533,7 +583,7 @@ class Providers:
                     await asyncio.to_thread(self.unavailable,provider)
                 result['sources'].append({'provider':provider,'state':exc.code,'message':str(exc)})
             if provider == 'lrclib':
-                result['sources'][-1]['query_profile'] = LYRICS_QUERY_PROFILE
+                result['sources'][-1]['query_profile'] = lyric_search_profile(query)
         if lyrics_only:
             result['state']='candidates' if result['candidates'] else 'no_match' if all(x['state']=='no_match' for x in result['sources']) else 'incomplete'
             return result

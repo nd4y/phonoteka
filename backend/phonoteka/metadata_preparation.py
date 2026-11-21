@@ -181,7 +181,7 @@ def lyric_variant(conn, row, metadata, analysis):
         return False
     sources = [s for s in analysis.get('sources', []) if isinstance(s, dict) and s.get('provider') == 'lrclib']
     if (len(sources) != 1 or sources[0].get('state') not in {'no_match', 'candidates'}
-            or sources[0].get('query_profile') == LYRICS_QUERY_PROFILE
+            or sources[0].get('query_profile') == providers.lyric_search_profile(query)
             or any(c.get('lrc') for c in analysis.get('candidates', []))):
         return False
     if enrichment_gaps.project(conn, [row['id']]).get(row['id'], {}).get('last_failed_search'):
@@ -299,15 +299,12 @@ def candidate(settings, conn, row, active, result, connection=None):
     if error in {'recording_conflict', 'recording_incomplete'}:
         return None
     legacy_lyrics = not refresh_lyrics and lyric_variant(conn, row, metadata, analysis)
-    if not fingerprints:
-        handled, continuation = acoustid_continuation(settings, conn, row, metadata, analysis, result, connection)
-        if handled and (continuation or not legacy_lyrics):
-            return continuation
-        handled, reference_check = embedded_recording_check(settings, conn, row, metadata, analysis, result)
-        if handled and (reference_check or not legacy_lyrics):
-            return reference_check
+    art_recordings = matches
+    if not art_recordings and any(g['field'] == 'cover' for g in gaps):
+        art_recordings = fields.tagged_artwork_recordings(conn, metadata, analysis)
     art_hint = None
-    if matches and any(g['field'] == 'cover' for g in gaps):
+    named_album = artwork_preparation.named_album_lookup(metadata, analysis)
+    if (art_recordings or named_album) and any(g['field'] == 'cover' for g in gaps):
         rule = provider_policy.rule(conn, 'coverartarchive', 'cover')
         catalog_rule = provider_policy.rule(conn, 'musicbrainz', 'metadata')
         pending = conn.execute('SELECT input_sha256,payload FROM proposals WHERE track_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1', (row['id'],)).fetchone()
@@ -323,7 +320,14 @@ def candidate(settings, conn, row, active, result, connection=None):
             # be examined rather than replayed through this new capability.
             projected = enrichment_gaps.project(conn, [row['id']]).get(row['id'], {})
             if not projected.get('last_failed_search'):
-                art_hint = artwork_preparation.album_hint(metadata, analysis, matches)
+                art_hint = artwork_preparation.album_hint(metadata, analysis, art_recordings) or named_album
+    if not fingerprints and not art_hint:
+        handled, continuation = acoustid_continuation(settings, conn, row, metadata, analysis, result, connection)
+        if handled and (continuation or not legacy_lyrics):
+            return continuation
+        handled, reference_check = embedded_recording_check(settings, conn, row, metadata, analysis, result)
+        if handled and (reference_check or not legacy_lyrics):
+            return reference_check
     expanded_lyrics = not art_hint and legacy_lyrics
     if not gaps and not refresh_lyrics and not expanded_lyrics:
         return None
@@ -341,7 +345,7 @@ def candidate(settings, conn, row, active, result, connection=None):
     if art_hint:
         dependency.append([ARTWORK_PROFILE, fields.digest(art_hint)])
     if expanded_lyrics:
-        dependency.append(LYRICS_QUERY_PROFILE)
+        dependency.append(providers.lyric_search_profile(analysis.get('query') or {}))
     if refresh_lyrics:
         # A new capability is not permission to replay a previous attempt.
         # Keep every old receipt, including failed, cancelled and unknown runs.

@@ -1064,7 +1064,8 @@ class Worker:
                     result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider')!='lrclib')
                 elif album_hint:
                     replaced = {'musicbrainz','coverartarchive','local_cover'}
-                    result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider') not in replaced)
+                    ids = {c['id'] for c in result['candidates']}
+                    result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('id') not in ids)
                     result['sources'].extend(s for s in old.get('sources',[]) if s.get('provider') not in replaced)
                 else:
                     result['candidates'].extend(c for c in old.get('candidates',[]) if c.get('provider') in {'independent_asr','local_replaygain'})

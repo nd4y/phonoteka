@@ -61,3 +61,24 @@ def test_changed_companion_invalidates_frozen_slot_selection(make_audio,roots,ba
     with pytest.raises(media.MediaError) as error:
         media.apply_changes(path,{},NEW,media.sha256_file(path),backup_dir,roots,slot_selection=selection)
     assert error.value.code=='slot_conflict' and path.read_bytes()==before
+
+
+@LINUX
+@TOOLS
+@pytest.mark.parametrize('extra,raw,expected',[(False,LRC,True),(True,LRC,False),
+    (False,'[00:00]Timed\nPlain line',False),(False,'[99:00]Outside audio',False)])
+def test_complete_uslt_only_lyrics_are_visible_without_rewriting_frames(make_audio,roots,extra,raw,expected):
+    path=make_audio();audio=MP3(path)
+    audio.tags.add(USLT(encoding=3,lang='rus',desc='Import',text=raw))
+    if extra: audio.tags.add(USLT(encoding=3,lang='eng',desc='Alternative',text='Other words'))
+    audio.save()
+    before=media.sha256_file(path)
+    meta=media.inspect_audio(path,roots)
+    assert bool(meta['lrc']) is expected
+    if expected:
+        assert meta['lrc']==raw and meta['lyrics'] is None
+        old={**meta,'lrc':None,'lyrics':raw}
+        assert media.classify_embedded_lrc(old) and old==meta
+        assert not media.classify_embedded_lrc(old)
+        assert not media.classify_embedded_lrc({**meta,'lrc':None,'lyrics':raw+' changed'})
+    assert media.sha256_file(path)==before

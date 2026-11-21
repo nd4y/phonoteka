@@ -27,6 +27,7 @@ def candidates(conn, row, analysis, retired, *, duration_only=False):
     meta = json.loads(row['metadata'])
     if (row['id'] in retired or row['status'] in {'error', 'missing', 'conflict'}
             or meta.get('input_error') or meta.get('format') == 'cue' or meta.get('cue_album_image')
+            or any(analysis.get(k) for k in ('possible_mix', 'multiple_recordings', 'unresolved_conflicts', 'critical_conflicts'))
             or meta.get('lrc') or not enrichment_gaps.individual_music(meta, row['sha256'])
             or 'lrc' in field_policy.load(conn, row['id'])['locks']
             or lyrics_review.load(conn, row['id']).get('instrumental_confirmed')):
@@ -133,8 +134,60 @@ def page(conn, settings, run, offset, compare_words, *, duration_only=False):
     return {'items': items, 'offset': offset, 'next_offset': offset+PAGE_SIZE if len(hits)>PAGE_SIZE else None}
 
 
-def selection_token(row, hint, texts, duration_only):
+def folder_references(conn, row, analysis, retired):
+    timed = candidates(conn, row, analysis, retired)
+    if timed is None or timed:
+        return timed, False
+    plain = {c['plain_lyrics'] for c in analysis.get('candidates', []) if isinstance(c, dict)
+             and c.get('provider') == 'lrclib' and c.get('instrumental_claim') is False
+             and isinstance(c.get('plain_lyrics'), str) and 0 < len(c['plain_lyrics'].strip()) <= 100000
+             and (c.get('match') or {}).get('state') == 'matching_metadata'
+             and confirmed_fields.permitted(conn, c, ('cache', 'derived_analysis'))}
+    return (sorted(plain), True) if len(plain) == 1 else ([], False)
+
+
+def folder_check(conn, row, retired):
+    """Return a revision-bound check for a timed reference in any scanned track."""
+    saved = conn.execute('SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',
+                         (row['id'], row['sha256'])).fetchone()
+    if not saved:
+        return None
+    analysis = json.loads(saved[0])
+    texts, plain = folder_references(conn, row, analysis, retired)
+    if not texts:
+        return None
+    hint = language(texts)
+    asr = analysis.get('asr') or {}
+    if automatic_quality.inference_bound(conn, row, asr) and (
+            not hint or asr.get('language') == 'ru' and asr.get('engine') == 'gigaam'):
+        if plain:
+            words = asr.get('words') or [w for seg in asr.get('segments', []) for w in seg.get('words', [])]
+            unscored = asr.get('engine') == 'gigaam' and asr.get('word_probabilities') is False
+            try:
+                result = alignment.align_lines(texts[0], words, json.loads(row['metadata'])['duration'], unscored_words=unscored)
+            except (ValueError, media.MediaError):
+                return {'result': 'audio_blocked'}
+            return {'result': 'audio_matched' if result['complete'] else 'audio_partial'}
+        result = compare(texts, asr, json.loads(row['metadata'])['duration'])
+        return {'result': 'audio_' + result['state']}
+    token = selection_token(row, hint, texts, False, plain=plain)
+    if conn.execute('SELECT 1 FROM settings WHERE key=?', (review_queue.receipt_key('audio-check', token),)).fetchone():
+        return {'result': 'audio_previously_attempted'}
+    # An earlier failed/cancelled or unaccounted attempt on this revision needs inspection.
+    prior = conn.execute("""SELECT 1 FROM jobs j JOIN json_each(j.payload,'$.items') i
+        LEFT JOIN job_items ji ON ji.job_id=j.id AND ji.item_key=?
+        WHERE j.kind IN ('align','transcribe') AND json_extract(i.value,'$.track_id')=?
+          AND json_extract(i.value,'$.sha256')=? AND COALESCE(ji.state,'')<>'succeeded' LIMIT 1""",
+        (row['id'], row['id'], row['sha256'])).fetchone()
+    if prior:
+        return {'result': 'audio_previously_attempted'}
+    return {'audio_check_token': token, 'language_hint': hint, **({'audio_check_plain': True} if plain else {})}
+
+
+def selection_token(row, hint, texts, duration_only, *, plain=False):
     evidence = [row['id'], row['sha256'], hint, texts]
+    if plain:
+        evidence.append('plain_reference')
     if duration_only:
         evidence.append('duration_differs')
     return digest(evidence)
@@ -194,7 +247,14 @@ def recheck(conn, row, item):
     saved = conn.execute('SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',
                          (row['id'], row['sha256'])).fetchone()
     duration_only = item.get('audio_check_duration_only') is True
-    texts = candidates(conn, row, json.loads(saved[0]) if saved else {}, catalog_sources.completed_sources(conn),
-                       duration_only=duration_only)
-    if not texts or selection_token(row, language(texts), texts, duration_only) != item['audio_check_token']:
+    analysis = json.loads(saved[0]) if saved else {}
+    retired = catalog_sources.completed_sources(conn)
+    plain = item.get('audio_check_plain') is True
+    if plain:
+        texts, still_plain = folder_references(conn, row, analysis, retired)
+        if not still_plain or duration_only:
+            texts = None
+    else:
+        texts = candidates(conn, row, analysis, retired, duration_only=duration_only)
+    if not texts or selection_token(row, language(texts), texts, duration_only, plain=plain) != item['audio_check_token']:
         raise media.MediaError('review_plan_stale', 'Данные записи или разрешения источника изменились.')

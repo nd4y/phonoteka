@@ -15,6 +15,11 @@ type Run = {
   warnings?: Record<string, number>;
   autofill?: boolean;
   refines?: string;
+  credit_only?: boolean;
+  can_refine_lyrics?: boolean;
+  supplements?: string;
+  transcribed?: number;
+  embedded_timings?: number;
   action?: string;
   processed?: number;
   applied?: number;
@@ -33,6 +38,7 @@ const stages: Record<string, string> = {
   review: "Проверка записей",
   autofill: "Заполнение коллекции",
   align: "Выравнивание текста по аудио",
+  transcribe: "Проверка текста по аудио на ASR-сервере",
   apply: "Запись подтверждённых полей",
   publish: "Публикация подтверждённых файлов",
 };
@@ -199,7 +205,7 @@ export function FolderPreparation({
       setAfter("");
     }
   }
-  async function changeRun(operation: "stop" | "refine-lyrics") {
+  async function changeRun(operation: "stop" | "refine-lyrics" | "supplement") {
     if (action.current || !run.id) return;
     action.current = true;
     setBusy(true);
@@ -319,7 +325,11 @@ export function FolderPreparation({
             </strong>
             <p>
               {run.folder || "Вся музыкальная папка"} ·{" "}
-              {run.refines ? "Уточнение поиска текстов" : stages[run.stage || ""] || run.stage}
+              {run.supplements
+                ? "Обложки и сверка текстов по аудио"
+                : run.refines
+                  ? "Уточнение поиска текстов"
+                  : stages[run.stage || ""] || run.stage}
             </p>
             {run.state === "review" && run.scanned_files === 0 && (
               <p>В этой папке не найдено поддерживаемых файлов. Выберите другую папку.</p>
@@ -338,8 +348,12 @@ export function FolderPreparation({
                     <p>
                       Проверено {run.processed} из {run.scanned_files}. Изменены файлы:{" "}
                       {run.applied || 0}. Опубликованы в Ready: {run.published || 0}. Задач
-                      выравнивания завершено: {run.aligned || 0}.
+                      выравнивания завершено: {run.aligned || 0}. Новых расшифровок:{" "}
+                      {run.transcribed || 0}.
                     </p>
+                    {!!run.embedded_timings && (
+                      <p>Уже были таймкоды в файле: {run.embedded_timings}.</p>
+                    )}
                     <p>
                       Все поля заполнены: {run.counts?.populated || 0}. Требуют проверки:{" "}
                       {run.counts?.review || 0}. Пропущены: {run.counts?.excluded || 0}. Ошибки
@@ -382,7 +396,7 @@ export function FolderPreparation({
                 Остановить заполнение
               </button>
             )}
-            {run.autofill && run.state === "review" && !run.refines && !!run.scanned_files && (
+            {run.can_refine_lyrics && (
               <button
                 className="button secondary"
                 disabled={busy}
@@ -390,6 +404,33 @@ export function FolderPreparation({
               >
                 Уточнить поиск текстов
               </button>
+            )}
+            {run.autofill &&
+              run.state === "review" &&
+              !run.supplements &&
+              !run.credit_only &&
+              !!run.scanned_files && (
+                <div>
+                  <button
+                    className="button primary"
+                    disabled={busy}
+                    onClick={() => void changeRun("supplement")}
+                  >
+                    Дособрать обложки и сверить тексты всей папки
+                  </button>
+                  <p>
+                    Используется сохранённый список файлов. Фонотека ищет обложки изданий и сверяет
+                    найденные тексты по аудио. Спорные варианты останутся на проверке.
+                  </p>
+                </div>
+              )}
+            {run.supplements && (
+              <a
+                href={"/api/preparation/" + encodeURIComponent(run.supplements) + "/report"}
+                download
+              >
+                Предыдущий отчёт (CSV)
+              </a>
             )}
             {run.refines && (
               <a href={"/api/preparation/" + encodeURIComponent(run.refines) + "/report"} download>
