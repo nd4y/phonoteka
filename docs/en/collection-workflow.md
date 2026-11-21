@@ -1,5 +1,7 @@
 # From a folder to organized music
 
+A catalog cooldown pauses affected checks until the service permits the next request. To revisit an older completed report, use the retry button. It keeps finished results and requests an expired lyric reference by its saved source ID when the current policy permits this.
+
 In the completed folder report, start the missing-data check. The lyrics tab shows each reference time, audio anchor and signed difference. Instrumental checks compare the recording identity with explicit MusicBrainz performance information. The cover check searches for an approved front for the verified release in the library and Cover Art Archive. Use the confirmed-cover action to commit eligible files. Partial matches stay in the report.
 
 ## Catalog export

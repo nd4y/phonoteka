@@ -24,6 +24,10 @@ type Item = {
 };
 type Report = {
   state: string;
+  stage?: string;
+  round?: number;
+  retryable?: number;
+  retry_at?: number;
   total?: number;
   completed?: number;
   failed?: number;
@@ -93,11 +97,11 @@ export function CollectionEvidence({ id }: { id: string }) {
       clearTimeout(timer);
     };
   }, [base, group, offset, cycle]);
-  async function act(apply = false) {
+  async function act(action: "check" | "cover" | "retry" = "check") {
     setBusy(true);
     setError("");
     try {
-      if (apply) {
+      if (action === "cover") {
         const { tokens } = await api<{ tokens: Record<string, string> }>(base + "/covers");
         const ids = Object.keys(tokens);
         if (ids.length) {
@@ -120,6 +124,9 @@ export function CollectionEvidence({ id }: { id: string }) {
             "На запись обложек отправлено: " + ids.length + ". Результат доступен в обработке.",
           );
         } else setReceipt("Подтверждённых обложек для записи сейчас нет.");
+      } else if (action === "retry") {
+        await api(base + "/retry?expected_round=" + (report?.round ?? 0), { method: "POST" });
+        setReceipt("Повторная проверка поставлена в очередь.");
       } else await api(base, { method: "POST" });
       refresh((v) => v + 1);
     } catch (e) {
@@ -150,6 +157,17 @@ export function CollectionEvidence({ id }: { id: string }) {
             Проверено файлов: {(report.completed || 0) + (report.failed || 0)} из {report.total}.
             Ошибок: {report.failed || 0}.
           </p>
+          {report.stage === "waiting_provider" && !!report.retry_at && (
+            <p>
+              Источник попросил паузу. Проверка продолжится после{" "}
+              {new Date(report.retry_at * 1000).toLocaleTimeString("ru-RU")}.
+            </p>
+          )}
+          {!!report.retryable && (
+            <button className="button secondary" disabled={busy} onClick={() => void act("retry")}>
+              Повторить незавершённые проверки ({report.retryable})
+            </button>
+          )}
           <div className="button-row">
             {(Object.keys(groups) as Group[]).map((g) => (
               <button
@@ -173,7 +191,11 @@ export function CollectionEvidence({ id }: { id: string }) {
           {group === "cover" &&
             !!counts.front_found &&
             ["succeeded", "completed_with_errors"].includes(report.state) && (
-              <button className="button secondary" disabled={busy} onClick={() => void act(true)}>
+              <button
+                className="button secondary"
+                disabled={busy}
+                onClick={() => void act("cover")}
+              >
                 Записать подтверждённые обложки
               </button>
             )}

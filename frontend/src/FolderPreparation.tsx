@@ -426,7 +426,7 @@ export function FolderPreparation({
                 </div>
               )}
             {run.id && run.autofill && run.state === "review" && (
-              <CollectionEvidence key={run.id} id={run.id} />
+              <CollectionEvidence key={"evidence:" + run.id} id={run.id} />
             )}
             {run.supplements && (
               <a

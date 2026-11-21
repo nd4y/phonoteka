@@ -1383,7 +1383,7 @@ class Worker:
         """Mark interrupted before inspecting journals; never replay a mutation."""
         rows = db.fetchall(self.settings.db_path, "SELECT * FROM jobs WHERE state IN ('running','interrupted')")
         for job in rows:
-            if job['kind'] in {'analyze', 'recognize', 'audit', 'transcribe', 'align', 'replaygain', 'youtube'}:
+            if job['kind'] in {'analyze', 'recognize', 'audit', 'transcribe', 'align', 'replaygain', 'youtube', 'collection_evidence'}:
                 # A dead process cannot still execute an item. Preserve spent
                 # provider attempts and completed results; require explicit
                 # resume rather than replaying network/ASR work at startup.

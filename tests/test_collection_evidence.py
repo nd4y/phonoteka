@@ -85,3 +85,26 @@ def test_report_requires_current_manifest_csrf_and_idempotently_starts_real_queu
     assert checked['counts']=={'cover':{'edition_unconfirmed':1}}
     assert client.get(url+'/covers').json()=={'tokens':{}}
     assert media.sha256_file(path)==sha
+    assert client.post(url+'/retry?expected_round=0',headers=headers).status_code==409
+    with db.transaction(cfg.db_path) as conn:
+        conn.execute('UPDATE job_items SET result=? WHERE job_id=? AND item_key=?',
+                     (db.encode({'group':'cover','outcome':'source_unavailable','code':'provider_cooldown','revision':sha}),job,tid))
+    assert client.get(url).json()['retryable']==1
+    assert client.post(url+'/retry?expected_round=0',headers=headers).status_code==202
+    assert client.post(url+'/retry?expected_round=0',headers=headers).json()['round']==1
+    assert client.get(url).json()['completed']==0
+    drain(cfg)
+    assert client.get(url).json()['counts']=={'cover':{'edition_unconfirmed':1}}
+    assert client.get(url).json()['completed']==1 and media.sha256_file(path)==sha
+
+
+def test_renewal_requires_an_existing_reference_and_original_permission():
+    usage={'provider':'lrclib','allow_derived_analysis':True,'allow_cache':True,'cache_ttl':60}
+    c={'provider':'lrclib','id':'lrclib:123','usage':usage,'transient_only':True,
+       'match':{'state':'matching_metadata'},'instrumental_claim':False}
+    a={'asr':{'words':[{}]},'alignment_usage':[{}],'candidates':[c]}
+    assert evidence.expired_timing(a)==[123]
+    assert not evidence.expired_timing({**a,'asr':{}})
+    assert not evidence.expired_timing({**a,'alignment_usage':[]})
+    assert not evidence.expired_timing({**a,'candidates':[{**c,'usage':{**usage,'allow_cache':False}}]})
+    assert not evidence.expired_timing({**a,'candidates':[{**c,'instrumental_claim':True}]})
