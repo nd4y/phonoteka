@@ -228,3 +228,5 @@ In the folder wizard, open the completed lyrics search and choose **Сверит
 The audio check can also compare timed lyrics for versions of the same song with a different duration. [Audio checks](docs/en/collection-workflow.md)
 
 From the folder wizard, continue a finished pass over its saved file revisions to search for album artwork and check existing timed lyric candidates against the audio.
+
+Timed lyric discovery also handles featured artists credited in either the title or artist field.

@@ -181,7 +181,7 @@ def lyric_variant(conn, row, metadata, analysis):
         return False
     sources = [s for s in analysis.get('sources', []) if isinstance(s, dict) and s.get('provider') == 'lrclib']
     if (len(sources) != 1 or sources[0].get('state') not in {'no_match', 'candidates'}
-            or sources[0].get('query_profile') == LYRICS_QUERY_PROFILE
+            or sources[0].get('query_profile') == providers.lyric_search_profile(query)
             or any(c.get('lrc') for c in analysis.get('candidates', []))):
         return False
     if enrichment_gaps.project(conn, [row['id']]).get(row['id'], {}).get('last_failed_search'):
@@ -345,7 +345,7 @@ def candidate(settings, conn, row, active, result, connection=None):
     if art_hint:
         dependency.append([ARTWORK_PROFILE, fields.digest(art_hint)])
     if expanded_lyrics:
-        dependency.append(LYRICS_QUERY_PROFILE)
+        dependency.append(providers.lyric_search_profile(analysis.get('query') or {}))
     if refresh_lyrics:
         # A new capability is not permission to replay a previous attempt.
         # Keep every old receipt, including failed, cancelled and unknown runs.

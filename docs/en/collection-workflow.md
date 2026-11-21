@@ -107,3 +107,5 @@ Choose **Проверить версии другой длительности**
 Continue a completed folder pass to search for artwork and compare saved timed lyrics across the full scan manifest. Changed revisions are skipped. The server can continue after the tab closes, reuses independent ASR for the same revision, and requests GigaAM for Russian. Album tags can seed a release-specific query. To apply artwork using embedded references, the recording and edition IDs, artist, title, duration, current release evidence and source permissions must agree.
 
 A complete in-range LRC in a single native ID3 USLT frame counts as existing synchronized lyrics. A continuation can update older catalog entries from their revision-bound slot inventory without rewriting the audio file or assigning a listening decision.
+
+A distinct featured-credit lookup uses the lead artist and song title to discover options. Matching still checks the full guest credit, version and duration. A completed pass from the older search version can refine only the affected lyrics without rescanning audio.

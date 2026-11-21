@@ -15,6 +15,8 @@ type Run = {
   warnings?: Record<string, number>;
   autofill?: boolean;
   refines?: string;
+  credit_only?: boolean;
+  can_refine_lyrics?: boolean;
   supplements?: string;
   transcribed?: number;
   embedded_timings?: number;
@@ -394,34 +396,34 @@ export function FolderPreparation({
                 Остановить заполнение
               </button>
             )}
+            {run.can_refine_lyrics && (
+              <button
+                className="button secondary"
+                disabled={busy}
+                onClick={() => void changeRun("refine-lyrics")}
+              >
+                Уточнить поиск текстов
+              </button>
+            )}
             {run.autofill &&
               run.state === "review" &&
-              !run.refines &&
               !run.supplements &&
+              !run.credit_only &&
               !!run.scanned_files && (
-                <button
-                  className="button secondary"
-                  disabled={busy}
-                  onClick={() => void changeRun("refine-lyrics")}
-                >
-                  Уточнить поиск текстов
-                </button>
+                <div>
+                  <button
+                    className="button primary"
+                    disabled={busy}
+                    onClick={() => void changeRun("supplement")}
+                  >
+                    Дособрать обложки и сверить тексты всей папки
+                  </button>
+                  <p>
+                    Используется сохранённый список файлов. Фонотека ищет обложки изданий и сверяет
+                    найденные тексты по аудио. Спорные варианты останутся на проверке.
+                  </p>
+                </div>
               )}
-            {run.autofill && run.state === "review" && !run.supplements && !!run.scanned_files && (
-              <div>
-                <button
-                  className="button primary"
-                  disabled={busy}
-                  onClick={() => void changeRun("supplement")}
-                >
-                  Дособрать обложки и сверить тексты всей папки
-                </button>
-                <p>
-                  Используется сохранённый список файлов. Фонотека ищет обложки изданий и сверяет
-                  найденные тексты по аудио. Спорные варианты останутся на проверке.
-                </p>
-              </div>
-            )}
             {run.supplements && (
               <a
                 href={"/api/preparation/" + encodeURIComponent(run.supplements) + "/report"}

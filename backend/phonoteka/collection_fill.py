@@ -6,6 +6,8 @@ import uuid
 
 from fastapi import Request
 from fastapi.responses import Response
+
+from .providers import CREDIT_QUERY_PROFILE, lyric_search_profile
 from . import (album_gain_policy, audio_check, catalog_sources, confirmed_fields as fields, db,
                enrichment_gaps, field_policy, media, metadata_preparation as prep, preparation,
                provider_policy, review_queue, security, webhooks)
@@ -33,7 +35,7 @@ def lyric_outcome(conn, row):
     saved = conn.execute('SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?', (row['id'], row['sha256'])).fetchone()
     analysis = json.loads(saved[0]) if saved else {}
     source = next((s for s in analysis.get('sources', []) if s.get('provider') == 'lrclib'), {})
-    if source.get('query_profile') != prep.LYRICS_QUERY_PROFILE or source.get('state') not in {'no_match', 'candidates'}:
+    if source.get('query_profile') != lyric_search_profile(analysis.get('query') or {}) or source.get('state') not in {'no_match', 'candidates'}:
         return 'review', 'lyrics_provider_incomplete'
     if any(c.get('provider') == 'lrclib' and c.get('lrc') and fields.permitted(conn, c)
            for c in analysis.get('candidates', [])):
@@ -186,7 +188,8 @@ def advance(conn, settings, run):
     active = {'auth_epoch': run['epoch']}
     busy, retired = fields.active_tracks(conn), catalog_sources.completed_sources(conn)
     connection = prep.acoustid_connection(settings)
-    queue = {} if refine else review_queue.project(conn, settings, [entry['id'] for entry in run['page']])
+    queue_ids = [entry['id'] for entry in run['page'] if not refine or (run.get('credit_only') and entry['tried'])]
+    queue = review_queue.project(conn, settings, queue_ids) if queue_ids else {}
     selected = []
     reports = []
     for entry in run['page']:
@@ -212,7 +215,11 @@ def advance(conn, settings, run):
                          (db.encode(meta), db.utcnow(), row['id'], row['sha256']))
             row = conn.execute('SELECT * FROM tracks WHERE id=?', (entry['id'],)).fetchone()
             run['embedded_timings'] = run.get('embedded_timings', 0) + 1
-        if refine and (entry['tried'] or entry.get('issue')):
+        if run.get('credit_only') and lyric_search_profile(meta.get('tags') or {}) != CREDIT_QUERY_PROFILE:
+            reports.append((entry['id'], entry['path'], 'excluded', 'lyrics_not_eligible'))
+            continue
+        follow_credit = run.get('credit_only') and bool(entry['tried'])
+        if refine and not follow_credit and (entry['tried'] or entry.get('issue')):
             outcome = ('review', entry['issue']) if entry.get('issue') else lyric_outcome(conn, row)
             reports.append((entry['id'], entry['path'], *outcome))
             continue
@@ -220,17 +227,17 @@ def advance(conn, settings, run):
         kind = None
         value = None
         attempt = None
-        if refine:
+        if refine and not follow_credit:
             ready = prep.candidate(settings, conn, row, active, result, connection)
             if not ready or not ready.get('expanded_lyrics') or not ready.get('lyric_search_only') or ready['scan']:
                 reports.append((entry['id'], entry['path'], 'excluded', 'lyrics_not_eligible'))
                 continue
             kind, value, attempt = 'analyze', ready['token'], ready['receipt']
-        elif not entry.get('issue') and not result['blocked'] and result['ready']:
+        elif not follow_credit and not entry.get('issue') and not result['blocked'] and result['ready']:
             kind, value = 'apply', result['token']
             attempt = 'apply:' + ','.join(sorted(c['field'] for c in result['changes']))
         elif not entry.get('issue'):
-            ready = prep.candidate(settings, conn, row, active, result, connection)
+            ready = None if follow_credit else prep.candidate(settings, conn, row, active, result, connection)
             if ready and (not run.get('supplements') or ready.get('album_hint') or ready.get('expanded_lyrics')):
                 kind, value = ready['kind'], ready['token']
                 attempt = ready['receipt']
@@ -344,7 +351,7 @@ def install(app, settings):
     @app.post('/api/preparation/{run_id}/refine-lyrics', status_code=202)
     def refine_lyrics(run_id: str, request: Request):
         active = security.require_session(request, settings, True, owner_only=True)
-        return continue_scan(run_id, active, 'refines', prep.LYRICS_QUERY_PROFILE)
+        return continue_scan(run_id, active, 'refines', CREDIT_QUERY_PROFILE)
 
     @app.post('/api/preparation/{run_id}/supplement', status_code=202)
     def supplement(run_id: str, request: Request):
@@ -359,7 +366,8 @@ def install(app, settings):
             if current.get('id') == key and current.get(mode) == run_id:
                 return preparation.public(current)
             if (current.get('id') != run_id or current.get('state') != 'review' or not current.get('autofill')
-                    or current.get('supplements') or (mode == 'refines' and current.get('refines')) or not settings.writable
+                    or (current.get('supplements') and (mode == 'supplements' or current.get('lyrics_lookup_revision') == CREDIT_QUERY_PROFILE))
+                    or current.get('credit_only') or (mode == 'refines' and current.get('refines')) or not settings.writable
                     or (mode == 'refines' and not settings.external_metadata)
                     or active['auth_epoch'] != current['epoch'] or root_identity(settings.work_root) != current['root']):
                 raise security.error(409, 'preparation_stale', 'Дождитесь завершения прохода и обновите мастер.')
@@ -368,6 +376,9 @@ def install(app, settings):
                 raise security.error(409, 'recovery_required', 'Сначала завершите проверку восстановления.')
             run = {k:current[k] for k in ('scan_id','scanned_files','scan_errors','root','epoch','profile','folder')}
             run[mode] = run_id
+            run['lyrics_lookup_revision'] = CREDIT_QUERY_PROFILE
+            if mode == 'refines' and current.get('supplements'):
+                run['credit_only'] = True
             run.update(id=key, report_id=key, state='active', stage='autofill', autofill=True, applied=0, aligned=0,
                        job_id=None, processed=0, reasons={}, counts={}, started_at=db.utcnow())
             conn.execute('INSERT INTO settings VALUES(?,?)', ('preparation_request:' + key, db.encode(run)))

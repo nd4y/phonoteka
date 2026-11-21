@@ -3270,3 +3270,5 @@ jobs. Each acceptance stage still requires separate evidence.
 21 November 2026. Permit an explicit audio comparison of timed sources differing only in duration after exact matches are exhausted. Keep track revisions, permissions, source eligibility, independent ASR evidence, language routing, skip rules and separate acceptance of timing.
 
 - 2026-11-21. Проверять обложки и варианты таймкодов для всех отдельных песен сохранённого прохода. Сверка продолжается на сервере. Сомнительные издания, несовпавшие строки, миксы и речь исключены из автоматической записи.
+
+- 2026-11-21. Уточнять поиск LRCLIB для явного указания feat. в тегах. Проверять полный состав исполнителей и версию, сохранять ограничения источника, квитанции, проверку по аудио и отдельное подтверждение таймкодов.
