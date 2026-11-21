@@ -437,9 +437,14 @@ export function FolderPreparation({
                 Отчёт исходного прохода (CSV)
               </a>
             )}
-            {run.id && run.refines && run.state === "review" && !!run.counts?.found && (
-              <AudioCheckPanel key={run.id} id={run.id} onJobs={onJobs} />
+            {run.id && run.supplements && run.state === "review" && !!run.counts?.review && (
+              <AudioCheckPanel key={run.id} id={run.id} onJobs={onJobs} durationReport />
             )}
+            {run.id &&
+              run.refines &&
+              !run.supplements &&
+              run.state === "review" &&
+              !!run.counts?.found && <AudioCheckPanel key={run.id} id={run.id} onJobs={onJobs} />}
             {!!Object.keys(run.skipped || {}).length && (
               <small>
                 {Object.entries(run.skipped || {})

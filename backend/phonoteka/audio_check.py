@@ -78,7 +78,7 @@ def compare(texts, asr, duration):
 def current_run(conn, settings, run_id, epoch):
     from .worker import root_identity
     run = preparation.load(conn)
-    if (run.get('id') != run_id or not run.get('refines') or run.get('state') != 'review'
+    if (run.get('id') != run_id or not (run.get('refines') or run.get('supplements')) or run.get('state') != 'review'
             or run.get('epoch') != epoch or run.get('root') != root_identity(settings.work_root)):
         raise security.error(409, 'preparation_stale', 'Откройте завершённый отчёт текущей папки.')
     return run
@@ -87,11 +87,26 @@ def current_run(conn, settings, run_id, epoch):
 def page(conn, settings, run, offset, compare_words, *, duration_only=False):
     report_prefix = 'fill_report:' + run['report_id'] + ':'
     scan_prefix = 'fill_page:' + run['scan_id'] + ':'
-    hits = conn.execute("""SELECT json_extract(r.value,'$[0]') AS id,json_extract(r.value,'$[1]') AS file,
+    supplement = bool(run.get('supplements'))
+    if supplement and not duration_only:
+        return {'items': [], 'offset': offset, 'next_offset': None}
+    # Limit after filtering the previous report. Use the immutable scan revision
+    # to exclude replacements. The native selector still validates every field,
+    # permission, lock and potential conflict before issuing a token.
+    predicate = "json_extract(r.value,'$[3]')='lyrics_option_found'"
+    if supplement:
+        predicate = """json_extract(r.value,'$[2]')='review' AND EXISTS (
+            SELECT 1 FROM analyses a JOIN json_each(a.payload,'$.candidates') candidate
+            WHERE a.track_id=json_extract(r.value,'$[0]') AND a.input_sha256=json_extract(s.value,'$[1]')
+              AND json_extract(candidate.value,'$.provider')='lrclib'
+              AND json_extract(candidate.value,'$.match.state')='needs_review'
+              AND json_extract(candidate.value,'$.match.reasons')='["duration_differs"]'
+              AND length(json_extract(candidate.value,'$.lrc'))>0)"""
+    hits = conn.execute(f"""SELECT json_extract(r.value,'$[0]') AS id,json_extract(r.value,'$[1]') AS file,
         json_extract(s.value,'$[1]') AS revision FROM settings p JOIN json_each(p.value) r
         LEFT JOIN settings m ON m.key=?||substr(p.key,?)
         LEFT JOIN json_each(m.value) s ON json_extract(s.value,'$[0]')=json_extract(r.value,'$[0]')
-        WHERE p.key GLOB ? AND json_extract(r.value,'$[3]')='lyrics_option_found'
+        WHERE p.key GLOB ? AND {predicate}
         ORDER BY CAST(substr(p.key,?) AS INTEGER),r.key LIMIT ? OFFSET ?""",
         (scan_prefix, len(report_prefix)+1, report_prefix+'*', len(report_prefix)+1, PAGE_SIZE+1, offset)).fetchall()
     retired = catalog_sources.completed_sources(conn)
@@ -108,6 +123,8 @@ def page(conn, settings, run, offset, compare_words, *, duration_only=False):
         saved = conn.execute('SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',
                              (row['id'], row['sha256'])).fetchone()
         analysis = json.loads(saved[0]) if saved else {}
+        if supplement and folder_references(conn, row, analysis, retired) != ([], False):
+            continue
         texts = candidates(conn, row, analysis, retired, duration_only=duration_only)
         if not texts:
             item['state'] = 'blocked' if texts is None else 'no_match'
@@ -125,7 +142,7 @@ def page(conn, settings, run, offset, compare_words, *, duration_only=False):
         receipt = review_queue.receipt_key('audio-check', token)
         if row['id'] in busy:
             item['state'] = 'busy'
-        elif conn.execute('SELECT 1 FROM settings WHERE key=?', (receipt,)).fetchone():
+        elif conn.execute('SELECT 1 FROM settings WHERE key=?', (receipt,)).fetchone() or (supplement and unfinished_attempt(conn, row)):
             item['state'] = 'attempted'
         elif not settings.inference_url:
             item['state'] = 'blocked'
@@ -143,7 +160,18 @@ def folder_references(conn, row, analysis, retired):
              and isinstance(c.get('plain_lyrics'), str) and 0 < len(c['plain_lyrics'].strip()) <= 100000
              and (c.get('match') or {}).get('state') == 'matching_metadata'
              and confirmed_fields.permitted(conn, c, ('cache', 'derived_analysis'))}
-    return (sorted(plain), True) if len(plain) == 1 else ([], False)
+    if len(plain) > 1:
+        return None, False
+    return sorted(plain), bool(plain)
+
+
+def unfinished_attempt(conn, row):
+    # An earlier failed/cancelled or unaccounted attempt on this revision needs inspection.
+    return conn.execute("""SELECT 1 FROM jobs j JOIN json_each(j.payload,'$.items') i
+        LEFT JOIN job_items ji ON ji.job_id=j.id AND ji.item_key=?
+        WHERE j.kind IN ('align','transcribe') AND json_extract(i.value,'$.track_id')=?
+          AND json_extract(i.value,'$.sha256')=? AND COALESCE(ji.state,'')<>'succeeded' LIMIT 1""",
+        (row['id'], row['id'], row['sha256'])).fetchone()
 
 
 def folder_check(conn, row, retired):
@@ -154,6 +182,9 @@ def folder_check(conn, row, retired):
         return None
     analysis = json.loads(saved[0])
     texts, plain = folder_references(conn, row, analysis, retired)
+    duration_only = texts == []
+    if duration_only:
+        texts = candidates(conn, row, analysis, retired, duration_only=True)
     if not texts:
         return None
     hint = language(texts)
@@ -169,19 +200,20 @@ def folder_check(conn, row, retired):
                 return {'result': 'audio_blocked'}
             return {'result': 'audio_matched' if result['complete'] else 'audio_partial'}
         result = compare(texts, asr, json.loads(row['metadata'])['duration'])
+        if duration_only and result['state'] == 'matched':
+            return {'result': 'duration_audio_matched'}
         return {'result': 'audio_' + result['state']}
-    token = selection_token(row, hint, texts, False, plain=plain)
+    token = selection_token(row, hint, texts, duration_only, plain=plain)
     if conn.execute('SELECT 1 FROM settings WHERE key=?', (review_queue.receipt_key('audio-check', token),)).fetchone():
         return {'result': 'audio_previously_attempted'}
-    # An earlier failed/cancelled or unaccounted attempt on this revision needs inspection.
-    prior = conn.execute("""SELECT 1 FROM jobs j JOIN json_each(j.payload,'$.items') i
-        LEFT JOIN job_items ji ON ji.job_id=j.id AND ji.item_key=?
-        WHERE j.kind IN ('align','transcribe') AND json_extract(i.value,'$.track_id')=?
-          AND json_extract(i.value,'$.sha256')=? AND COALESCE(ji.state,'')<>'succeeded' LIMIT 1""",
-        (row['id'], row['id'], row['sha256'])).fetchone()
-    if prior:
+    if unfinished_attempt(conn, row):
         return {'result': 'audio_previously_attempted'}
-    return {'audio_check_token': token, 'language_hint': hint, **({'audio_check_plain': True} if plain else {})}
+    check = {'audio_check_token': token, 'language_hint': hint}
+    if plain:
+        check['audio_check_plain'] = True
+    if duration_only:
+        check.update(audio_check_duration_only=True, folder_duration_check=True)
+    return check
 
 
 def selection_token(row, hint, texts, duration_only, *, plain=False):
@@ -227,6 +259,8 @@ def install(app, settings):
                         'language_hint':view[tid]['language'], 'audio_check_token':token}
                 if duration_only:
                     item['audio_check_duration_only'] = True
+                    if run.get('supplements'):
+                        item['folder_duration_check'] = True
                 review_queue.freeze_inference(conn, row, item, 'transcribe', {}, False)
                 items.append(item)
                 conn.execute('INSERT INTO settings VALUES(?,?)',
@@ -250,6 +284,8 @@ def recheck(conn, row, item):
     analysis = json.loads(saved[0]) if saved else {}
     retired = catalog_sources.completed_sources(conn)
     plain = item.get('audio_check_plain') is True
+    if item.get('folder_duration_check') and (not duration_only or folder_references(conn, row, analysis, retired) != ([], False)):
+        raise media.MediaError('review_plan_stale', 'Появился более точный вариант текста или изменились разрешения.')
     if plain:
         texts, still_plain = folder_references(conn, row, analysis, retired)
         if not still_plain or duration_only:

@@ -93,3 +93,52 @@ def test_plain_reference_requires_one_exact_permitted_text(report,ambiguous):
         assert job['kind']=='transcribe' and item['audio_check_plain'] and item['language_hint']=='ru'
         assert 'reference_text' not in item
     assert media.sha256_file(path)==sha
+
+
+def set_duration_variant(analysis):
+    analysis['candidates'][0]['match'] = {
+        'state': 'needs_review', 'reasons': ['duration_differs'], 'duration_delta': 15.1}
+
+
+def test_folder_checks_an_alternate_duration_and_rechecks_priority(report):
+    from phonoteka import audio_check
+
+    cfg, _, _, tid, sha, path, _ = report
+    update_analysis(cfg, tid, set_duration_variant)
+    run = supplement(report)
+    job = db.fetchone(cfg.db_path, 'SELECT kind,payload FROM jobs WHERE id=?', (run['job_id'],))
+    item, = json.loads(job['payload'])['items']
+    assert job['kind'] == 'transcribe' and item['audio_check_duration_only'] and item['folder_duration_check']
+    assert item['language_hint'] == 'ru' and 'reference_text' not in item
+    with db.connect(cfg.db_path) as conn:
+        row = conn.execute('SELECT * FROM tracks WHERE id=?', (tid,)).fetchone()
+        audio_check.recheck(conn, row, item)
+    def add_plain(analysis):
+        src = analysis['candidates'][0]
+        analysis['candidates'].append({**src, 'lrc': '', 'plain_lyrics': 'Другая песня',
+                                       'match': {'state': 'matching_metadata'}})
+    update_analysis(cfg, tid, add_plain)
+    with db.connect(cfg.db_path) as conn, pytest.raises(media.MediaError):
+        audio_check.recheck(conn, row, item)
+    assert media.sha256_file(path) == sha
+
+
+def test_completed_supplement_can_check_duration_without_rescan(report):
+    cfg, client, headers, tid, sha, path, url = report
+    update_analysis(cfg, tid, set_duration_variant)
+    with db.transaction(cfg.db_path) as conn:
+        run = preparation.load(conn)
+        run['supplements'] = run.pop('refines')
+        preparation.save(conn, run)
+        conn.execute('UPDATE settings SET value=? WHERE key=?',
+                     (db.encode([[tid, path.name, 'review', 'recording_unconfirmed']]),
+                      'fill_report:' + run['report_id'] + ':0'))
+    assert client.get(url).json()['items'] == []
+    route = url + '?duration_only=true'
+    item, = client.get(route).json()['items']
+    assert item['state'] == 'ready' and item['language'] == 'ru'
+    payload = {'tokens': {tid: item['token']}}
+    job = client.post(route, json=payload, headers=headers).json()['job_id']
+    assert client.post(route, json=payload, headers=headers).json()['job_id'] == job
+    args = json.loads(db.fetchone(cfg.db_path, 'SELECT payload FROM jobs WHERE id=?', (job,))['payload'])
+    assert args['items'][0]['folder_duration_check'] and media.sha256_file(path) == sha

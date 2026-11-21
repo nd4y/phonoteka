@@ -109,3 +109,5 @@ Continue a completed folder pass to search for artwork and compare saved timed l
 A complete in-range LRC in a single native ID3 USLT frame counts as existing synchronized lyrics. A continuation can update older catalog entries from their revision-bound slot inventory without rewriting the audio file or assigning a listening decision.
 
 A distinct featured-credit lookup uses the lead artist and song title to discover options. Matching still checks the full guest credit, version and duration. A completed pass from the older search version can refine only the affected lyrics without rescanning audio.
+
+When the artist and title match but duration differs, the wizard can compare the words with an independent transcript. Exact versions take priority. The completed folder report can show the remaining eligible versions and reuse transcripts of the current files. Russian lyrics use GigaAM. Even a full word match across versions still requires a timing check.
