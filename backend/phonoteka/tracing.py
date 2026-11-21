@@ -250,9 +250,43 @@ def _wire_batches(encoded):
     return packets, dropped
 
 
+HTTP_TRANSPORT_PHASES = frozenset(('network.connect','network.tls','http.send_headers','http.send_body','http.receive_headers','http.receive_body'))
+
+
+def _encode_transport_phase(span, templates):
+    """Reuse only immutable wire fields of a successful local TCP phase.
+
+    On this pinned OTLP schema, spans with this shape differ solely in their
+    IDs and timestamps. Use the SDK for every other shape, including failures.
+    Templates are local to one bounded batch and never retain an SDK span.
+    """
+    if span.name not in HTTP_TRANSPORT_PHASES or span.kind is not SpanKind.INTERNAL or span.status.status_code is not StatusCode.UNSET:
+        return _encode_span(span)
+    context = span.get_span_context()
+    parent = span.parent
+    if (not parent or not parent.is_valid or parent.is_remote or context.trace_state or span.events or span.links
+            or span.dropped_attributes or span.dropped_events or span.dropped_links
+            or span.attributes != {'network.transport':'tcp'} or span.status.description):
+        return _encode_span(span)
+    template = templates.get(span.name)
+    if template is None:
+        template = _encode_span(span)
+        templates[span.name] = template
+        return template
+    encoded = type(template)()
+    encoded.CopyFrom(template)
+    encoded.trace_id = context.trace_id.to_bytes(16, 'big')
+    encoded.span_id = context.span_id.to_bytes(8, 'big')
+    encoded.parent_span_id = parent.span_id.to_bytes(8, 'big')
+    encoded.start_time_unix_nano = span.start_time
+    encoded.end_time_unix_nano = span.end_time
+    return encoded
+
+
 def _encode_export_batch(batch):
     """Reuse the pinned SDK's resource envelope within one bounded export."""
     template = cached_resource = cached_scope = None
+    phase_templates = {}
     packets = []
     dropped = 0
     for offset in range(0, len(batch), 16):
@@ -264,7 +298,7 @@ def _encode_export_batch(batch):
                   and not scope.attributes and all(span.resource is resource
                   and span.instrumentation_scope is scope for span in group))
         if shared and resource is cached_resource and scope is cached_scope:
-            template.resource_spans[0].scope_spans[0].spans.extend(_encode_span(span) for span in group)
+            template.resource_spans[0].scope_spans[0].spans.extend(_encode_transport_phase(span, phase_templates) for span in group)
             encoded = template
         else:
             encoded = encode_spans(group)

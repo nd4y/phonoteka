@@ -290,3 +290,40 @@ def test_shared_service_resource_packets_match_sdk_across_scope_changes():
     finally:
         for provider in providers:
             provider.shutdown()
+
+
+def test_tcp_phase_templates_match_pinned_otlp_for_local_and_exceptional_spans():
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import Link, NonRecordingSpan, SpanContext, Status, StatusCode, TraceFlags, TraceState
+
+    provider = TracerProvider(resource=tracing.ServiceResource({'service.name': 'wire-test'}), shutdown_on_exit=False)
+    saved = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(saved))
+    tracer = provider.get_tracer('transport')
+    templates = {}
+    try:
+        for index in range(65):
+            parent = SpanContext((1 << 127) + index, (1 << 63) + index, index == 5,
+                                 TraceFlags(1), TraceState([('vendor', 'v')]) if index == 6 else TraceState())
+            ctx = trace.set_span_in_context(NonRecordingSpan(parent))
+            with tracer.start_as_current_span('http.receive_body', context=ctx,
+                    attributes={'network.transport':'tcp'}, links=[Link(parent)] if index == 4 else []) as span:
+                if index == 1: span.set_status(Status(StatusCode.ERROR))
+                if index == 2: span.set_attribute('error.type', 'TimeoutError')
+                if index == 3: span.add_event('close')
+        spans = saved.get_finished_spans()
+        with patch.object(tracing, '_encode_span', wraps=tracing._encode_span) as sdk:
+            actual = [tracing._encode_transport_phase(s, templates).SerializeToString() for s in spans]
+            assert 2 <= sdk.call_count < len(spans)
+        assert actual == [tracing._encode_span(s).SerializeToString() for s in spans]
+        expected = []
+        for offset in range(0, len(spans), 16):
+            packets, dropped = tracing._wire_batches(tracing.encode_spans(spans[offset:offset+16]))
+            assert dropped == 0
+            expected.extend(packets)
+        assert tracing._encode_export_batch(spans) == (expected, 0)
+    finally:
+        provider.shutdown()

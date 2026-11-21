@@ -22,12 +22,20 @@ const reasons: Record<string, string> = {
   checked_empty: "ASR завершился без размеченных слов",
 };
 
-export function AudioCheckPanel({ id, onJobs }: { id: string; onJobs: () => void }) {
+export function AudioCheckPanel({
+  id,
+  onJobs,
+  durationReport = false,
+}: {
+  id: string;
+  onJobs: () => void;
+  durationReport?: boolean;
+}) {
   const [page, setPage] = useState<Page | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [queued, setQueued] = useState(0);
-  const [durationOnly, setDurationOnly] = useState(false);
+  const [durationOnly, setDurationOnly] = useState(durationReport);
   const pending = useRef<AbortController | null>(null);
   useEffect(() => () => pending.current?.abort(), []);
   const ready = page?.items.filter((item) => item.state === "ready" && item.token) || [];
@@ -77,7 +85,13 @@ export function AudioCheckPanel({ id, onJobs }: { id: string; onJobs: () => void
           disabled={busy}
           onClick={() => void request(page?.offset || 0)}
         >
-          {busy ? "Проверяем…" : page ? "Обновить сверку" : "Сверить варианты по аудио"}
+          {busy
+            ? "Проверяем…"
+            : page
+              ? "Обновить сверку"
+              : durationReport
+                ? "Сверить версии другой длительности"
+                : "Сверить варианты по аудио"}
         </button>
         {ready.length > 0 && page && (
           <button
@@ -100,13 +114,17 @@ export function AudioCheckPanel({ id, onJobs }: { id: string; onJobs: () => void
       )}
       {page && (
         <>
-          <button
-            className="button subtle"
-            disabled={busy}
-            onClick={() => void request(0, false, !durationOnly)}
-          >
-            {durationOnly ? "Вернуться к основному списку" : "Проверить версии другой длительности"}
-          </button>
+          {!durationReport && (
+            <button
+              className="button subtle"
+              disabled={busy}
+              onClick={() => void request(0, false, !durationOnly)}
+            >
+              {durationOnly
+                ? "Вернуться к основному списку"
+                : "Проверить версии другой длительности"}
+            </button>
+          )}
           {durationOnly && (
             <p>
               Название и исполнитель совпали, длительность отличается. Это может быть другое
