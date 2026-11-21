@@ -59,3 +59,5 @@ throughput loss, and at most 32 MiB additional RSS. Mandatory CI also retains a
 real 600-second receiver outage. A negative overhead on a shared host does not
 by itself prove acceleration. Native tests, CI, the installed revision and trace
 readback are verified separately.
+
+The exporter reuses the encoded resource header within one batch of up to 128 spans. This applies to groups sharing a single service resource and an instrumentation scope without attributes. The pinned SDK serializes each span, including its events and links. A regression test compares packet bytes across resource and scope changes.

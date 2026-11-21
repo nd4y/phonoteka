@@ -253,3 +253,40 @@ def test_processor_accounts_for_spans_in_grouped_packets_not_packet_count(monkey
         finally:
             processor.shutdown(); processor.thread.join(timeout=2)
         assert not processor.thread.is_alive()
+
+
+def test_shared_service_resource_packets_match_sdk_across_scope_changes():
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import Link, SpanContext, Status, StatusCode
+
+    saved = InMemorySpanExporter()
+    providers = []
+    for index in range(2):
+        provider = TracerProvider(resource=tracing.ServiceResource({'service.name': str(index)}),
+                                  shutdown_on_exit=False)
+        provider.add_span_processor(SimpleSpanProcessor(saved))
+        providers.append(provider)
+    scopes = [providers[0].get_tracer('phonoteka', '1'),
+              providers[1].get_tracer('phonoteka', '1'),
+              providers[1].get_tracer('other', '2', attributes={'scope.label': 'test'})]
+    try:
+        for index in range(128):
+            scope = scopes[0 if index < 39 else 1 if index < 95 else 2]
+            with scope.start_as_current_span('dns.lookup', links=[Link(SpanContext(1, 2, False))]) as span:
+                span.set_attribute('dns.question.name', 'example.test')
+                span.add_event('resolved')
+                span.set_status(Status(StatusCode.OK))
+        spans = saved.get_finished_spans()
+        expected = []
+        for offset in range(0, len(spans), 16):
+            packets, lost = tracing._wire_batches(tracing.encode_spans(spans[offset:offset + 16]))
+            assert lost == 0
+            expected.extend(packets)
+        with patch.object(tracing, '_encode_span', wraps=tracing._encode_span) as native:
+            assert tracing._encode_export_batch(spans) == (expected, 0)
+            assert native.call_count >= 16
+    finally:
+        for provider in providers:
+            provider.shutdown()

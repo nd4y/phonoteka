@@ -27,6 +27,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider, SpanLimits, SpanProcessor
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
+from opentelemetry.exporter.otlp.proto.common._internal.trace_encoder import _encode_span
 
 ALLOWED = {'phonoteka.job.id', 'phonoteka.item.id', 'phonoteka.attempt.id',
     'phonoteka.attempt.number', 'phonoteka.operation', 'phonoteka.stage',
@@ -249,6 +250,35 @@ def _wire_batches(encoded):
     return packets, dropped
 
 
+def _encode_export_batch(batch):
+    """Reuse the pinned SDK's resource envelope within one bounded export."""
+    template = cached_resource = cached_scope = None
+    packets = []
+    dropped = 0
+    for offset in range(0, len(batch), 16):
+        group = batch[offset:offset + 16]
+        first = group[0]
+        resource = getattr(first, 'resource', None)
+        scope = getattr(first, 'instrumentation_scope', None)
+        shared = (isinstance(resource, ServiceResource) and scope is not None
+                  and not scope.attributes and all(span.resource is resource
+                  and span.instrumentation_scope is scope for span in group))
+        if shared and resource is cached_resource and scope is cached_scope:
+            template.resource_spans[0].scope_spans[0].spans.extend(_encode_span(span) for span in group)
+            encoded = template
+        else:
+            encoded = encode_spans(group)
+        part, oversized = _wire_batches(encoded)
+        packets.extend(part)
+        dropped += oversized
+        if offset + 16 < len(batch):
+            if shared:
+                template, cached_resource, cached_scope = encoded, resource, scope
+                template.resource_spans[0].scope_spans[0].ClearField('spans')
+            time.sleep(0)
+    return packets, dropped
+
+
 def _background_cpu_priority():
     # Linux nice is per native thread. Never renice the application process or
     # raise an inherited priority; restricted/other platforms keep exporting.
@@ -318,14 +348,7 @@ class BoundedProcessor(SpanProcessor):
             try:
                 chunks = []; size = count = 0
                 try:
-                    # Encoding holds Python's GIL even on a background thread.
-                    # Bound each turn, then yield before the next one, while
-                    # retaining one HTTP batch and the exact wire-size checks.
-                    packets = []; rejected = 0
-                    for offset in range(0, len(batch), 16):
-                        part, oversized = _wire_batches(encode_spans(batch[offset:offset+16]))
-                        packets.extend(part); rejected += oversized
-                        if offset+16 < len(batch): time.sleep(0)
+                    packets, rejected = _encode_export_batch(batch)
                 except Exception:
                     self.dropped += len(batch); continue
                 self.dropped += rejected
