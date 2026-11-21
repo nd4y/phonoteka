@@ -501,6 +501,30 @@ def _audit_signal(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         "quality_verdict": "not_determined", "lossless_origin": "unknown"}, warnings
 
 
+def classify_embedded_lrc(metadata):
+    """Recognize a complete textual ID3 LRC without changing any file or listening decision."""
+    raw = metadata.get('lyrics')
+    duration = metadata.get('duration')
+    if (metadata.get('lrc') or metadata.get('format') not in {'mp3', 'wav', 'aiff', 'aif'}
+            or not isinstance(raw, str) or not _LRC_TIME.search(raw)
+            or type(duration) not in (int, float) or not 0 < duration < float('inf')):
+        return False
+    inventory = metadata.get('slot_inventory') or {}
+    slots = [s for s in inventory.get('slots', []) if s.get('kind') == 'lyrics']
+    if (inventory.get('truncated') is not False or len(slots) != 1 or slots[0].get('native_type') != 'USLT'
+            or slots[0].get('text_sha256') != metadata_slots.digest(raw)):
+        return False
+    try:
+        document = parse_lrc(raw)
+    except MediaError:
+        return False
+    if (not document['complete'] or not any(line['text'].strip() for line in document['lines'])
+            or any(line['start_ms'] > duration * 1000 for line in document['lines'])):
+        return False
+    metadata.update(lrc=raw, lyrics=None)
+    return True
+
+
 def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
     path = _validate(path, roots)
     with _file(path) as stream:
@@ -589,7 +613,7 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
             except MediaError as exc:
                 has_art = False
                 artwork_warning = exc.code
-        return {"sha256": digest, "size": info.st_size, "mtime_ns": info.st_mtime_ns,
+        metadata = {"sha256": digest, "size": info.st_size, "mtime_ns": info.st_mtime_ns,
                 **intake.describe(path,audio), "duration": duration,'duration_source':duration_source,
                 "sample_rate": getattr(audio.info, 'sample_rate', None), "channels": getattr(audio.info, 'channels', None),
                 "bitrate": getattr(audio.info, 'bitrate', None), "bits_per_sample": getattr(audio.info, 'bits_per_sample', None),
@@ -597,6 +621,8 @@ def inspect_audio(path: str | Path, roots: Mapping[str, Any]) -> dict[str, Any]:
                 "lyrics": lyrics, "lrc": lrc, "lyrics_warning": lyrics_warning,
                 "write_supported": write_supported, "write_block_reason": reason,
                 "audio_identity": None, "poweramp_verified": False, "slot_inventory": metadata_slots.inventory(audio)}
+        classify_embedded_lrc(metadata)
+        return metadata
 
 
 def _load_audio(file):

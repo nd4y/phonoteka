@@ -17,6 +17,7 @@ type Run = {
   refines?: string;
   supplements?: string;
   transcribed?: number;
+  embedded_timings?: number;
   action?: string;
   processed?: number;
   applied?: number;
@@ -348,6 +349,9 @@ export function FolderPreparation({
                       выравнивания завершено: {run.aligned || 0}. Новых расшифровок:{" "}
                       {run.transcribed || 0}.
                     </p>
+                    {!!run.embedded_timings && (
+                      <p>Уже были таймкоды в файле: {run.embedded_timings}.</p>
+                    )}
                     <p>
                       Все поля заполнены: {run.counts?.populated || 0}. Требуют проверки:{" "}
                       {run.counts?.review || 0}. Пропущены: {run.counts?.excluded || 0}. Ошибки

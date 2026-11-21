@@ -206,6 +206,12 @@ def advance(conn, settings, run):
         if not enrichment_gaps.individual_music(meta, row['sha256']):
             reports.append((entry['id'], row['relative_path'], 'excluded', 'excluded_recording'))
             continue
+        if (not refine and row['id'] not in busy and row['status'] not in {'missing', 'error', 'conflict'}
+                and not meta.get('input_error') and meta.get('sha256') == row['sha256'] and media.classify_embedded_lrc(meta)):
+            conn.execute('UPDATE tracks SET metadata=?,updated_at=? WHERE id=? AND is_current=1 AND sha256=?',
+                         (db.encode(meta), db.utcnow(), row['id'], row['sha256']))
+            row = conn.execute('SELECT * FROM tracks WHERE id=?', (entry['id'],)).fetchone()
+            run['embedded_timings'] = run.get('embedded_timings', 0) + 1
         if refine and (entry['tried'] or entry.get('issue')):
             outcome = ('review', entry['issue']) if entry.get('issue') else lyric_outcome(conn, row)
             reports.append((entry['id'], entry['path'], *outcome))
