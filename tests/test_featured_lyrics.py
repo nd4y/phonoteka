@@ -1,4 +1,5 @@
 """A featured artist can be credited in either field, but may never be discarded."""
+from dataclasses import replace
 import asyncio
 import json
 
@@ -6,8 +7,13 @@ import pytest
 
 from phonoteka import collection_fill, db, media, preparation
 from phonoteka.providers import CREDIT_QUERY_PROFILE, LYRICS_QUERY_PROFILE, Providers, featured_credit, lyric_candidate, lyric_search_profile
-from test_audio_check import report, settings
+from test_audio_check import report, settings as audio_settings
 from test_confirmed_fields import library
+
+
+@pytest.fixture
+def settings(tmp_path):
+    return replace(audio_settings.__wrapped__(tmp_path), external_metadata=True)
 
 
 QUERY = {'title': 'Track (feat. Guest)', 'artist': 'Lead', 'album': 'Album'}
