@@ -226,3 +226,5 @@ Select a music folder in the wizard and choose **Organize selected folder**. The
 In the folder wizard, open the completed lyrics search and choose **Сверить варианты по аудио**. See which lines matched the recording and send missing transcriptions to the configured ASR engine in one batch. [Audio checks](docs/en/collection-workflow.md).
 
 The audio check can also compare timed lyrics for versions of the same song with a different duration. [Audio checks](docs/en/collection-workflow.md)
+
+From the folder wizard, continue a finished pass over its saved file revisions to search for album artwork and check existing timed lyric candidates against the audio.
