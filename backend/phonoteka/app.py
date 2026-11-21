@@ -263,8 +263,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     preparation.install(app,settings)
     from . import metadata_preparation
     metadata_preparation.install(app,settings)
-    from . import collection_fill
+    from . import audio_check, collection_fill
     collection_fill.install(app, settings)
+    audio_check.install(app, settings)
     exports.install(app,settings)
     comparison.install(app,settings)
     provider_policy.install(app,settings)

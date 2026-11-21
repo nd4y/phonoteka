@@ -222,3 +222,5 @@ When recording data or settings change, or a file is busy, both processing and p
 OTLP export groups shared packet metadata while preserving trace contents and existing size limits. Settings and Jaeger stay unchanged. [Export performance verification](docs/en/trace-export-performance.md).
 
 Select a music folder in the wizard and choose **Organize selected folder**. The wizard shows confirmed writes, Ready publications and reasons for skipped files. [Folder workflow](docs/en/collection-workflow.md).
+
+In the folder wizard, open the completed lyrics search and choose **Сверить варианты по аудио**. See which lines matched the recording and send missing transcriptions to the configured ASR engine in one batch. [Audio checks](docs/en/collection-workflow.md).
