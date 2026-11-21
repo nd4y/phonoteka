@@ -3266,3 +3266,5 @@ jobs. Each acceptance stage still requires separate evidence.
 20 November 2026. Diagnose failed scan items down to the audio payload, preserve historical reports and add a bounded lyrics-only follow-up after the folder pass. A previous conclusive lookup with matching embedded artist/title and valid duration may be refined without fingerprint evidence. New options require review.
 
 21 November 2026. Check timed lyrics options against independent, revision-bound audio evidence from the completed folder refinement in the ordinary UI. Batch missing ASR, select the configured GigaAM engine for Russian text, reuse existing word times, report per-file line coverage and timing differences, and preserve disputed fields and original media.
+
+21 November 2026. Permit an explicit audio comparison of timed sources differing only in duration after exact matches are exhausted. Keep track revisions, permissions, source eligibility, independent ASR evidence, language routing, skip rules and separate acceptance of timing.

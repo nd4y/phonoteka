@@ -224,3 +224,5 @@ OTLP export groups shared packet metadata while preserving trace contents and ex
 Select a music folder in the wizard and choose **Organize selected folder**. The wizard shows confirmed writes, Ready publications and reasons for skipped files. [Folder workflow](docs/en/collection-workflow.md).
 
 In the folder wizard, open the completed lyrics search and choose **Сверить варианты по аудио**. See which lines matched the recording and send missing transcriptions to the configured ASR engine in one batch. [Audio checks](docs/en/collection-workflow.md).
+
+The audio check can also compare timed lyrics for versions of the same song with a different duration. [Audio checks](docs/en/collection-workflow.md)

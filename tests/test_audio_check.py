@@ -7,7 +7,7 @@ import pytest
 from phonoteka import audio_check, db, media, preparation, provider_policy
 from phonoteka.worker import root_identity
 from test_backend import settings as base_settings
-from test_confirmed_fields import library
+from test_confirmed_fields import library, update_analysis
 from test_provider_policy import grant, lyrics
 
 
@@ -116,3 +116,44 @@ def test_existing_results_require_a_matching_job_receipt_and_russian_engine(repo
         conn.execute('UPDATE analyses SET payload=? WHERE track_id=?',
                      (db.encode({**data,'asr':{**asr,'engine':'whisper'}}),tid))
     assert client.get(url).json()['items'][0]['state']=='ready'
+
+
+def test_duration_only_requires_explicit_comparison_and_preserves_media(report):
+    cfg,client,headers,tid,sha,path,url=report
+    alternative=url+'?duration_only=true'
+    assert not client.get(alternative).json()['items']
+    def set_duration(value):
+        value['candidates'][0]['match']={'state':'needs_review','reasons':['duration_differs'],'duration_delta':15.1}
+    update_analysis(cfg,tid,set_duration)
+    assert client.get(url).json()['items'][0]['state']=='no_match'
+    row,=client.get(alternative).json()['items']
+    selection={'tokens':{tid:row['token']}}
+    assert client.post(url,json=selection,headers=headers).status_code==409
+    response=client.post(alternative,json=selection,headers=headers)
+    assert response.status_code==202, response.text
+    job=response.json()['job_id']
+    assert client.post(alternative,json=selection,headers=headers).json()['job_id']==job
+    assert client.post(url,json=selection,headers=headers).status_code==409
+    saved=db.fetchone(cfg.db_path,'SELECT * FROM jobs WHERE id=?',(job,))
+    item,=json.loads(saved['payload'])['items']
+    assert saved['kind']=='transcribe' and item['audio_check_duration_only'] and item['language_hint']=='ru'
+    with db.connect(cfg.db_path) as conn:
+        current=conn.execute('SELECT * FROM tracks WHERE id=?',(tid,)).fetchone()
+        audio_check.recheck(conn,current,item)
+    def conflict(value):
+        value['candidates'][0]['match']['reasons'].append('title_differs')
+    update_analysis(cfg,tid,conflict)
+    with db.connect(cfg.db_path) as conn, pytest.raises(media.MediaError):
+        audio_check.recheck(conn,current,item)
+    assert not client.get(alternative).json()['items']
+    assert media.sha256_file(path)==sha
+
+
+@pytest.mark.parametrize('extra,delta', [(['artist_differs'],8), (['lyrics_out_of_range'],8), ([],None), ([],1)])
+def test_duration_mode_skips_other_mismatches_and_invalid_durations(report,extra,delta):
+    cfg,client,_,tid,_,_,url=report
+    def change(value):
+        value['candidates'][0]['match']={'state':'needs_review','reasons':['duration_differs',*extra],
+                                          'duration_delta':delta}
+    update_analysis(cfg,tid,change)
+    assert client.get(url+'?duration_only=true').json()['items']==[]

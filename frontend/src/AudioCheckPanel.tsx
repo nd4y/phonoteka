@@ -27,18 +27,24 @@ export function AudioCheckPanel({ id, onJobs }: { id: string; onJobs: () => void
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [queued, setQueued] = useState(0);
+  const [durationOnly, setDurationOnly] = useState(false);
   const pending = useRef<AbortController | null>(null);
   useEffect(() => () => pending.current?.abort(), []);
   const ready = page?.items.filter((item) => item.state === "ready" && item.token) || [];
   const compared = page?.items.filter((item) => item.lines !== undefined).length || 0;
 
-  async function request(offset: number, submit = false) {
+  async function request(offset: number, submit = false, otherDuration = durationOnly) {
     if (pending.current) return;
     const controller = new AbortController();
     pending.current = controller;
     setBusy(true);
     setError("");
-    const url = "/preparation/" + encodeURIComponent(id) + "/audio-check?offset=" + offset;
+    const url =
+      "/preparation/" +
+      encodeURIComponent(id) +
+      "/audio-check?offset=" +
+      offset +
+      (otherDuration ? "&duration_only=true" : "");
     try {
       if (submit) {
         const result = await api<{ total: number }>(url, {
@@ -51,7 +57,11 @@ export function AudioCheckPanel({ id, onJobs }: { id: string; onJobs: () => void
         if (!controller.signal.aborted) setQueued(result.total);
       }
       const checked = await api<Page>(url, { signal: controller.signal });
-      if (!controller.signal.aborted) setPage(checked);
+      if (!controller.signal.aborted) {
+        if (otherDuration !== durationOnly) setQueued(0);
+        setDurationOnly(otherDuration);
+        setPage(checked);
+      }
     } catch (e) {
       if (!controller.signal.aborted) setError(messageFor(e));
     } finally {
@@ -75,7 +85,7 @@ export function AudioCheckPanel({ id, onJobs }: { id: string; onJobs: () => void
             disabled={busy}
             onClick={() => void request(page.offset, true)}
           >
-            Запустить ASR для {ready.length} записей
+            Запустить проверку по аудио ({ready.length})
           </button>
         )}
       </div>
@@ -90,9 +100,22 @@ export function AudioCheckPanel({ id, onJobs }: { id: string; onJobs: () => void
       )}
       {page && (
         <>
+          <button
+            className="button subtle"
+            disabled={busy}
+            onClick={() => void request(0, false, !durationOnly)}
+          >
+            {durationOnly ? "Вернуться к основному списку" : "Проверить версии другой длительности"}
+          </button>
+          {durationOnly && (
+            <p>
+              Название и исполнитель совпали, длительность отличается. Это может быть другое
+              исполнение. Сверка не меняет файлы.
+            </p>
+          )}
           <p>
-            Сверены с аудио: {compared} из {page.items.length} на этой странице. Для {ready.length}{" "}
-            доступна новая расшифровка.
+            Сверены с аудио: {compared} из {page.items.length} на этой странице. Доступно для новой
+            расшифровки: {ready.length}.
           </p>
           <p>
             Фонотека проверяет строки по расшифровке текущей версии файла. Для русского языка на PC2

@@ -23,7 +23,7 @@ def digest(value):
     return hashlib.sha256(db.encode(value).encode()).hexdigest()
 
 
-def candidates(conn, row, analysis, retired):
+def candidates(conn, row, analysis, retired, *, duration_only=False):
     meta = json.loads(row['metadata'])
     if (row['id'] in retired or row['status'] in {'error', 'missing', 'conflict'}
             or meta.get('input_error') or meta.get('format') == 'cue' or meta.get('cue_album_image')
@@ -31,11 +31,18 @@ def candidates(conn, row, analysis, retired):
             or 'lrc' in field_policy.load(conn, row['id'])['locks']
             or lyrics_review.load(conn, row['id']).get('instrumental_confirmed')):
         return None
-    return sorted({v['lrc'] for v in analysis.get('candidates', []) if isinstance(v,dict)
+    options = [v for v in analysis.get('candidates', []) if isinstance(v,dict)
                    and v.get('provider') == 'lrclib' and isinstance(v.get('lrc'),str) and v['lrc']
                    and isinstance(v.get('match'),dict) and 'state' in v['match'] and 'instrumental_claim' in v
-                   and matching_timed_lyrics(v)
-                   and confirmed_fields.permitted(conn, v, ('cache', 'derived_analysis'))})
+                   and confirmed_fields.permitted(conn, v, ('cache', 'derived_analysis'))]
+    exact = sorted({v['lrc'] for v in options if matching_timed_lyrics(v)})
+    if not duration_only:
+        return exact
+    if exact:
+        return []
+    return sorted({v['lrc'] for v in options if v['instrumental_claim'] is False and v['match']['state'] == 'needs_review'
+                   and v['match'].get('reasons') == ['duration_differs']
+                   and confirmed_fields.number(v['match'].get('duration_delta')) and v['match']['duration_delta'] > 2})
 
 
 def language(texts):
@@ -76,7 +83,7 @@ def current_run(conn, settings, run_id, epoch):
     return run
 
 
-def page(conn, settings, run, offset, compare_words):
+def page(conn, settings, run, offset, compare_words, *, duration_only=False):
     report_prefix = 'fill_report:' + run['report_id'] + ':'
     scan_prefix = 'fill_page:' + run['scan_id'] + ':'
     hits = conn.execute("""SELECT json_extract(r.value,'$[0]') AS id,json_extract(r.value,'$[1]') AS file,
@@ -93,16 +100,19 @@ def page(conn, settings, run, offset, compare_words):
         row = conn.execute('SELECT * FROM tracks WHERE id=? AND is_current=1 AND sha256=?',
                            (hit['id'], hit['revision'])).fetchone()
         item = {'id': hit['id'], 'file': hit['file'], 'state': 'changed', 'variants': 0}
-        items.append(item)
+        if not duration_only:
+            items.append(item)
         if not row:
             continue
         saved = conn.execute('SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',
                              (row['id'], row['sha256'])).fetchone()
         analysis = json.loads(saved[0]) if saved else {}
-        texts = candidates(conn, row, analysis, retired)
+        texts = candidates(conn, row, analysis, retired, duration_only=duration_only)
         if not texts:
             item['state'] = 'blocked' if texts is None else 'no_match'
             continue
+        if duration_only:
+            items.append(item)
         hint = language(texts)
         item.update(variants=len(texts), language=hint)
         asr = analysis.get('asr') or {}
@@ -110,7 +120,7 @@ def page(conn, settings, run, offset, compare_words):
                 and (not hint or (asr.get('language') == 'ru' and asr.get('engine') == 'gigaam'))):
             item.update(compare(texts, asr, json.loads(row['metadata'])['duration']) if compare_words else {'state':'checked'})
             continue
-        token = digest([row['id'], row['sha256'], hint, texts])
+        token = selection_token(row, hint, texts, duration_only)
         receipt = review_queue.receipt_key('audio-check', token)
         if row['id'] in busy:
             item['state'] = 'busy'
@@ -123,19 +133,29 @@ def page(conn, settings, run, offset, compare_words):
     return {'items': items, 'offset': offset, 'next_offset': offset+PAGE_SIZE if len(hits)>PAGE_SIZE else None}
 
 
+def selection_token(row, hint, texts, duration_only):
+    evidence = [row['id'], row['sha256'], hint, texts]
+    if duration_only:
+        evidence.append('duration_differs')
+    return digest(evidence)
+
+
 def install(app, settings):
     @app.get('/api/preparation/{run_id}/audio-check')
-    def preview(request: Request, run_id: uuid.UUID, offset: int = Query(0, ge=0)):
+    def preview(request: Request, run_id: uuid.UUID, offset: int = Query(0, ge=0), duration_only: bool = False):
         active = security.require_session(request, settings, owner_only=True)
         with db.connect(settings.db_path) as conn:
             conn.execute('BEGIN')
             run = current_run(conn, settings, str(run_id), active['auth_epoch'])
-            return page(conn, settings, run, offset, True)
+            return page(conn, settings, run, offset, True, duration_only=duration_only)
 
     @app.post('/api/preparation/{run_id}/audio-check', status_code=202)
-    def start(request: Request, run_id: uuid.UUID, body: Selection, offset: int = Query(0, ge=0)):
+    def start(request: Request, run_id: uuid.UUID, body: Selection, offset: int = Query(0, ge=0), duration_only: bool = False):
         active = security.require_session(request, settings, True, owner_only=True)
-        key = str(uuid.uuid5(run_id, digest([offset, sorted(body.tokens.items())])))
+        request_key = [offset, sorted(body.tokens.items())]
+        if duration_only:
+            request_key.append('duration_differs')
+        key = str(uuid.uuid5(run_id, digest(request_key)))
         with db.transaction(settings.db_path) as conn:
             run = current_run(conn, settings, str(run_id), active['auth_epoch'])
             prior = conn.execute('SELECT total FROM jobs WHERE id=? AND auth_epoch=?', (key, run['epoch'])).fetchone()
@@ -144,7 +164,7 @@ def install(app, settings):
             if not settings.inference_url or not webhooks.can_accept(conn) or conn.execute(
                     "SELECT 1 FROM settings WHERE key='recovery_required' AND value='true'").fetchone():
                 raise security.error(409, 'preparation_unavailable', 'Проверьте доступность обработки в настройках.')
-            view = {v['id']:v for v in page(conn, settings, run, offset, False)['items'] if v['state']=='ready'}
+            view = {v['id']:v for v in page(conn, settings, run, offset, False, duration_only=duration_only)['items'] if v['state']=='ready'}
             if any(tid not in view or view[tid]['token'] != token for tid, token in body.tokens.items()):
                 raise security.error(409, 'review_plan_stale', 'Состояние записей изменилось. Обновите результат.')
             items = []
@@ -152,6 +172,8 @@ def install(app, settings):
                 row = conn.execute('SELECT * FROM tracks WHERE id=?', (tid,)).fetchone()
                 item = {'track_id':tid, 'sha256':row['sha256'], 'relative_path':row['relative_path'],
                         'language_hint':view[tid]['language'], 'audio_check_token':token}
+                if duration_only:
+                    item['audio_check_duration_only'] = True
                 review_queue.freeze_inference(conn, row, item, 'transcribe', {}, False)
                 items.append(item)
                 conn.execute('INSERT INTO settings VALUES(?,?)',
@@ -171,6 +193,8 @@ def install(app, settings):
 def recheck(conn, row, item):
     saved = conn.execute('SELECT payload FROM analyses WHERE track_id=? AND input_sha256=?',
                          (row['id'], row['sha256'])).fetchone()
-    texts = candidates(conn, row, json.loads(saved[0]) if saved else {}, catalog_sources.completed_sources(conn))
-    if not texts or digest([row['id'], row['sha256'], language(texts), texts]) != item['audio_check_token']:
+    duration_only = item.get('audio_check_duration_only') is True
+    texts = candidates(conn, row, json.loads(saved[0]) if saved else {}, catalog_sources.completed_sources(conn),
+                       duration_only=duration_only)
+    if not texts or selection_token(row, language(texts), texts, duration_only) != item['audio_check_token']:
         raise media.MediaError('review_plan_stale', 'Данные записи или разрешения источника изменились.')
