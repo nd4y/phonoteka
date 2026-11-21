@@ -1296,6 +1296,9 @@ class Worker:
             try:
                 if job['kind'] in {'transcribe','align'}:
                     result = await inference_client.process(self,job,item)
+                elif job['kind'] == 'collection_evidence':
+                    from . import collection_evidence
+                    result = await collection_evidence.check_item(self, job, item)
                 elif job['kind']=='youtube':result=await self.process_youtube(job,item)
                 else:
                     if job['kind'] in {'analyze','recognize'} and payload.get('trigger') == metadata_preparation.CONTRACT:

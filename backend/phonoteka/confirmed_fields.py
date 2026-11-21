@@ -245,6 +245,20 @@ def evaluate(settings, conn, row, active, *, busy=None, retired=None):
             and UUID.fullmatch(scalar(tags, 'musicbrainz_albumid')) and scalar(tags, 'album').strip()):
         art_references = tagged_artwork_recordings(conn, metadata, analysis)
         _, cover = album_and_cover(conn, metadata, candidates, art_references)
+    reviewed_cover = False
+    if (not blocked and not cover and identity_error in (None, 'recording_unconfirmed') and not metadata.get('has_art')
+            and any(c.get('provider') == 'coverartarchive' and c.get('cover') for c in candidates)):
+        from .edition_artwork import edition_id
+        edition = edition_id(conn, row, metadata, analysis)
+        exact = [c for c in candidates if edition and c.get('provider') == 'coverartarchive'
+                 and c.get('release_id') == edition and c.get('kind') == 'cover' and c.get('cover') and permitted(conn, c)]
+        try:
+            agreed = exact and len({field_policy.normalized_value('cover', c['cover']) for c in exact}) == 1
+        except media.MediaError:
+            agreed = False
+        if agreed:
+            cover = exact[0]
+            reviewed_cover = True
     chosen = {field: matches[0] if matches else None for field in ('title', 'artist')}
     chosen.update(album=album, cover=cover)
     payload = {'tags': {}, 'field_sources': {}, 'sources': [], 'source_priority_version': field_policy.sources(conn)['version']}
@@ -256,7 +270,7 @@ def evaluate(settings, conn, row, active, *, busy=None, retired=None):
         if present: continue
         c = chosen[field]
         reason = blocked[0] if blocked else identity_error
-        if field == 'cover' and art_references and cover:
+        if field == 'cover' and (art_references or reviewed_cover) and cover:
             reason = None
         if not reason and field in policy['locks']: reason = 'field_locked'
         if not reason and not c:

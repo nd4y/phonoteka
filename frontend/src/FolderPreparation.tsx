@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, messageFor, requestId } from "./api";
 import { AudioCheckPanel } from "./AudioCheckPanel";
+import { CollectionEvidence } from "./CollectionEvidence";
 import type { Summary } from "./types";
 
 type Run = {
@@ -424,6 +425,9 @@ export function FolderPreparation({
                   </p>
                 </div>
               )}
+            {run.id && run.autofill && run.state === "review" && (
+              <CollectionEvidence key={run.id} id={run.id} />
+            )}
             {run.supplements && (
               <a
                 href={"/api/preparation/" + encodeURIComponent(run.supplements) + "/report"}

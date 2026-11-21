@@ -1,5 +1,7 @@
 # From a folder to organized music
 
+In the completed folder report, start the missing-data check. The lyrics tab shows each reference time, audio anchor and signed difference. Instrumental checks compare the recording identity with explicit MusicBrainz performance information. The cover check searches for an approved front for the verified release in the library and Cover Art Archive. Use the confirmed-cover action to commit eligible files. Partial matches stay in the report.
+
 ## Catalog export
 
 In Ready files, **New snapshot: Artist / Album / Track folders** controls the next snapshot. It is enabled initially; deselect it to keep Ready paths. Existing snapshots retain their own layout until a new one succeeds. The API accepts `params.layout: "artist_album"` for `export_ready`; omitted values keep the compatible `source` layout.

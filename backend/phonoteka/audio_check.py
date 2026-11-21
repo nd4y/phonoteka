@@ -1,7 +1,6 @@
 """Compare timed candidates to independent ASR for one completed lyrics report."""
 import hashlib
 import json
-import statistics
 import uuid
 
 from fastapi import Query, Request
@@ -51,7 +50,8 @@ def language(texts):
     return 'ru' if texts and all(review_queue.language_hint(s) == 'ru' for s in texts) else None
 
 
-def compare(texts, asr, duration):
+def compare(texts, asr, duration, *, detailed=False):
+    from .timing_comparison import recover_unique_lines, summarize
     words = asr.get('words') or [w for seg in asr.get('segments', []) for w in seg.get('words', [])]
     if not words:
         return {'state': 'checked_empty'}
@@ -62,17 +62,21 @@ def compare(texts, asr, duration):
             result = alignment.align_lines(text, words, duration, unscored_words=unscored)
         except (ValueError, media.MediaError):
             continue
-        lines = [line for line in result['lines'] if line['text'].strip()]
-        delta = [abs(line['original_ms'] - line['start_ms']) for line in lines
-                 if line['state'] == 'anchored' and line['original_ms'] is not None]
-        if lines:
-            choices.append((len(delta) / len(lines), -(statistics.median(delta) if delta else float('inf')),
-                            len(delta), len(lines)))
+        lines = result['lines']
+        if detailed and not result['complete']:
+            lines = recover_unique_lines(lines, words, duration, unscored)
+        summary = summarize(lines)
+        summary['recovered'] = sum(bool(line.get('recovered')) for line in lines)
+        if summary['lines']:
+            choices.append(summary)
     if not choices:
         return {'state': 'blocked'}
-    coverage, negative_median, anchored, lines = max(choices)
-    return {'state': 'matched' if coverage == 1 else 'partial', 'anchored': anchored,
-            'lines': lines, 'median_ms': -negative_median if anchored else None}
+    best = max(choices, key=lambda s: (s['coverage'], -(s['median_ms'] if s['anchored'] else float('inf')),
+                                       s['anchored']))
+    state = 'matched' if best['coverage'] == 1 else 'partial'
+    if detailed:
+        return {**best, 'state': state, 'variants': len(choices)}
+    return {'state': state, 'anchored': best['anchored'], 'lines': best['lines'], 'median_ms': best['median_ms']}
 
 
 def current_run(conn, settings, run_id, epoch):

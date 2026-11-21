@@ -88,7 +88,13 @@ def missing_fields(meta):
     tags = meta.get('tags', {})
     return [field for field in FIELDS if not (
         meta.get('has_art') if field == 'cover' else
-        meta.get('lrc') if field == 'synced_lyrics' else scalar(tags, field).strip())]
+        (meta.get('lrc') or verified_instrumental(meta)) if field == 'synced_lyrics' else scalar(tags, field).strip())]
+
+
+def verified_instrumental(meta):
+    proof = meta.get('instrumental_evidence') or {}
+    return (isinstance(proof, dict) and proof.get('profile') == 'collection-evidence-v1' and bool(meta.get('sha256'))
+            and proof.get('file_sha256') == meta['sha256'] and not meta.get('lrc') and not meta.get('lyrics'))
 
 
 def matches_music_gap(metadata, revision, filter_name):
