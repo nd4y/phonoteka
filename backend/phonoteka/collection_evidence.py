@@ -1,5 +1,6 @@
 """Revision-bound checks for the saved folder manifest. No audio is sent to a catalog."""
 import json
+import time
 import uuid
 
 from fastapi import Query, Request
@@ -7,11 +8,67 @@ from fastapi import Query, Request
 from . import (audio_check, automatic_quality, catalog_sources, confirmed_fields as fields, db,
                enrichment_gaps, field_policy, lyrics_review, media, preparation, provider_policy,
                security, webhooks)
-from .providers import Providers, ProviderError, embedded_recording_id, musicbrainz_candidate, normalized, scalar
+from .providers import Providers, ProviderError, embedded_recording_id, lyric_candidate, musicbrainz_candidate, normalized, scalar
 
 KIND = 'collection_evidence'
 PROFILE = 'collection-evidence-v1'
 INSTRUMENTAL = 'c031ed4f-c9bb-4394-8cf5-e8ce4db512ae'
+RECHECKABLE = """state='succeeded' AND ((
+    json_extract(result,'$.outcome')='source_unavailable' AND
+    json_extract(result,'$.code') IN ('provider_cooldown','rate_limited'))
+    OR (json_extract(result,'$.group')='instrumental' AND json_extract(result,'$.outcome')='source_restricted'))
+    AND EXISTS(SELECT 1 FROM tracks t WHERE t.id=job_items.item_key AND t.is_current=1
+    AND t.sha256=json_extract(job_items.result,'$.revision'))"""
+
+
+def renewable_ids(options):
+    ids = set()
+    for c in options:
+        usage = c.get('usage') or {}
+        key = str(c.get('id','')).removeprefix('lrclib:')
+        if (key.isascii() and key.isdecimal() and len(key)<=12 and usage.get('provider')=='lrclib'
+                and usage.get('allow_cache') and usage.get('allow_derived_analysis') and usage.get('cache_ttl',0)>0):
+            ids.add(int(key))
+    return sorted(ids)
+
+
+def expired_timing(analysis):
+    if not (analysis.get('alignment_usage') or analysis.get('alignment')) or not analysis.get('asr'):
+        return []
+    return renewable_ids(c for c in analysis.get('candidates',[]) if c.get('provider')=='lrclib'
+        and c.get('transient_only') and c.get('instrumental_claim') is False
+        and (c.get('match') or {}).get('state')=='matching_metadata')
+
+
+def retry_items(conn, identity):
+    rows = {r[0] for r in conn.execute('SELECT item_key FROM job_items WHERE job_id=? AND '+RECHECKABLE,(identity,))}
+    version = conn.execute("SELECT json_extract(payload,'$.evidence_version') FROM jobs WHERE id=?",(identity,)).fetchone()
+    if version and version[0]==2:
+        return sorted(rows)
+    # Older reports skipped temporarily redacted references. Revisit those rows using
+    # their exact original input revision and still-linked ASR and catalog receipts.
+    for r in conn.execute("""SELECT i.item_key,t.id,t.status,t.sha256,t.metadata,a.payload FROM job_items i JOIN tracks t ON t.id=i.item_key
+            AND t.is_current=1 AND t.sha256=json_extract(i.result,'$.revision') JOIN analyses a ON a.track_id=t.id
+            AND a.input_sha256=t.sha256 WHERE i.job_id=? AND i.state='succeeded' AND
+            json_extract(i.result,'$.group')='skipped' AND json_extract(a.payload,'$.asr') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM json_each(a.payload,'$.candidates') c WHERE
+            json_extract(c.value,'$.transient_only')=1 AND json_extract(c.value,'$.instrumental_claim')=0
+            AND json_extract(c.value,'$.match.state')='matching_metadata')""",(identity,)):
+        analysis = json.loads(r['payload'])
+        if expired_timing(analysis) and scope(conn,r,json.loads(r['metadata']),analysis)=='timing':
+            rows.add(r['item_key'])
+    for r in conn.execute("""SELECT i.item_key,t.metadata,a.payload FROM job_items i JOIN tracks t ON i.item_key=t.id
+            AND t.is_current=1 AND t.sha256=json_extract(i.result,'$.revision') JOIN analyses a ON a.track_id=t.id
+            AND a.input_sha256=t.sha256 WHERE i.job_id=? AND i.state='succeeded'
+            AND json_extract(i.result,'$.outcome') IN ('identity_unknown','edition_unconfirmed')
+            AND EXISTS (SELECT 1 FROM json_each(a.payload,'$.candidates') c WHERE json_extract(c.value,'$.transient_only')=1
+            AND json_extract(c.value,'$.identification')='audio_fingerprint' AND json_extract(c.value,'$.match.state')='fingerprint_match'
+            AND json_extract(c.value,'$.tags') IS NULL)""",(identity,)):
+        meta = json.loads(r['metadata'])
+        if embedded_recording_id(meta) and bound_recording(conn,meta,json.loads(r['payload'])):
+            if meta.get('has_art') or scalar(meta.get('tags',{}),'album'):
+                rows.add(r['item_key'])
+    return sorted(rows)
 
 
 def review_id(run_id):
@@ -31,7 +88,7 @@ def scope(conn, row, meta, analysis):
         return None
     options = [c for c in analysis.get('candidates', []) if c.get('provider') == 'lrclib']
     exact = [c for c in options if (c.get('match') or {}).get('state') == 'matching_metadata']
-    if any(c.get('lrc') for c in exact):
+    if any(c.get('lrc') for c in exact) or expired_timing(analysis):
         return 'timing'
     if (exact and all(c.get('instrumental_claim') is True for c in exact)
             and not any(c.get('lrc') or c.get('plain_lyrics') for c in options)):
@@ -51,8 +108,11 @@ def bound_recording(conn, metadata, analysis):
     for candidate in analysis.get('candidates', []):
         if candidate.get('identification') != 'audio_fingerprint' or (candidate.get('match') or {}).get('state') != 'fingerprint_match':
             continue
-        if any(normalized(scalar(metadata.get('tags', {}), k)) != normalized(scalar(candidate.get('tags', {}), k))
-               for k in ('title', 'artist')):
+        # Cleanup removes the entire tags object on expiry. Missing text supplies
+        # no comparison. A surviving conflicting ID still vetoes the embedded ID.
+        redact = embedded and candidate.get('transient_only') and 'tags' not in candidate
+        if not redact and any(normalized(scalar(metadata.get('tags', {}), k)) != normalized(scalar(candidate.get('tags', {}), k))
+                              for k in ('title', 'artist')):
             return None
         if candidate.get('provider') == 'acoustid' and candidate.get('recording_id') and ids and candidate['recording_id'] not in ids:
             return None
@@ -91,6 +151,21 @@ def read_input(conn, item):
     return row, json.loads(row['metadata']), json.loads(saved['payload']) if saved else {}, saved
 
 
+def instrumental_claims(analysis):
+    return [c for c in analysis.get('candidates', []) if c.get('provider') == 'lrclib'
+            and c.get('instrumental_claim') is True and (c.get('match') or {}).get('state') == 'matching_metadata']
+
+
+def source_failure(worker, job, result, exc):
+    result.update(outcome='source_unavailable', code=exc.code)
+    if exc.code in ('provider_cooldown','rate_limited'):
+        breaker = json.loads(db.setting(worker.settings.db_path,'provider_breaker:'+exc.provider,'{}'))
+        due = max(time.time()+10, breaker.get('until',time.time()+60))
+        if due < json.loads(job['payload']).get('evidence_deadline',0):
+            result['retry_at'] = due
+    return result
+
+
 def inspect_input(settings, item):
     from .edition_artwork import edition_id
     with db.connect(settings.db_path) as conn:
@@ -106,6 +181,9 @@ def inspect_input(settings, item):
             asr = analysis.get('asr') or {}
             if not texts:
                 result['outcome'] = 'reference_unavailable'
+                ids = expired_timing(analysis)
+                if (ids and texts is not None and automatic_quality.inference_bound(conn,row,asr)):
+                    return result, ids, {'meta':meta}
             elif not automatic_quality.inference_bound(conn, row, asr) or (audio_check.language(texts) == 'ru' and
                     (asr.get('engine'), asr.get('language')) != ('gigaam', 'ru')):
                 result['outcome'] = 'asr_unavailable'
@@ -129,7 +207,37 @@ def inspect_input(settings, item):
         ref = bound_recording(conn, meta, analysis)
         if not ref:
             result['outcome'] = 'identity_unknown'
-        return result, ref, meta
+        claims = instrumental_claims(analysis)
+        refresh = []
+        if not any(fields.permitted(conn,c,('cache','derived_analysis')) for c in claims):
+            # Renew only an expired receipt with an originally permitted use.
+            refresh = renewable_ids(claims)
+        return result, ref, {'meta':meta,'refresh':refresh}
+
+
+async def fresh_lyric(worker, key, meta, authorize):
+    provider_policy.check(worker.settings,'lrclib','lyrics','derived_analysis')
+    provider_policy.check(worker.settings,'lrclib','lyrics','cache')
+    authorize()
+    doc = await worker.providers.get('lrclib','https://lrclib.net/api/get/'+str(key))
+    authorize()
+    if not isinstance(doc,dict) or doc.get('id') != key or type(doc.get('instrumental')) is not bool:
+        return None
+    candidate = lyric_candidate(doc,{k:scalar(meta['tags'],k) for k in ('title','artist')},meta['duration'])
+    return candidate if candidate and candidate['match']['state']=='matching_metadata' else None
+
+
+def compare_fresh(settings,item,texts):
+    with db.connect(settings.db_path) as conn:
+        row, meta, analysis, _ = read_input(conn,item)
+        if scope(conn,row,meta,analysis)!='timing' or audio_check.candidates(conn,row,analysis,set()) is None:
+            return {'outcome':'evidence_changed'}
+        asr = analysis.get('asr') or {}
+        if (not automatic_quality.inference_bound(conn,row,asr) or
+                (audio_check.language(texts)=='ru' and (asr.get('engine'),asr.get('language'))!=('gigaam','ru'))):
+            return {'outcome':'asr_unavailable'}
+        detail = audio_check.compare(texts,asr,meta['duration'],detailed=True)
+        return {'outcome':detail.get('classification',detail['state']),'timing':detail}
 
 
 async def check_item(worker, job, item):
@@ -157,8 +265,7 @@ async def check_item(worker, job, item):
             provider_policy.check(worker.settings,'musicbrainz','metadata','derived_analysis')
             proof = await discover(worker.providers, identity, context['meta'], authorize)
         except ProviderError as exc:
-            result.update(outcome='source_unavailable',code=exc.code)
-            return result
+            return source_failure(worker, job, result, exc)
         if not proof:
             return result
         identity = proof['release_id']
@@ -179,14 +286,31 @@ async def check_item(worker, job, item):
         result['outcome'] = 'source_disabled'
         return result
     try:
-        if result['group'] == 'instrumental':
+        if result['group'] == 'timing':
+            from .providers import matching_timed_lyrics
+            texts = set()
+            for key in identity:
+                c = await fresh_lyric(worker,key,context['meta'],authorize)
+                if c and matching_timed_lyrics(c):
+                    texts.add(c['lrc'])
+            if texts:
+                result.update(await worker.io(compare_fresh,worker.settings,item,sorted(texts)))
+        elif result['group'] == 'instrumental':
             provider_policy.check(worker.settings, 'musicbrainz', 'metadata', 'derived_analysis')
             url = 'https://' + worker.settings.musicbrainz_host + '/ws/2/recording/' + identity
             doc = await worker.providers.get('musicbrainz', url, {'fmt': 'json', 'inc': 'artist-credits+artist-rels+work-rels'})
             authorize()
-            result.update(outcome=performance(doc, identity, context), recording_id=identity)
+            meta = context['meta']
+            result.update(outcome=performance(doc, identity, meta), recording_id=identity)
             if result['outcome'] == 'instrumental_confirmed':
-                result['outcome'] = await worker.io(save_instrumental, worker.settings, item, identity, authorize)
+                fresh = None
+                if context['refresh']:
+                    key = context['refresh'][0]
+                    fresh = await fresh_lyric(worker,key,meta,authorize)
+                    if not fresh or fresh['instrumental_claim'] is not True or fresh['plain_lyrics'] or fresh['lrc']:
+                        result['outcome'] = 'evidence_changed'
+                        return result
+                result['outcome'] = await worker.io(save_instrumental, worker.settings, item, identity, authorize, fresh)
         else:
             cover = await worker.providers.cover(identity)
             authorize()
@@ -194,11 +318,13 @@ async def check_item(worker, job, item):
     except (ProviderError, media.MediaError) as exc:
         if exc.code in {'cancelled', 'conflict', 'authorization_revoked', 'authorization_epoch_changed'}:
             raise
-        result.update(outcome='source_unavailable', code=exc.code)
+        if isinstance(exc,ProviderError):
+            return source_failure(worker,job,result,exc)
+        result.update(outcome='source_restricted', code=exc.code)
     return result
 
 
-def save_instrumental(settings, item, identity, authorize):
+def save_instrumental(settings, item, identity, authorize, fresh=None):
     authorize()
     with db.transaction(settings.db_path) as conn:
         row, meta, analysis, _ = read_input(conn, item)
@@ -208,12 +334,14 @@ def save_instrumental(settings, item, identity, authorize):
                 or 'lrc' in field_policy.load(conn, row['id'])['locks']):
             return 'evidence_changed'
         provider_policy.check(settings,'musicbrainz','metadata','cache')
-        claims = [c for c in analysis.get('candidates', []) if c.get('provider') == 'lrclib'
-                  and (c.get('match') or {}).get('state') == 'matching_metadata']
-        if not claims or not all(fields.permitted(conn,c,('cache','derived_analysis')) for c in claims):
+        claims = instrumental_claims(analysis)
+        if fresh and fresh['id'] in {c['id'] for c in claims}:
+            claims = [*claims,{**fresh,'usage':provider_policy.candidate_usage(conn,fresh)}]
+        allowed = next((c for c in claims if fields.permitted(conn,c,('cache','derived_analysis'))), None)
+        if not allowed:
             return 'source_restricted'
         meta['instrumental_evidence'] = {'profile':PROFILE,'file_sha256':row['sha256'],'recording_id':identity,
-                                        'sources':['lrclib','musicbrainz'],'checked_at':db.utcnow()}
+                                        'sources':['lrclib','musicbrainz'],'lyrics_source_id':allowed['id'],'checked_at':db.utcnow()}
         conn.execute('UPDATE tracks SET metadata=? WHERE id=? AND sha256=? AND is_current=1',
                      (db.encode(meta),row['id'],row['sha256']))
     return 'instrumental_confirmed'
@@ -289,9 +417,42 @@ def install(app, settings):
             stamp = db.utcnow()
             conn.execute("""INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch)
                 VALUES(?,?,'queued','pending',?,?,?,?,?)""", (identity,KIND,db.encode({'items':items,'run_id':run['id'],
-                'root':run['root'],'params':{}}),len(items),stamp,stamp,run['epoch']))
+                'root':run['root'],'params':{},'evidence_version':2,'evidence_deadline':time.time()+3600}),len(items),stamp,stamp,run['epoch']))
             db.event(conn,'job_created',{'job_id':identity,'kind':KIND})
         return {'job_id': identity}
+
+    @app.post('/api/preparation/{run_id}/evidence/retry', status_code=202)
+    def retry(run_id: uuid.UUID, request: Request, expected_round: int = Query(ge=0)):
+        from .worker import root_identity
+        active = security.require_session(request, settings, True, owner_only=True)
+        identity = review_id(run_id)
+        with db.transaction(settings.db_path) as conn:
+            run = preparation.load(conn)
+            job = conn.execute('SELECT * FROM jobs WHERE id=? AND kind=? AND auth_epoch=?',
+                               (identity,KIND,active['auth_epoch'])).fetchone()
+            if (not job or run.get('id')!=str(run_id) or run.get('state')!='review'
+                    or run.get('root')!=root_identity(settings.work_root) or run.get('epoch')!=active['auth_epoch']):
+                raise security.error(409,'preparation_stale','Обновите отчёт папки.')
+            payload = json.loads(job['payload'])
+            current_round = payload.get('review_round',0)
+            if current_round == expected_round+1:
+                return {'job_id':identity,'round':current_round}
+            if (current_round != expected_round or job['cancel_requested'] or payload.get('pause_requested')
+                    or job['state'] not in ('succeeded','completed_with_errors') or not webhooks.can_accept(conn)):
+                raise security.error(409,'preparation_unavailable','Обновите состояние проверки.')
+            # Keep the frozen inputs, previous result and every conclusive row.
+            ids = retry_items(conn,identity)
+            count = len(ids)
+            if not count:
+                raise security.error(409,'no_candidates','Нет доступных повторных проверок.')
+            conn.executemany("UPDATE job_items SET state='deferred' WHERE job_id=? AND item_key=?",
+                             ((identity,k) for k in ids))
+            payload.update(review_round=current_round+1,evidence_version=2,evidence_deadline=time.time()+3600)
+            payload.pop('retry_at',None)
+            conn.execute("""UPDATE jobs SET state='queued',stage='pending',completed=completed-?,updated_at=?,
+                            payload=?,error=NULL WHERE id=?""",(count,db.utcnow(),db.encode(payload),identity))
+            db.event(conn,'job_resumed',{'job_id':identity,'kind':KIND,'count':count,'round':current_round+1})
+        return {'job_id':identity,'round':current_round+1}
 
     @app.get('/api/preparation/{run_id}/evidence')
     def report(run_id: uuid.UUID, request: Request, group: str = Query('timing', pattern='^(timing|cover|instrumental)$'),
@@ -300,7 +461,8 @@ def install(app, settings):
         identity = review_id(run_id)
         with db.connect(settings.db_path) as conn:
             conn.execute('BEGIN')
-            job = conn.execute('SELECT state,total,completed,failed FROM jobs WHERE id=? AND auth_epoch=? AND kind=?',
+            job = conn.execute("""SELECT state,stage,total,completed,failed,COALESCE(json_extract(payload,'$.review_round'),0) AS round,
+                                  json_extract(payload,'$.retry_at') AS retry_at FROM jobs WHERE id=? AND auth_epoch=? AND kind=?""",
                                (identity,active['auth_epoch'],KIND)).fetchone()
             if not job:
                 return {'state':'idle', 'items':[], 'counts':{}}
@@ -314,7 +476,10 @@ def install(app, settings):
                     WHERE i.job_id=? AND i.state='succeeded' AND json_extract(i.result,'$.group')=?
                     ORDER BY t.relative_path,i.item_key LIMIT 20 OFFSET ?""",(identity,group,offset)):
                 items.append({'track_id':r['item_key'],'file':r['relative_path'], **json.loads(r['result'])})
-            return {**dict(job),'job_id':identity,'counts':counts,'items':items}
+            retryable = 0
+            if job['state'] in ('succeeded','completed_with_errors'):
+                retryable = len(retry_items(conn,identity))
+            return {**dict(job),'job_id':identity,'counts':counts,'items':items,'retryable':retryable}
 
     @app.get('/api/preparation/{run_id}/evidence/covers')
     def applicable(run_id: uuid.UUID, request: Request):
