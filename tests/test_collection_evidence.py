@@ -108,3 +108,14 @@ def test_renewal_requires_an_existing_reference_and_original_permission():
     assert not evidence.expired_timing({**a,'alignment_usage':[]})
     assert not evidence.expired_timing({**a,'candidates':[{**c,'usage':{**usage,'allow_cache':False}}]})
     assert not evidence.expired_timing({**a,'candidates':[{**c,'instrumental_claim':True}]})
+
+
+def test_redacted_fingerprint_can_neither_identify_nor_contradict_on_missing_tags(monkeypatch):
+    monkeypatch.setattr(evidence.fields,'recording',lambda *args:([],[],'recording_unconfirmed'))
+    meta={'duration':120,'tags':{'title':'Song','artist':'Artist','musicbrainz_trackid':ED}}
+    c={'identification':'audio_fingerprint','provider':'acoustid','recording_id':ED,
+       'match':{'state':'fingerprint_match'},'transient_only':True}
+    assert evidence.bound_recording(None,meta,{'candidates':[c]})==ED
+    assert evidence.bound_recording(None,{'duration':120,'tags':{'title':'Song','artist':'Artist'}},{'candidates':[c]}) is None
+    assert evidence.bound_recording(None,meta,{'candidates':[{**c,'recording_id':'9eb20c16-5678-4770-988b-9f70e69dba13'}]}) is None
+    assert evidence.bound_recording(None,meta,{'candidates':[{**c,'tags':{'artist':'Different','title':'Song'}}]}) is None

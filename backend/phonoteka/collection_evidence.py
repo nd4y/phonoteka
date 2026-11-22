@@ -42,6 +42,9 @@ def expired_timing(analysis):
 
 def retry_items(conn, identity):
     rows = {r[0] for r in conn.execute('SELECT item_key FROM job_items WHERE job_id=? AND '+RECHECKABLE,(identity,))}
+    version = conn.execute("SELECT json_extract(payload,'$.evidence_version') FROM jobs WHERE id=?",(identity,)).fetchone()
+    if version and version[0]==2:
+        return sorted(rows)
     # Older reports skipped temporarily redacted references. Revisit those rows using
     # their exact original input revision and still-linked ASR and catalog receipts.
     for r in conn.execute("""SELECT i.item_key,t.id,t.status,t.sha256,t.metadata,a.payload FROM job_items i JOIN tracks t ON t.id=i.item_key
@@ -54,6 +57,17 @@ def retry_items(conn, identity):
         analysis = json.loads(r['payload'])
         if expired_timing(analysis) and scope(conn,r,json.loads(r['metadata']),analysis)=='timing':
             rows.add(r['item_key'])
+    for r in conn.execute("""SELECT i.item_key,t.metadata,a.payload FROM job_items i JOIN tracks t ON i.item_key=t.id
+            AND t.is_current=1 AND t.sha256=json_extract(i.result,'$.revision') JOIN analyses a ON a.track_id=t.id
+            AND a.input_sha256=t.sha256 WHERE i.job_id=? AND i.state='succeeded'
+            AND json_extract(i.result,'$.outcome') IN ('identity_unknown','edition_unconfirmed')
+            AND EXISTS (SELECT 1 FROM json_each(a.payload,'$.candidates') c WHERE json_extract(c.value,'$.transient_only')=1
+            AND json_extract(c.value,'$.identification')='audio_fingerprint' AND json_extract(c.value,'$.match.state')='fingerprint_match'
+            AND json_extract(c.value,'$.tags') IS NULL)""",(identity,)):
+        meta = json.loads(r['metadata'])
+        if embedded_recording_id(meta) and bound_recording(conn,meta,json.loads(r['payload'])):
+            if meta.get('has_art') or scalar(meta.get('tags',{}),'album'):
+                rows.add(r['item_key'])
     return sorted(rows)
 
 
@@ -94,8 +108,11 @@ def bound_recording(conn, metadata, analysis):
     for candidate in analysis.get('candidates', []):
         if candidate.get('identification') != 'audio_fingerprint' or (candidate.get('match') or {}).get('state') != 'fingerprint_match':
             continue
-        if any(normalized(scalar(metadata.get('tags', {}), k)) != normalized(scalar(candidate.get('tags', {}), k))
-               for k in ('title', 'artist')):
+        # Cleanup removes the entire tags object on expiry. Missing text supplies
+        # no comparison. A surviving conflicting ID still vetoes the embedded ID.
+        redact = embedded and candidate.get('transient_only') and 'tags' not in candidate
+        if not redact and any(normalized(scalar(metadata.get('tags', {}), k)) != normalized(scalar(candidate.get('tags', {}), k))
+                              for k in ('title', 'artist')):
             return None
         if candidate.get('provider') == 'acoustid' and candidate.get('recording_id') and ids and candidate['recording_id'] not in ids:
             return None
@@ -400,7 +417,7 @@ def install(app, settings):
             stamp = db.utcnow()
             conn.execute("""INSERT INTO jobs(id,kind,state,stage,payload,total,created_at,updated_at,auth_epoch)
                 VALUES(?,?,'queued','pending',?,?,?,?,?)""", (identity,KIND,db.encode({'items':items,'run_id':run['id'],
-                'root':run['root'],'params':{},'evidence_deadline':time.time()+3600}),len(items),stamp,stamp,run['epoch']))
+                'root':run['root'],'params':{},'evidence_version':2,'evidence_deadline':time.time()+3600}),len(items),stamp,stamp,run['epoch']))
             db.event(conn,'job_created',{'job_id':identity,'kind':KIND})
         return {'job_id': identity}
 
@@ -430,7 +447,7 @@ def install(app, settings):
                 raise security.error(409,'no_candidates','Нет доступных повторных проверок.')
             conn.executemany("UPDATE job_items SET state='deferred' WHERE job_id=? AND item_key=?",
                              ((identity,k) for k in ids))
-            payload.update(review_round=current_round+1,evidence_deadline=time.time()+3600)
+            payload.update(review_round=current_round+1,evidence_version=2,evidence_deadline=time.time()+3600)
             payload.pop('retry_at',None)
             conn.execute("""UPDATE jobs SET state='queued',stage='pending',completed=completed-?,updated_at=?,
                             payload=?,error=NULL WHERE id=?""",(count,db.utcnow(),db.encode(payload),identity))
